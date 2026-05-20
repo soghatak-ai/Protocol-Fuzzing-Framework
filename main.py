@@ -1,81 +1,94 @@
-# fuzzer_framework/main.py
 import os
 import time
 import random
-from corpus.seed_generator import generate_basic_query
+import subprocess
+import sys
 from protocol.dns import DNSMessage, DNSHeader, DNSQuestion
 from engine.mutator import SmartDNSMutator, ByteMutator
 from transport.network import DNSTransport
 from monitor.oracle import ServerOracle
 
-def save_crash(payload: bytes, iteration: int):
-    """Saves the packet that crashed the server to disk."""
+def save_crash(payload: bytes, iteration: int, stderr_data: bytes):
     timestamp = int(time.time())
-    filename = f"crashes/crash_iter_{iteration}_{timestamp}.pcapng" # We'll save raw bytes for now
+    os.makedirs("crashes", exist_ok=True)
     
+    # Save the input binary that triggered the failure
     with open(f"crashes/crash_iter_{iteration}_{timestamp}.bin", "wb") as f:
         f.write(payload)
+    
+    # Save the diagnostic sanitizer track trace
+    with open(f"crashes/crash_report_{iteration}_{timestamp}.txt", "w") as f:
+        f.write(stderr_data.decode('utf-8', errors='ignore'))
+        
     print(f"\n[!!!] CRASH DETECTED [!!!]")
-    print(f"[+] Saved fatal payload to crashes/crash_iter_{iteration}_{timestamp}.bin")
+    print(f"[+] Saved reproducing payload and diagnostic report to crashes/")
 
-def run_fuzzer(target_host: str, target_port: int, protocol: str = "UDP"):
-    print(f"[*] Starting Protocol Fuzzer against {target_host}:{target_port} ({protocol})")
+def run_fuzzer(target_host: str, target_port: int, build_dir: str):
+    print(f"[*] Initializing Target Application under supervision...")
     
-    # 1. Initialize Transport and Oracle
-    transport = DNSTransport(target_host, target_port, timeout=3.0)
-    oracle = ServerOracle(target_host, target_port, protocol)
+    # Spawn the process under AddressSanitizer monitoring
+    # -q runs quiet mode to prevent output flooding your terminal
+    cmd = ["sudo", "./src/snort", "-c", "../lua/snort.lua", "-i", "en0", "-q"]
     
-    # 2. Verify target is alive before we start attacking
-    print("[*] Performing initial health check...")
+    target_process = subprocess.Popen(
+        cmd,
+        cwd=build_dir,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    
+    # Allow the initialization routines and interface bindings to complete
+    time.sleep(2)
+    
+    transport = DNSTransport(target_host, target_port)
+    oracle = ServerOracle(target_process)
+    
     if not oracle.check_health():
-        print("[-] Target is already dead or unreachable. Aborting.")
+        print("[-] Target failed to initialize. Extracting diagnostic dump...")
+        
+        # Capture whatever Snort printed right before it closed
+        stdout, stderr = target_process.communicate()
+        print("\n=== SNORT STDOUT ===")
+        print(stdout.decode('utf-8', errors='ignore'))
+        print("\n=== SNORT STDERR ===")
+        print(stderr.decode('utf-8', errors='ignore'))
         return
-    print("[+] Target is alive. Commencing attack loop!\n")
+    print("[+] Supervision active. Commencing loop!\n")
 
-    # 3. Create our clean Seed Message
     seed_question = DNSQuestion(qname="example.com")
     seed_message = DNSMessage(header=DNSHeader(), questions=[seed_question])
 
-    # 4. THE INFINITE FUZZING LOOP
     iteration = 0
     try:
         while True:
             iteration += 1
             if iteration % 100 == 0:
-                print(f"[*] Fuzzing iteration {iteration}...")
+                print(f"[*] Fuzzing iteration {iteration}... (Target Status: Operational)")
 
-            # --- A. MUTATE ---
-            # Apply Smart Structure Mutations
             mutator = SmartDNSMutator(seed_message)
             mutated_msg = mutator.mutate()
             mutated_bytes = mutated_msg.to_bytes()
 
-            # Randomly apply Byte-Level bit flips 20% of the time
             if random.random() < 0.2:
                 mutated_bytes = ByteMutator.bit_flip(mutated_bytes)
 
-            # --- B. DELIVER ---
-            if protocol == "UDP":
-                transport.send_udp(mutated_bytes)
-            else:
-                transport.send_tcp(mutated_bytes)
+            transport.send_udp(mutated_bytes)
+            time.sleep(0.001)
 
-            # Give the server a tiny fraction of a second to process (prevents false network floods)
-            time.sleep(0.01)
-
-            # --- C. MONITOR ---
-            # Ask the Oracle if the server survived the last packet
+            # The Oracle now inspects the process block directly
             if not oracle.check_health():
-                # --- D. SAVE CRASH ---
-                save_crash(mutated_bytes, iteration)
-                break # Stop the fuzzer so we don't overwrite or lose context
+                # Read the crash trace out of stderr
+                _, stderr = target_process.communicate()
+                save_crash(mutated_bytes, iteration, stderr)
+                break
 
     except KeyboardInterrupt:
-        print(f"\n[*] Fuzzer stopped manually by user after {iteration} iterations.")
+        print(f"\n[*] Fuzzer stopped manually. Terminating target safely...")
+        target_process.terminate()
 
 if __name__ == "__main__":
-    TARGET_IP = "127.0.0.1"
-    TARGET_PORT = 8053
-    PROTOCOL = "UDP" 
+    TARGET_IP = "224.0.0.123"
+    TARGET_PORT = 53  # Standard service port mapped to the parsing engine
+    SNORT_BUILD = "/Users/soghatak/snort3/build"
 
-    run_fuzzer(TARGET_IP, TARGET_PORT, PROTOCOL)
+    run_fuzzer(TARGET_IP, TARGET_PORT, SNORT_BUILD)

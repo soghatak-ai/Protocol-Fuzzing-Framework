@@ -1,4 +1,4 @@
-# fuzzer_framework/protocol/dns.py
+
 import struct
 import random
 
@@ -15,25 +15,20 @@ def encode_domain_name(domain: str) -> bytes:
 class DNSHeader:
     def __init__(self, transaction_id=None):
         self.transaction_id = transaction_id if transaction_id is not None else random.randint(0, 65535)
-        
-        # Breakdown of the 16-bit flags field
-        self.qr = 0          # Query (0) or Response (1)
-        self.opcode = 0      # 0 = Standard Query, 1-15 = Other/Reserved
-        self.aa = 0          # Authoritative Answer
-        self.tc = 0          # Truncated
-        self.rd = 1          # Recursion Desired (Default 1 for standard queries)
-        self.ra = 0          # Recursion Available
-        self.z = 0           # Reserved (Must be 0)
-        self.rcode = 0       # Response Code (0 = No Error, 1-15 = Errors)
-
-        # Section Counts
+        self.qr = 0
+        self.opcode = 0
+        self.aa = 0
+        self.tc = 0
+        self.rd = 1
+        self.ra = 0
+        self.z = 0
+        self.rcode = 0
         self.qdcount = 1
         self.ancount = 0
         self.nscount = 0
         self.arcount = 0
 
     def assemble_flags(self) -> int:
-        """Packs the individual bits into a single 16-bit integer."""
         flags = (self.qr << 15) | (self.opcode << 11) | (self.aa << 10) | \
                 (self.tc << 9) | (self.rd << 8) | (self.ra << 7) | \
                 (self.z << 4) | self.rcode
@@ -60,13 +55,12 @@ class DNSAnswer:
         self.name = name       
         self.rtype = rtype       
         self.rclass = rclass     
-        self.ttl = ttl           # 32-bit Time to Live
-        self.rdata = rdata       # Raw bytes of the answer (e.g., an IP address)
-        self.rdlength = len(rdata) # Automatically calculated length
+        self.ttl = ttl           
+        self.rdata = rdata
+        self.rdlength = len(rdata) 
 
     def to_bytes(self) -> bytes:
         encoded_name = encode_domain_name(self.name)
-        # Pack Type (2), Class (2), TTL (4), and Length (2)
         metadata = struct.pack("!HHIH", self.rtype, self.rclass, self.ttl, self.rdlength)
         return encoded_name + metadata + self.rdata
 
@@ -76,7 +70,6 @@ class DNSMessage:
         self.questions = questions
         self.answers = answers if answers is not None else []
         
-        # Auto-sync counts for valid structure
         self.header.qdcount = len(self.questions)
         self.header.ancount = len(self.answers)
 
