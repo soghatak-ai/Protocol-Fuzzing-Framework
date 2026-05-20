@@ -1,0 +1,31 @@
+
+Snort (PID 98746) caught fatal signal: SIGSEGV (11)
+Version: 3.12.2.0
+
+Failed to flush output. Error: Invalid argument
+AddressSanitizer:DEADLYSIGNAL
+=================================================================
+==98746==ERROR: AddressSanitizer: SEGV on unknown address 0x000000000000 (pc 0x000186867308 bp 0x00016d8bea30 sp 0x00016d8bea00 T0)
+==98746==The signal is caused by a READ memory access.
+==98746==Hint: address points to the zero page.
+    #0 0x000186867308 in __semwait_signal+0x8 (libsystem_kernel.dylib:arm64e+0x4308)
+    #1 0x000102549658 in main main.cc:1264
+    #2 0x0001864ebda0 in start+0x1b4c (dyld:arm64e+0x1fda0)
+
+==98746==Register values:
+ x[0] = 0x0000000000000004   x[1] = 0x0000000000000000   x[2] = 0x0000000000000001   x[3] = 0x0000000000000001  
+ x[4] = 0x0000000000000000   x[5] = 0x00000000000f4240   x[6] = 0x0000000000000000   x[7] = 0x0000000000000000  
+ x[8] = 0x00000001f26bbc18   x[9] = 0x0000000000000003  x[10] = 0x0000000000000011  x[11] = 0x0000000000000002  
+x[12] = 0x0000000000000000  x[13] = 0x0000000000000002  x[14] = 0x00000000ffffffff  x[15] = 0x0000000000000003  
+x[16] = 0x000000000000014e  x[17] = 0x00000001f3ce9f50  x[18] = 0x0000000000000000  x[19] = 0x0000000000000000  
+x[20] = 0x0000000102ed0a80  x[21] = 0x0000000000000028  x[22] = 0x0000000000000001  x[23] = 0x00000001036affa8  
+x[24] = 0x0000007000020000  x[25] = 0x00000000206d5ff5  x[26] = 0x00000001034c0000  x[27] = 0x0000606000159210  
+x[28] = 0x0000000000000000     fp = 0x000000016d8bea30     lr = 0x0000000186743cc0     sp = 0x000000016d8bea00  
+AddressSanitizer can not provide additional info.
+SUMMARY: AddressSanitizer: SEGV (libsystem_kernel.dylib:arm64e+0x4308) in __semwait_signal+0x8
+==98746==ABORTING
+
+Snort (PID 98746) caught fatal signal: SIGABRT (6)
+Version: 3.12.2.0
+
+Failed to flush output. Error: Invalid argument
