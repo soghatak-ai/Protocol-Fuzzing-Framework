@@ -1,7 +1,7 @@
 
 import random
 import copy
-from protocol.dns import DNSMessage
+from protocol.dns import DNSMessage, build_compression_loop_packet, build_label_flood_packet, build_response_packet
 
 class FuzzLibrary:
     UINT16 = [0x0000, 0xFFFF, 0x7FFF, 0x8000, 0xFFFE]
@@ -63,3 +63,31 @@ class ByteMutator:
         bit_idx = random.randint(0, 7)
         byte_array[byte_idx] ^= (1 << bit_idx)
         return bytes(byte_array)
+
+
+class CompressionLoopMutator:
+    LOOP_TYPES = ["self_ref", "mutual", "chain"]
+
+    @staticmethod
+    def mutate() -> bytes:
+        return build_compression_loop_packet(loop_type=random.choice(CompressionLoopMutator.LOOP_TYPES))
+
+
+class LabelComplexityMutator:
+    STRATEGIES = ["max_labels", "tiny_labels"]
+
+    @staticmethod
+    def mutate() -> bytes:
+        return build_label_flood_packet(strategy=random.choice(LabelComplexityMutator.STRATEGIES))
+
+
+class ResponseMutator:
+    ANOMALIES = [
+        "rdlength_mismatch", "cname_bad_pointer", "count_mismatch",
+        "zero_rdlength", "multi_record_overlap", "srv_malformed",
+        "mx_bad_pointer", "txt_overflow",
+    ]
+
+    @staticmethod
+    def mutate() -> bytes:
+        return build_response_packet(anomaly=random.choice(ResponseMutator.ANOMALIES))
