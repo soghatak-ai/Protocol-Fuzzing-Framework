@@ -1,0 +1,1040 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Protocol Fuzzer — Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0c0c0c;
+            --bg-secondary: #141414;
+            --bg-card: #1a1a1a;
+            --bg-card-hover: #222222;
+            --border: #2a2a2a;
+            --border-light: #333333;
+            --text-primary: #e0e0e0;
+            --text-secondary: #888888;
+            --text-muted: #555555;
+            --accent: #ffffff;
+            --accent-green: #4ade80;
+            --accent-red: #f87171;
+            --accent-yellow: #fbbf24;
+            --accent-blue: #60a5fa;
+            --accent-purple: #a78bfa;
+            --accent-cyan: #22d3ee;
+            --accent-orange: #fb923c;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* HEADER */
+        .header {
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            padding: 0 32px;
+            height: 56px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .logo-icon {
+            width: 30px;
+            height: 30px;
+            background: #fff;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 13px;
+            font-weight: 700;
+            color: #0c0c0c;
+        }
+
+        .logo-text {
+            font-size: 15px;
+            font-weight: 600;
+            letter-spacing: -0.3px;
+            color: var(--text-primary);
+        }
+
+        .logo-text span { color: var(--text-secondary); }
+
+        .header-nav {
+            display: flex;
+            gap: 2px;
+        }
+
+        .nav-btn {
+            padding: 6px 16px;
+            border-radius: 6px;
+            border: none;
+            background: transparent;
+            color: var(--text-muted);
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.15s;
+            font-family: inherit;
+        }
+
+        .nav-btn:hover { color: var(--text-primary); }
+        .nav-btn.active { background: var(--bg-card); color: var(--text-primary); }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 5px 14px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+        }
+
+        .status-badge .dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+        }
+
+        .status-idle { background: rgba(255,255,255,0.05); color: var(--text-muted); }
+        .status-idle .dot { background: var(--text-muted); }
+
+        .status-running { background: rgba(74,222,128,0.08); color: var(--accent-green); }
+        .status-running .dot { background: var(--accent-green); animation: pulse 1.5s infinite; }
+
+        .status-crash_detected { background: rgba(248,113,113,0.08); color: var(--accent-red); }
+        .status-crash_detected .dot { background: var(--accent-red); animation: pulse 0.8s infinite; }
+
+        .status-stopped { background: rgba(251,191,36,0.08); color: var(--accent-yellow); }
+        .status-stopped .dot { background: var(--accent-yellow); }
+
+        .status-error { background: rgba(248,113,113,0.08); color: var(--accent-red); }
+        .status-error .dot { background: var(--accent-red); }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+
+        /* MAIN LAYOUT */
+        .main-container {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 0;
+            padding: 36px 40px;
+            max-width: 1600px;
+            margin: 0 auto;
+        }
+
+        /* CONTROLS BAR */
+        .controls-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 20px;
+            margin-bottom: 32px;
+        }
+
+        .controls-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .ctrl-btn {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 20px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background: var(--bg-card);
+            color: var(--text-primary);
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.15s;
+            font-family: inherit;
+        }
+
+        .ctrl-btn:hover { border-color: var(--border-light); background: var(--bg-card-hover); }
+
+        .ctrl-btn.start { border-color: rgba(74,222,128,0.3); color: var(--accent-green); }
+        .ctrl-btn.start:hover { background: rgba(74,222,128,0.06); }
+
+        .ctrl-btn.stop { border-color: rgba(248,113,113,0.3); color: var(--accent-red); }
+        .ctrl-btn.stop:hover { background: rgba(248,113,113,0.06); }
+
+        .ctrl-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+        .target-info {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 7px 16px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
+        .target-info strong {
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+
+        /* STATS GRID */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 20px;
+            margin-bottom: 36px;
+        }
+
+        .stat-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 24px 26px;
+            transition: border-color 0.15s;
+        }
+
+        .stat-card:hover {
+            border-color: var(--border-light);
+        }
+
+        .stat-label {
+            font-size: 11px;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            color: var(--text-muted);
+            margin-bottom: 12px;
+        }
+
+        .stat-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 22px;
+            font-weight: 600;
+            color: var(--text-primary);
+            line-height: 1;
+        }
+
+        .stat-sub {
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-top: 10px;
+        }
+
+        .stat-card.crash .stat-value { color: var(--accent-red); }
+        .stat-card.crash { border-color: rgba(248,113,113,0.2); }
+
+        /* PANELS */
+        .panels-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 24px;
+            margin-bottom: 36px;
+        }
+
+        .panel {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        .panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 16px 24px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .panel-title {
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+            color: var(--text-secondary);
+        }
+
+        .panel-badge {
+            font-size: 11px;
+            padding: 3px 10px;
+            border-radius: 10px;
+            background: rgba(255,255,255,0.05);
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .panel-body {
+            padding: 28px;
+        }
+
+        /* MEMORY CHART */
+        .memory-bars {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .mem-row {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .mem-label {
+            font-size: 12px;
+            color: var(--text-muted);
+            width: 80px;
+            flex-shrink: 0;
+            font-weight: 500;
+        }
+
+        .mem-bar-track {
+            flex: 1;
+            height: 24px;
+            background: rgba(255,255,255,0.04);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .mem-bar-fill {
+            height: 100%;
+            border-radius: 6px;
+            transition: width 0.6s ease;
+            display: flex;
+            align-items: center;
+            padding-left: 10px;
+            font-size: 11px;
+            font-weight: 500;
+            font-family: 'JetBrains Mono', monospace;
+            color: rgba(255,255,255,0.9);
+            min-width: fit-content;
+        }
+
+        .mem-bar-fill.baseline { background: rgba(96,165,250,0.5); }
+        .mem-bar-fill.current { background: rgba(34,211,238,0.5); }
+        .mem-bar-fill.peak { background: rgba(251,191,36,0.5); }
+
+        /* STRATEGY DISTRIBUTION */
+        .strat-list {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .strat-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .strat-name {
+            font-size: 11px;
+            color: var(--text-muted);
+            width: 130px;
+            flex-shrink: 0;
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 500;
+        }
+
+        .strat-bar-track {
+            flex: 1;
+            height: 16px;
+            background: rgba(255,255,255,0.04);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .strat-bar-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.6s ease;
+            opacity: 0.6;
+        }
+
+        .strat-pct {
+            font-size: 11px;
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--text-muted);
+            width: 48px;
+            text-align: right;
+        }
+
+        .s-smart_dns { background: var(--accent-blue); }
+        .s-response_fuzz { background: var(--accent-purple); }
+        .s-compression_loop { background: var(--accent-orange); }
+        .s-label_complexity { background: var(--accent-yellow); }
+        .s-state_exhaustion { background: var(--accent-cyan); }
+
+        /* EVENT LOG */
+        .event-log-panel {
+            grid-column: 1 / -1;
+            margin-bottom: 12px;
+        }
+
+        .event-log {
+            max-height: 240px;
+            overflow-y: auto;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+        }
+
+        .event-log::-webkit-scrollbar { width: 5px; }
+        .event-log::-webkit-scrollbar-track { background: transparent; }
+        .event-log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+        .log-entry {
+            display: flex;
+            gap: 12px;
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.03);
+        }
+
+        .log-time { color: var(--text-muted); width: 65px; flex-shrink: 0; }
+        .log-level {
+            width: 72px;
+            flex-shrink: 0;
+            font-weight: 600;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .log-level.INFO { color: var(--text-muted); }
+        .log-level.WARNING { color: var(--accent-yellow); }
+        .log-level.ERROR { color: var(--accent-orange); }
+        .log-level.CRITICAL { color: var(--accent-red); }
+        .log-msg { color: var(--text-secondary); }
+
+        /* CRASH REPORTS */
+        .crash-reports-panel {
+            grid-column: 1 / -1;
+        }
+
+        .crash-reports-panel .panel-body {
+            padding: 8px 0;
+        }
+
+        .crash-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .crash-table th {
+            text-align: left;
+            padding: 12px 20px;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            color: var(--text-muted);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .crash-table td {
+            padding: 14px 20px;
+            font-size: 13px;
+            border-bottom: 1px solid rgba(255,255,255,0.03);
+        }
+
+        .crash-table tr:hover td { background: rgba(255,255,255,0.02); }
+
+        .crash-type-badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 600;
+            font-family: 'JetBrains Mono', monospace;
+            letter-spacing: 0.3px;
+        }
+
+        .badge-memory { background: rgba(248,113,113,0.1); color: var(--accent-red); }
+        .badge-hang { background: rgba(251,191,36,0.1); color: var(--accent-yellow); }
+        .badge-crash { background: rgba(167,139,250,0.1); color: var(--accent-purple); }
+
+        .action-btn {
+            padding: 4px 10px;
+            border-radius: 4px;
+            border: 1px solid var(--border);
+            background: transparent;
+            color: var(--text-muted);
+            font-size: 11px;
+            cursor: pointer;
+            margin-right: 4px;
+            transition: all 0.15s;
+            font-family: inherit;
+        }
+
+        .action-btn:hover { border-color: var(--border-light); color: var(--text-secondary); }
+        .action-btn.download:hover { border-color: rgba(74,222,128,0.3); color: var(--accent-green); }
+        .action-btn.delete:hover { border-color: rgba(248,113,113,0.3); color: var(--accent-red); }
+
+        /* CRASH DETAIL MODAL */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.75);
+            backdrop-filter: blur(6px);
+            z-index: 200;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-overlay.open { display: flex; }
+
+        .modal {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            width: 90%;
+            max-width: 800px;
+            max-height: 80vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .modal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 20px 28px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .modal-header h3 {
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--text-secondary);
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            font-size: 18px;
+            cursor: pointer;
+            padding: 4px 8px;
+            transition: color 0.15s;
+        }
+
+        .modal-close:hover { color: var(--text-primary); }
+
+        .modal-body {
+            padding: 28px 32px;
+            overflow-y: auto;
+            flex: 1;
+        }
+
+        .modal-body pre {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            color: var(--text-secondary);
+            white-space: pre-wrap;
+            word-break: break-all;
+            line-height: 1.7;
+        }
+
+        /* CONFIRM DIALOG */
+        .confirm-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.6);
+            backdrop-filter: blur(4px);
+            z-index: 300;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .confirm-overlay.open { display: flex; }
+
+        .confirm-box {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 36px;
+            max-width: 420px;
+            text-align: center;
+        }
+
+        .confirm-box p {
+            font-size: 14px;
+            color: var(--text-secondary);
+            margin-bottom: 24px;
+            line-height: 1.5;
+        }
+
+        .confirm-actions {
+            display: flex;
+            gap: 14px;
+            justify-content: center;
+        }
+
+        .confirm-actions button {
+            padding: 10px 28px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: var(--bg-card);
+            color: var(--text-primary);
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            font-family: inherit;
+            transition: all 0.15s;
+        }
+
+        .confirm-actions .confirm-delete {
+            border-color: rgba(248,113,113,0.4);
+            color: var(--accent-red);
+        }
+
+        .confirm-actions .confirm-delete:hover { background: rgba(248,113,113,0.1); }
+        .confirm-actions button:hover { background: var(--bg-card-hover); }
+
+        /* EMPTY STATE */
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: var(--text-muted);
+            font-size: 13px;
+        }
+
+        /* PAGE TABS */
+        .page-dashboard { display: block; }
+        .page-reports { display: none; }
+        body.show-reports .page-dashboard { display: none; }
+        body.show-reports .page-reports { display: block; }
+
+        @media (max-width: 1200px) {
+            .stats-grid { grid-template-columns: repeat(3, 1fr); }
+            .panels-row { grid-template-columns: 1fr; }
+        }
+
+        @media (max-width: 768px) {
+            .stats-grid { grid-template-columns: repeat(2, 1fr); }
+            .header { padding: 0 16px; }
+            .main-container { padding: 20px; }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- HEADER -->
+    <header class="header">
+        <div class="header-left">
+            <div class="logo">
+                <div class="logo-icon">PF</div>
+                <div class="logo-text">Protocol <span>Fuzzer</span></div>
+            </div>
+            <div class="header-nav">
+                <button class="nav-btn active" onclick="showPage('dashboard')">Dashboard</button>
+                <button class="nav-btn" onclick="showPage('reports')">Crash Reports</button>
+            </div>
+        </div>
+        <div class="header-right">
+            <div class="target-info">
+                Target: <strong>Snort 3</strong>&nbsp;&middot;&nbsp;Protocol: <strong>DNS</strong>&nbsp;&middot;&nbsp;PID: <strong id="hdr-pid">&mdash;</strong>
+            </div>
+            <div id="status-badge" class="status-badge status-idle">
+                <div class="dot"></div>
+                <span id="status-text">IDLE</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- DASHBOARD PAGE -->
+    <div class="main-container page-dashboard">
+
+        <!-- CONTROLS -->
+        <div class="controls-bar">
+            <div class="controls-left">
+                <button id="btn-start" class="ctrl-btn start" onclick="startFuzzer()">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
+                    Start
+                </button>
+                <button id="btn-stop" class="ctrl-btn stop" onclick="stopFuzzer()" disabled>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+                    Stop
+                </button>
+            </div>
+            <div class="target-info">
+                Runtime: <strong id="ctrl-runtime">00:00:00</strong>&nbsp;&middot;&nbsp;
+                Strategy: <strong id="ctrl-strategy">&mdash;</strong>
+            </div>
+        </div>
+
+        <!-- STATS -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">Total Iterations</div>
+                <div class="stat-value" id="stat-iterations">0</div>
+                <div class="stat-sub" id="stat-pps">0 pkt/s</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Current Memory</div>
+                <div class="stat-value" id="stat-mem">&mdash;</div>
+                <div class="stat-sub" id="stat-mem-sub">Baseline: &mdash;</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Peak Memory</div>
+                <div class="stat-value" id="stat-peak">&mdash;</div>
+                <div class="stat-sub">Highest recorded RSS</div>
+            </div>
+            <div class="stat-card crash">
+                <div class="stat-label">Crashes Detected</div>
+                <div class="stat-value" id="stat-crashes">0</div>
+                <div class="stat-sub" id="stat-last-crash">No crashes yet</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Anomaly</div>
+                <div class="stat-value" id="stat-anomaly" style="font-size:13px;">None</div>
+                <div class="stat-sub" id="stat-trigger">&mdash;</div>
+            </div>
+        </div>
+
+        <!-- PANELS -->
+        <div class="panels-row">
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Memory Profile</span>
+                    <span class="panel-badge">Live</span>
+                </div>
+                <div class="panel-body">
+                    <div class="memory-bars">
+                        <div class="mem-row">
+                            <span class="mem-label">Baseline</span>
+                            <div class="mem-bar-track"><div class="mem-bar-fill baseline" id="bar-baseline" style="width:0%"></div></div>
+                        </div>
+                        <div class="mem-row">
+                            <span class="mem-label">Current</span>
+                            <div class="mem-bar-track"><div class="mem-bar-fill current" id="bar-current" style="width:0%"></div></div>
+                        </div>
+                        <div class="mem-row">
+                            <span class="mem-label">Peak</span>
+                            <div class="mem-bar-track"><div class="mem-bar-fill peak" id="bar-peak" style="width:0%"></div></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Strategy Distribution</span>
+                    <span class="panel-badge" id="strat-total">0 total</span>
+                </div>
+                <div class="panel-body">
+                    <div class="strat-list" id="strat-list"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- EVENT LOG -->
+        <div class="panel event-log-panel">
+            <div class="panel-header">
+                <span class="panel-title">Event Log</span>
+                <span class="panel-badge" id="event-count">0 events</span>
+            </div>
+            <div class="panel-body" style="padding:20px 28px;">
+                <div class="event-log" id="event-log">
+                    <div class="empty-state">No events yet. Start the fuzzer to begin.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- REPORTS PAGE -->
+    <div class="main-container page-reports">
+        <div class="panel crash-reports-panel">
+            <div class="panel-header">
+                <span class="panel-title">Crash Reports</span>
+                <button class="ctrl-btn" onclick="loadCrashes()" style="padding:4px 14px;font-size:12px;">Refresh</button>
+            </div>
+            <div class="panel-body">
+                <table class="crash-table">
+                    <thead>
+                        <tr>
+                            <th>Type</th>
+                            <th>Iteration</th>
+                            <th>Date</th>
+                            <th>Size</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="crash-tbody">
+                        <tr><td colspan="5" class="empty-state">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- CRASH DETAIL MODAL -->
+    <div class="modal-overlay" id="modal-overlay" onclick="closeModal(event)">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 id="modal-title">Crash Report</h3>
+                <button class="modal-close" onclick="document.getElementById('modal-overlay').classList.remove('open')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <pre id="modal-content">Loading...</pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- DELETE CONFIRM DIALOG -->
+    <div class="confirm-overlay" id="confirm-overlay">
+        <div class="confirm-box">
+            <p id="confirm-msg">Delete this crash report?</p>
+            <div class="confirm-actions">
+                <button onclick="cancelDelete()">Cancel</button>
+                <button class="confirm-delete" onclick="confirmDelete()">Delete</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let evtSource = null;
+        let pendingDeleteFile = null;
+
+        const stratLabels = {
+            smart_dns: 'Smart DNS',
+            response_fuzz: 'Response Fuzz',
+            compression_loop: 'Compression Loop',
+            label_complexity: 'Label Complexity',
+            state_exhaustion: 'State Exhaustion',
+        };
+
+        function showPage(page) {
+            document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+            if (page === 'reports') {
+                document.body.classList.add('show-reports');
+                document.querySelectorAll('.nav-btn')[1].classList.add('active');
+                loadCrashes();
+            } else {
+                document.body.classList.remove('show-reports');
+                document.querySelectorAll('.nav-btn')[0].classList.add('active');
+            }
+        }
+
+        function formatNum(n) {
+            if (n == null) return '\u2014';
+            return Number(n).toLocaleString();
+        }
+
+        function updateUI(data) {
+            const badge = document.getElementById('status-badge');
+            badge.className = 'status-badge status-' + data.status;
+            document.getElementById('status-text').textContent = data.status.toUpperCase().replace('_', ' ');
+
+            document.getElementById('hdr-pid').textContent = data.snort_pid || '\u2014';
+
+            document.getElementById('btn-start').disabled = data.running;
+            document.getElementById('btn-stop').disabled = !data.running;
+            document.getElementById('ctrl-runtime').textContent = data.runtime;
+            document.getElementById('ctrl-strategy').textContent = data.current_strategy || '\u2014';
+
+            document.getElementById('stat-iterations').textContent = formatNum(data.iteration);
+            document.getElementById('stat-pps').textContent = formatNum(data.packets_per_sec) + ' pkt/s';
+
+            document.getElementById('stat-mem').textContent = data.current_mem_mb != null ? data.current_mem_mb.toFixed(1) + ' MB' : '\u2014';
+            document.getElementById('stat-mem-sub').textContent = 'Baseline: ' + (data.baseline_mem_mb != null ? data.baseline_mem_mb.toFixed(1) + ' MB' : '\u2014');
+            document.getElementById('stat-peak').textContent = data.peak_mem_mb != null ? data.peak_mem_mb.toFixed(1) + ' MB' : '\u2014';
+
+            document.getElementById('stat-crashes').textContent = data.total_crashes || 0;
+            document.getElementById('stat-last-crash').textContent = data.last_crash_time ? 'Last: ' + data.last_crash_time : 'No crashes yet';
+
+            document.getElementById('stat-anomaly').textContent = data.anomaly_detected || 'None';
+            document.getElementById('stat-anomaly').style.color = data.anomaly_detected ? 'var(--accent-red)' : 'var(--text-muted)';
+            document.getElementById('stat-trigger').textContent = data.trigger_detail || '\u2014';
+
+            const maxMem = Math.max(data.peak_mem_mb || 1, data.current_mem_mb || 1, data.baseline_mem_mb || 1) * 1.2;
+            if (data.baseline_mem_mb != null) {
+                document.getElementById('bar-baseline').style.width = (data.baseline_mem_mb / maxMem * 100) + '%';
+                document.getElementById('bar-baseline').textContent = data.baseline_mem_mb.toFixed(1) + ' MB';
+            }
+            if (data.current_mem_mb != null) {
+                document.getElementById('bar-current').style.width = (data.current_mem_mb / maxMem * 100) + '%';
+                document.getElementById('bar-current').textContent = data.current_mem_mb.toFixed(1) + ' MB';
+            }
+            if (data.peak_mem_mb != null) {
+                document.getElementById('bar-peak').style.width = (data.peak_mem_mb / maxMem * 100) + '%';
+                document.getElementById('bar-peak').textContent = data.peak_mem_mb.toFixed(1) + ' MB';
+            }
+
+            const stats = data.strategy_stats || {};
+            const total = Object.values(stats).reduce((a, b) => a + b, 0);
+            document.getElementById('strat-total').textContent = formatNum(total) + ' total';
+            const stratEl = document.getElementById('strat-list');
+            stratEl.innerHTML = '';
+            for (const [key, count] of Object.entries(stats)) {
+                const pct = total > 0 ? (count / total * 100) : 0;
+                stratEl.innerHTML += `<div class="strat-row">
+                    <span class="strat-name">${stratLabels[key] || key}</span>
+                    <div class="strat-bar-track"><div class="strat-bar-fill s-${key}" style="width:${pct}%"></div></div>
+                    <span class="strat-pct">${pct.toFixed(1)}%</span>
+                </div>`;
+            }
+
+            if (data.events && data.events.length > 0) {
+                const logEl = document.getElementById('event-log');
+                document.getElementById('event-count').textContent = data.events.length + ' events';
+                let html = '';
+                for (const evt of data.events) {
+                    html += `<div class="log-entry">
+                        <span class="log-time">${evt.time}</span>
+                        <span class="log-level ${evt.level}">${evt.level}</span>
+                        <span class="log-msg">${evt.message}</span>
+                    </div>`;
+                }
+                logEl.innerHTML = html;
+                logEl.scrollTop = logEl.scrollHeight;
+            }
+        }
+
+        function connectSSE() {
+            if (evtSource) evtSource.close();
+            evtSource = new EventSource('/api/stream');
+            evtSource.onmessage = function(e) {
+                try { updateUI(JSON.parse(e.data)); } catch (err) {}
+            };
+            evtSource.onerror = function() { setTimeout(connectSSE, 3000); };
+        }
+
+        async function startFuzzer() {
+            document.getElementById('btn-start').disabled = true;
+            try {
+                const res = await fetch('/api/start', { method: 'POST' });
+                const data = await res.json();
+                if (data.error) alert(data.error);
+            } catch (e) { alert('Failed to start: ' + e); }
+        }
+
+        async function stopFuzzer() {
+            document.getElementById('btn-stop').disabled = true;
+            try {
+                const res = await fetch('/api/stop', { method: 'POST' });
+                const data = await res.json();
+                if (data.error) alert(data.error);
+            } catch (e) { alert('Failed to stop: ' + e); }
+        }
+
+        async function loadCrashes() {
+            try {
+                const res = await fetch('/api/crashes');
+                const crashes = await res.json();
+                const tbody = document.getElementById('crash-tbody');
+                if (crashes.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No crash reports found</td></tr>';
+                    return;
+                }
+                let html = '';
+                for (const c of crashes) {
+                    let badgeClass = 'badge-crash';
+                    if (c.anomaly_type.includes('MEMORY')) badgeClass = 'badge-memory';
+                    else if (c.anomaly_type.includes('HANG') || c.anomaly_type.includes('TIMEOUT')) badgeClass = 'badge-hang';
+
+                    html += `<tr>
+                        <td><span class="crash-type-badge ${badgeClass}">${c.anomaly_type}</span></td>
+                        <td style="font-family:'JetBrains Mono',monospace;font-size:13px;">${formatNum(c.iteration)}</td>
+                        <td style="color:var(--text-muted);font-size:13px;">${c.modified}</td>
+                        <td style="color:var(--text-muted);font-size:12px;">${(c.size / 1024).toFixed(1)} KB</td>
+                        <td>
+                            <button class="action-btn" onclick="viewCrash('${c.filename}')">View</button>
+                            <button class="action-btn download" onclick="downloadCrash('${c.filename}')">Download</button>
+                            <button class="action-btn delete" onclick="promptDelete('${c.filename}')">Delete</button>
+                        </td>
+                    </tr>`;
+                }
+                tbody.innerHTML = html;
+            } catch (e) {
+                document.getElementById('crash-tbody').innerHTML = '<tr><td colspan="5" class="empty-state">Error loading reports</td></tr>';
+            }
+        }
+
+        async function viewCrash(filename) {
+            document.getElementById('modal-overlay').classList.add('open');
+            document.getElementById('modal-title').textContent = filename;
+            document.getElementById('modal-content').textContent = 'Loading...';
+            try {
+                const res = await fetch('/api/crashes/' + filename);
+                const data = await res.json();
+                document.getElementById('modal-content').textContent = data.content;
+            } catch (e) {
+                document.getElementById('modal-content').textContent = 'Error loading report';
+            }
+        }
+
+        function downloadCrash(filename) {
+            window.open('/api/crashes/' + filename + '/download', '_blank');
+        }
+
+        function promptDelete(filename) {
+            pendingDeleteFile = filename;
+            document.getElementById('confirm-msg').textContent = 'Delete report ' + filename + '?';
+            document.getElementById('confirm-overlay').classList.add('open');
+        }
+
+        function cancelDelete() {
+            pendingDeleteFile = null;
+            document.getElementById('confirm-overlay').classList.remove('open');
+        }
+
+        async function confirmDelete() {
+            if (!pendingDeleteFile) return;
+            try {
+                await fetch('/api/crashes/' + pendingDeleteFile, { method: 'DELETE' });
+                loadCrashes();
+            } catch (e) { alert('Failed to delete'); }
+            pendingDeleteFile = null;
+            document.getElementById('confirm-overlay').classList.remove('open');
+        }
+
+        function closeModal(e) {
+            if (e.target === document.getElementById('modal-overlay')) {
+                document.getElementById('modal-overlay').classList.remove('open');
+            }
+        }
+
+        connectSSE();
+    </script>
+</body>
+</html>

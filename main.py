@@ -14,7 +14,7 @@ from transport.network import StreamTransport, LiveTransport
 fuzzer_state = {
     "iteration": 0,
     "last_packet_time": time.time(),
-    "running": True,
+    "running": False,
     "anomaly_detected": None,
     "current_strategy": "smart_dns",
     "start_time": None,
@@ -23,7 +23,58 @@ fuzzer_state = {
     "current_mem_mb": None,
     "snort_pid": None,
     "trigger_detail": None,
+    "status": "idle",
+    "total_crashes": 0,
+    "last_crash_time": None,
+    "last_crash_type": None,
+    "packets_per_sec": 0,
+    "strategy_stats": {
+        "smart_dns": 0,
+        "response_fuzz": 0,
+        "compression_loop": 0,
+        "label_complexity": 0,
+        "state_exhaustion": 0,
+    },
 }
+
+event_log = []
+
+def log_event(level, message):
+    entry = {
+        "time": datetime.now().strftime("%H:%M:%S"),
+        "level": level,
+        "message": message,
+    }
+    event_log.append(entry)
+    if len(event_log) > 500:
+        event_log.pop(0)
+
+def reset_state():
+    fuzzer_state.update({
+        "iteration": 0,
+        "last_packet_time": time.time(),
+        "running": False,
+        "anomaly_detected": None,
+        "current_strategy": "smart_dns",
+        "start_time": None,
+        "baseline_mem_mb": None,
+        "peak_mem_mb": None,
+        "current_mem_mb": None,
+        "snort_pid": None,
+        "trigger_detail": None,
+        "status": "idle",
+        "last_crash_time": None,
+        "last_crash_type": None,
+        "packets_per_sec": 0,
+        "strategy_stats": {
+            "smart_dns": 0,
+            "response_fuzz": 0,
+            "compression_loop": 0,
+            "label_complexity": 0,
+            "state_exhaustion": 0,
+        },
+    })
+    event_log.clear()
 
 def save_crash_log(iteration: int, stderr_data: bytes, anomaly_type: str = "CRASH", return_code: int = None):
     os.makedirs("crashes", exist_ok=True)
@@ -81,6 +132,11 @@ def save_crash_log(iteration: int, stderr_data: bytes, anomaly_type: str = "CRAS
             f.write("    (no stderr output captured)\n")
         f.write("\n")
 
+    fuzzer_state["total_crashes"] = fuzzer_state.get("total_crashes", 0) + 1
+    fuzzer_state["last_crash_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    fuzzer_state["last_crash_type"] = anomaly_type
+    log_event("CRITICAL", f"{anomaly_type} detected at iteration {iteration:,}")
+    log_event("INFO", f"Crash report saved: {report_path}")
     print(f"\n[!!!] {anomaly_type} DETECTED AT ITERATION {iteration:,} [!!!]")
     print(f"[+] Diagnostic trace saved to: {report_path}")
 
@@ -96,6 +152,7 @@ def watchdog_monitor(pid: int):
                 fuzzer_state["baseline_mem_mb"] = round(baseline_mem, 2)
                 fuzzer_state["peak_mem_mb"] = round(baseline_mem, 2)
                 print(f"[Watchdog] Baseline memory established at: {baseline_mem:.2f} MB")
+                log_event("INFO", f"Watchdog baseline: {baseline_mem:.2f} MB")
                 break
             except (psutil.AccessDenied, psutil.NoSuchProcess) as e:
                 if not proc.is_running():
@@ -127,6 +184,8 @@ def watchdog_monitor(pid: int):
                     fuzzer_state["anomaly_detected"] = f"GENERIC_TIMEOUT_{current_strat.upper()}"
                 
                 fuzzer_state["trigger_detail"] = f"Snort unresponsive for {time_since_last_packet:.1f}s during '{current_strat}' strategy. Pipe write blocked — target stopped consuming packets."
+                fuzzer_state["status"] = "crash_detected"
+                log_event("CRITICAL", f"Hang detected: {time_since_last_packet:.1f}s during {current_strat}")
                 print(f"\n[Watchdog Trigger] Snort hung for {time_since_last_packet:.1f}s during {current_strat}!")
                 proc.kill() 
                 break
@@ -143,6 +202,8 @@ def watchdog_monitor(pid: int):
                 if memory_growth > 500.0:
                     fuzzer_state["anomaly_detected"] = "MEMORY_LEAK_AMPLIFICATION"
                     fuzzer_state["trigger_detail"] = f"RSS grew from {baseline_mem:.2f} MB to {current_mem_mb:.2f} MB (+{memory_growth:.2f} MB, {memory_growth/baseline_mem*100:.1f}% increase). Threshold: 500 MB."
+                    fuzzer_state["status"] = "crash_detected"
+                    log_event("CRITICAL", f"Memory bloat: +{memory_growth:.2f} MB (RSS: {current_mem_mb:.2f} MB)")
                     print(f"\n[Watchdog Trigger] Excessive RAM bloat detected (+{memory_growth:.2f} MB)!")
                     proc.kill()
                     break
@@ -179,6 +240,9 @@ def run_fuzzer(build_dir: str):
     )
     fuzzer_state["snort_pid"] = target_process.pid
     fuzzer_state["start_time"] = time.time()
+    fuzzer_state["status"] = "running"
+    fuzzer_state["running"] = True
+    log_event("INFO", f"Snort launched (PID {target_process.pid})")
 
     watchdog = threading.Thread(target=watchdog_monitor, args=(target_process.pid,), daemon=True)
     watchdog.start()
@@ -186,6 +250,7 @@ def run_fuzzer(build_dir: str):
     try:
         with open(pipe_path, "wb", buffering=0) as pipe:
             print("[+] Memory Stream synchronized! Injecting payloads...")
+            log_event("INFO", "Pipe synchronized. Fuzzing started.")
             
             pipe.write(transport.get_global_header())
             pipe.flush()
@@ -199,6 +264,7 @@ def run_fuzzer(build_dir: str):
                     weights=[0.25, 0.30, 0.10, 0.10, 0.25]
                 )[0]
                 fuzzer_state["current_strategy"] = strategy
+                fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
                 src_ip, src_port = 0x7f000001, 12345
 
                 if strategy == "smart_dns":
@@ -233,16 +299,21 @@ def run_fuzzer(build_dir: str):
                 fuzzer_state["last_packet_time"] = time.time() 
 
                 if iteration % 10000 == 0:
+                    elapsed = time.time() - fuzzer_state["start_time"] if fuzzer_state["start_time"] else 1
+                    fuzzer_state["packets_per_sec"] = int(iteration / max(elapsed, 0.001))
                     print(f"[*] Streamed {iteration} mutations into memory... (Target Status: Secure)")
 
     except BrokenPipeError:
+        log_event("ERROR", "Pipe severed — Snort collapsed unexpectedly")
         print("\n[-] Pipe severed! Snort process collapsed unexpectedly.")
         
     except KeyboardInterrupt:
+        log_event("WARNING", f"Fuzzer halted manually at iteration {fuzzer_state['iteration']}")
         print(f"\n[*] Fuzzer halted manually. Total streamed packets: {fuzzer_state['iteration']}")
 
     finally:
-        fuzzer_state["running"] = False 
+        fuzzer_state["running"] = False
+        fuzzer_state["status"] = "stopped" if not fuzzer_state["anomaly_detected"] else "crash_detected"
         
         try:
             if target_process.poll() is None:
