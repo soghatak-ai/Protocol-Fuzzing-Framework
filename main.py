@@ -33,9 +33,6 @@ def save_crash_log(iteration: int, stderr_data: bytes, anomaly_type: str = "CRAS
 def watchdog_monitor(pid: int):
     try:
         proc = psutil.Process(pid)
-        
-        # Give Snort a 2-second warmup grace period to initialize tables 
-        # before we capture the unchangeable baseline memory footprint
         time.sleep(2.0)
         try:
             baseline_mem = proc.memory_info().rss / (1024 * 1024)
