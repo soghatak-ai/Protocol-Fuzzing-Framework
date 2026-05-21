@@ -1,4 +1,4 @@
-# Protocol Fuzzer for Intrusion Detection Systems
+# Protocol Fuzzing Framework
 
 A high-performance, specialized protocol fuzzer designed to uncover memory corruption, logical vulnerabilities, algorithmic complexity bugs, and state exhaustion in deep packet inspection engines like Snort 3.
 
