@@ -1,0 +1,33 @@
+======================================================================
+  SNORT FUZZER CRASH REPORT — MEMORY_LEAK_AMPLIFICATION
+======================================================================
+
+[1] ENVIRONMENT
+    Timestamp       : 2026-05-21 12:28:38
+    Platform        : Darwin 25.4.0 (arm64)
+    Python          : 3.14.5
+    Snort PID       : 32488
+
+[2] FUZZER STATE AT CRASH
+    Anomaly Type    : MEMORY_LEAK_AMPLIFICATION
+    Strategy        : response_fuzz
+    Iteration       : 868,843
+    Runtime         : 00:00:10
+    Throughput      : 82,150 packets/sec
+
+[3] MEMORY ANALYSIS
+    Baseline RSS    : 244.39 MB
+    Current RSS     : 759.5 MB
+    Peak RSS        : 759.5 MB
+    Memory Growth   : +515.11 MB (210.8% over baseline)
+
+[4] TRIGGER DETAIL
+    RSS grew from 244.39 MB to 759.50 MB (+515.11 MB, 210.8% increase). Threshold: 500 MB.
+
+[5] PROCESS EXIT
+    Return Code     : -9
+    Signal          : SIGKILL
+
+[6] SNORT STDERR OUTPUT
+    (no stderr output captured)
+

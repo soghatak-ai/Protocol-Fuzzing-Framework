@@ -1,0 +1,3 @@
+Triggering Strategy: smart_dns
+Iteration: 991500
+

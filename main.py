@@ -4,6 +4,8 @@ import time
 import random
 import subprocess
 import threading
+import platform
+from datetime import datetime
 import psutil
 from protocol.dns import DNSMessage, DNSHeader, DNSQuestion
 from engine.mutator import SmartDNSMutator, ByteMutator, CompressionLoopMutator, LabelComplexityMutator, ResponseMutator
@@ -14,30 +16,95 @@ fuzzer_state = {
     "last_packet_time": time.time(),
     "running": True,
     "anomaly_detected": None,
-    "current_strategy": "smart_dns"
+    "current_strategy": "smart_dns",
+    "start_time": None,
+    "baseline_mem_mb": None,
+    "peak_mem_mb": None,
+    "current_mem_mb": None,
+    "snort_pid": None,
+    "trigger_detail": None,
 }
 
-def save_crash_log(iteration: int, stderr_data: bytes, anomaly_type: str = "CRASH"):
+def save_crash_log(iteration: int, stderr_data: bytes, anomaly_type: str = "CRASH", return_code: int = None):
     os.makedirs("crashes", exist_ok=True)
     timestamp = int(time.time())
     report_path = f"crashes/{anomaly_type}_report_{iteration}_{timestamp}.txt"
-    
+
+    elapsed = time.time() - fuzzer_state["start_time"] if fuzzer_state["start_time"] else 0
+    hours, rem = divmod(int(elapsed), 3600)
+    mins, secs = divmod(rem, 60)
+
     with open(report_path, "w") as f:
-        f.write(f"Triggering Strategy: {fuzzer_state['current_strategy']}\n")
-        f.write(f"Iteration: {iteration}\n\n")
-        f.write(stderr_data.decode('utf-8', errors='ignore'))
-        
-    print(f"\n[!!!] {anomaly_type} DETECTED AT ITERATION {iteration} [!!!]")
+        f.write("=" * 70 + "\n")
+        f.write(f"  SNORT FUZZER CRASH REPORT — {anomaly_type}\n")
+        f.write("=" * 70 + "\n\n")
+
+        f.write("[1] ENVIRONMENT\n")
+        f.write(f"    Timestamp       : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"    Platform        : {platform.system()} {platform.release()} ({platform.machine()})\n")
+        f.write(f"    Python          : {platform.python_version()}\n")
+        f.write(f"    Snort PID       : {fuzzer_state.get('snort_pid', 'N/A')}\n\n")
+
+        f.write("[2] FUZZER STATE AT CRASH\n")
+        f.write(f"    Anomaly Type    : {anomaly_type}\n")
+        f.write(f"    Strategy        : {fuzzer_state['current_strategy']}\n")
+        f.write(f"    Iteration       : {iteration:,}\n")
+        f.write(f"    Runtime         : {hours:02d}:{mins:02d}:{secs:02d}\n")
+        f.write(f"    Throughput      : {iteration / max(elapsed, 0.001):,.0f} packets/sec\n\n")
+
+        f.write("[3] MEMORY ANALYSIS\n")
+        f.write(f"    Baseline RSS    : {fuzzer_state.get('baseline_mem_mb', 'N/A')} MB\n")
+        f.write(f"    Current RSS     : {fuzzer_state.get('current_mem_mb', 'N/A')} MB\n")
+        f.write(f"    Peak RSS        : {fuzzer_state.get('peak_mem_mb', 'N/A')} MB\n")
+        baseline = fuzzer_state.get('baseline_mem_mb')
+        current = fuzzer_state.get('current_mem_mb')
+        if baseline and current:
+            growth = current - baseline
+            f.write(f"    Memory Growth   : +{growth:.2f} MB ({growth/baseline*100:.1f}% over baseline)\n")
+        f.write("\n")
+
+        f.write("[4] TRIGGER DETAIL\n")
+        f.write(f"    {fuzzer_state.get('trigger_detail', 'No additional detail captured.')}\n\n")
+
+        f.write("[5] PROCESS EXIT\n")
+        f.write(f"    Return Code     : {return_code}\n")
+        signal_map = {-2: "SIGINT", -6: "SIGABRT", -9: "SIGKILL", -11: "SIGSEGV", -15: "SIGTERM"}
+        if return_code and return_code < 0:
+            f.write(f"    Signal          : {signal_map.get(return_code, f'Signal {abs(return_code)}')}\n")
+        f.write("\n")
+
+        stderr_text = stderr_data.decode('utf-8', errors='ignore').strip()
+        f.write("[6] SNORT STDERR OUTPUT\n")
+        if stderr_text:
+            f.write("    " + "\n    ".join(stderr_text.splitlines()) + "\n")
+        else:
+            f.write("    (no stderr output captured)\n")
+        f.write("\n")
+
+    print(f"\n[!!!] {anomaly_type} DETECTED AT ITERATION {iteration:,} [!!!]")
     print(f"[+] Diagnostic trace saved to: {report_path}")
 
 def watchdog_monitor(pid: int):
     try:
         proc = psutil.Process(pid)
         time.sleep(2.0)
-        try:
-            baseline_mem = proc.memory_info().rss / (1024 * 1024)
-            print(f"[Watchdog] Baseline memory established at: {baseline_mem:.2f} MB")
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        baseline_mem = None
+        print(f"[Watchdog] Starting watchdog for PID: {proc}")
+        for attempt in range(10):
+            try:
+                baseline_mem = proc.memory_info().rss / (1024 * 1024)
+                fuzzer_state["baseline_mem_mb"] = round(baseline_mem, 2)
+                fuzzer_state["peak_mem_mb"] = round(baseline_mem, 2)
+                print(f"[Watchdog] Baseline memory established at: {baseline_mem:.2f} MB")
+                break
+            except (psutil.AccessDenied, psutil.NoSuchProcess) as e:
+                if not proc.is_running():
+                    print("[Watchdog] Snort exited before baseline could be captured.")
+                    return
+                print(f"[Watchdog] {type(e).__name__} on attempt {attempt+1}/10, retrying...")
+                time.sleep(1.0)
+        if baseline_mem is None:
+            print("[Watchdog] WARNING: Could not read Snort memory after 10 attempts. Watchdog disabled.")
             return
 
         while fuzzer_state["running"]:
@@ -50,7 +117,6 @@ def watchdog_monitor(pid: int):
             time_since_last_packet = time.time() - fuzzer_state["last_packet_time"]
             
             if time_since_last_packet > 3.0:
-                # DYNAMIC INTELLIGENCE: Classify the bug based on what strategy sent the packet
                 current_strat = fuzzer_state.get("current_strategy", "unknown")
                 
                 if current_strat == "compression_loop":
@@ -60,6 +126,7 @@ def watchdog_monitor(pid: int):
                 else:
                     fuzzer_state["anomaly_detected"] = f"GENERIC_TIMEOUT_{current_strat.upper()}"
                 
+                fuzzer_state["trigger_detail"] = f"Snort unresponsive for {time_since_last_packet:.1f}s during '{current_strat}' strategy. Pipe write blocked — target stopped consuming packets."
                 print(f"\n[Watchdog Trigger] Snort hung for {time_since_last_packet:.1f}s during {current_strat}!")
                 proc.kill() 
                 break
@@ -68,11 +135,14 @@ def watchdog_monitor(pid: int):
             try:
                 mem_info = proc.memory_info()
                 current_mem_mb = mem_info.rss / (1024 * 1024)
+                fuzzer_state["current_mem_mb"] = round(current_mem_mb, 2)
+                if current_mem_mb > (fuzzer_state.get("peak_mem_mb") or 0):
+                    fuzzer_state["peak_mem_mb"] = round(current_mem_mb, 2)
                 memory_growth = current_mem_mb - baseline_mem
                 
-                # If memory jumps by 500MB over stable baseline
                 if memory_growth > 500.0:
                     fuzzer_state["anomaly_detected"] = "MEMORY_LEAK_AMPLIFICATION"
+                    fuzzer_state["trigger_detail"] = f"RSS grew from {baseline_mem:.2f} MB to {current_mem_mb:.2f} MB (+{memory_growth:.2f} MB, {memory_growth/baseline_mem*100:.1f}% increase). Threshold: 500 MB."
                     print(f"\n[Watchdog Trigger] Excessive RAM bloat detected (+{memory_growth:.2f} MB)!")
                     proc.kill()
                     break
@@ -80,6 +150,7 @@ def watchdog_monitor(pid: int):
                 break
 
     except psutil.NoSuchProcess:
+        print("----------------------------------------")
         pass
 
     
@@ -106,18 +177,20 @@ def run_fuzzer(build_dir: str):
     target_process = subprocess.Popen(
         cmd, cwd=build_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
+    fuzzer_state["snort_pid"] = target_process.pid
+    fuzzer_state["start_time"] = time.time()
 
     watchdog = threading.Thread(target=watchdog_monitor, args=(target_process.pid,), daemon=True)
     watchdog.start()
 
     try:
-        with open(pipe_path, "wb") as pipe:
+        with open(pipe_path, "wb", buffering=0) as pipe:
             print("[+] Memory Stream synchronized! Injecting payloads...")
             
             pipe.write(transport.get_global_header())
             pipe.flush()
 
-            while True:
+            while fuzzer_state["running"] and not fuzzer_state["anomaly_detected"]:
                 fuzzer_state["iteration"] += 1
                 iteration = fuzzer_state["iteration"]
                 
@@ -157,10 +230,7 @@ def run_fuzzer(build_dir: str):
                     src_port = random.randint(1024, 65535)
 
                 pipe.write(transport.wrap_payload(mutated_bytes, src_ip=src_ip, src_port=src_port))
-                
-                if iteration % 500 == 0:
-                    pipe.flush()
-                    fuzzer_state["last_packet_time"] = time.time() 
+                fuzzer_state["last_packet_time"] = time.time() 
 
                 if iteration % 10000 == 0:
                     print(f"[*] Streamed {iteration} mutations into memory... (Target Status: Secure)")
@@ -174,18 +244,29 @@ def run_fuzzer(build_dir: str):
     finally:
         fuzzer_state["running"] = False 
         
-        if target_process.poll() is None:
-            target_process.terminate()
+        try:
+            if target_process.poll() is None:
+                target_process.terminate()
+                try:
+                    stdout, stderr = target_process.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    target_process.kill()
+                    stdout, stderr = target_process.communicate()
+            else:
+                stdout, stderr = target_process.communicate()
             
-        stdout, stderr = target_process.communicate()
-        
-        if fuzzer_state["anomaly_detected"]:
-            save_crash_log(fuzzer_state["iteration"], stderr, anomaly_type=fuzzer_state["anomaly_detected"])
-        elif target_process.returncode != 0 and target_process.returncode is not None and target_process.returncode != -15:
-            save_crash_log(fuzzer_state["iteration"], stderr, anomaly_type="MEMORY_CORRUPTION")
-        else:
-            print("\n=== SNORT PROTOCOL INSPECTION SUMMARY ===")
-            print(stdout.decode('utf-8', errors='ignore'))
+            if fuzzer_state["anomaly_detected"]:
+                save_crash_log(fuzzer_state["iteration"], stderr, anomaly_type=fuzzer_state["anomaly_detected"], return_code=target_process.returncode)
+            elif target_process.returncode not in (0, None, -2, -9, -15):
+                fuzzer_state["trigger_detail"] = f"Snort exited with unexpected return code {target_process.returncode}."
+                save_crash_log(fuzzer_state["iteration"], stderr, anomaly_type="MEMORY_CORRUPTION", return_code=target_process.returncode)
+            else:
+                print("\n=== SNORT PROTOCOL INSPECTION SUMMARY ===")
+                print(stdout.decode('utf-8', errors='ignore'))
+        except KeyboardInterrupt:
+            target_process.kill()
+            target_process.wait()
+            print("\n[*] Force-killed Snort. Exiting.")
 
         if os.path.exists(pipe_path):
             os.remove(pipe_path)
