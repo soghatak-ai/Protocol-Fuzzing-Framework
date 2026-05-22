@@ -8,6 +8,7 @@ import platform
 from datetime import datetime
 import psutil
 from protocol.dns import DNSMessage, DNSHeader, DNSQuestion
+from protocol.ftp import FtpMutator, FTP_STRATEGY_LABELS
 from engine.mutator import SmartDNSMutator, ByteMutator, CompressionLoopMutator, LabelComplexityMutator, ResponseMutator
 from transport.network import StreamTransport, LiveTransport
 
@@ -15,6 +16,7 @@ fuzzer_state = {
     "iteration": 0,
     "last_packet_time": time.time(),
     "running": False,
+    "protocol": "dns",
     "anomaly_detected": None,
     "current_strategy": "smart_dns",
     "start_time": None,
@@ -50,12 +52,15 @@ def log_event(level, message):
         event_log.pop(0)
 
 def reset_state():
+    # Preserve protocol across resets so the fuzzer loop reads the right one
+    protocol = fuzzer_state.get("protocol", "dns")
     fuzzer_state.update({
         "iteration": 0,
         "last_packet_time": time.time(),
         "running": False,
+        "protocol": protocol,
         "anomaly_detected": None,
-        "current_strategy": "smart_dns",
+        "current_strategy": "",
         "start_time": None,
         "baseline_mem_mb": None,
         "peak_mem_mb": None,
@@ -66,13 +71,7 @@ def reset_state():
         "last_crash_time": None,
         "last_crash_type": None,
         "packets_per_sec": 0,
-        "strategy_stats": {
-            "smart_dns": 0,
-            "response_fuzz": 0,
-            "compression_loop": 0,
-            "label_complexity": 0,
-            "state_exhaustion": 0,
-        },
+        "strategy_stats": {},
     })
     event_log.clear()
 
@@ -217,10 +216,17 @@ def watchdog_monitor(pid: int):
     
 def run_fuzzer(build_dir: str):
     pipe_path = "target.pipe"
-    transport = StreamTransport(target_port=53)
-    
-    seed_question = DNSQuestion(qname="example.com")
-    seed_message = DNSMessage(header=DNSHeader(), questions=[seed_question])
+    protocol = fuzzer_state.get("protocol", "dns")
+
+    if protocol == "ftp":
+        transport = StreamTransport(target_port=21)
+        ftp_mutator = FtpMutator()
+        seed_message = None
+    else:
+        transport = StreamTransport(target_port=53)
+        ftp_mutator = None
+        seed_question = DNSQuestion(qname="example.com")
+        seed_message = DNSMessage(header=DNSHeader(), questions=[seed_question])
     
     if os.path.exists(pipe_path):
         os.remove(pipe_path)
@@ -258,49 +264,61 @@ def run_fuzzer(build_dir: str):
             while fuzzer_state["running"] and not fuzzer_state["anomaly_detected"]:
                 fuzzer_state["iteration"] += 1
                 iteration = fuzzer_state["iteration"]
-                
-                strategy = random.choices(
-                    ["smart_dns", "response_fuzz", "compression_loop", "label_complexity", "state_exhaustion"],
-                    weights=[0.25, 0.30, 0.10, 0.10, 0.25]
-                )[0]
-                fuzzer_state["current_strategy"] = strategy
-                fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
-                src_ip, src_port = 0x7f000001, 12345
 
-                if strategy == "smart_dns":
-                    mutator = SmartDNSMutator(seed_message)
-                    mutated_bytes = mutator.mutate().to_bytes()
-                    if random.random() < 0.2:
-                        mutated_bytes = ByteMutator.bit_flip(mutated_bytes)
+                if protocol == "ftp":
+                    if iteration == 1 or (iteration - 1) % 50 == 0:
+                        _ftp_payload, _ftp_strategy = ftp_mutator.mutate()
+                    payload, strategy = _ftp_payload, _ftp_strategy
+                    fuzzer_state["current_strategy"] = strategy
+                    fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                    src_port = random.randint(1025, 65534)
+                    pipe.write(transport.wrap_tcp_session(payload, src_port=src_port))
+                    fuzzer_state["iteration"] += 3  # 4 PCAP records per TCP session
+                else:
+                    strategy = random.choices(
+                        ["smart_dns", "response_fuzz", "compression_loop", "label_complexity", "state_exhaustion"],
+                        weights=[0.25, 0.30, 0.10, 0.10, 0.25]
+                    )[0]
+                    fuzzer_state["current_strategy"] = strategy
+                    fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                    src_ip, src_port = 0x7f000001, 12345
 
-                elif strategy == "response_fuzz":
-                    mutated_bytes = ResponseMutator.mutate()
-                    if random.random() < 0.3:
-                        mutated_bytes = ByteMutator.bit_flip(mutated_bytes)
+                    if strategy == "smart_dns":
+                        mutator = SmartDNSMutator(seed_message)
+                        mutated_bytes = mutator.mutate().to_bytes()
+                        if random.random() < 0.2:
+                            mutated_bytes = ByteMutator.bit_flip(mutated_bytes)
 
-                elif strategy == "compression_loop":
-                    mutated_bytes = CompressionLoopMutator.mutate()
+                    elif strategy == "response_fuzz":
+                        mutated_bytes = ResponseMutator.mutate()
+                        if random.random() < 0.3:
+                            mutated_bytes = ByteMutator.bit_flip(mutated_bytes)
 
-                elif strategy == "label_complexity":
-                    mutated_bytes = LabelComplexityMutator.mutate()
+                    elif strategy == "compression_loop":
+                        mutated_bytes = CompressionLoopMutator.mutate()
 
-                elif strategy == "state_exhaustion":
-                    tc_header = DNSHeader()
-                    tc_header.tc = 1
-                    tc_message = DNSMessage(
-                        header=tc_header,
-                        questions=[copy.deepcopy(seed_message.questions[0])]
-                    )
-                    mutated_bytes = tc_message.to_bytes()
-                    src_ip = random.randint(0x01000001, 0xFEFFFFFF)
-                    src_port = random.randint(1024, 65535)
+                    elif strategy == "label_complexity":
+                        mutated_bytes = LabelComplexityMutator.mutate()
 
-                pipe.write(transport.wrap_payload(mutated_bytes, src_ip=src_ip, src_port=src_port))
+                    elif strategy == "state_exhaustion":
+                        tc_header = DNSHeader()
+                        tc_header.tc = 1
+                        tc_message = DNSMessage(
+                            header=tc_header,
+                            questions=[copy.deepcopy(seed_message.questions[0])]
+                        )
+                        mutated_bytes = tc_message.to_bytes()
+                        src_ip = random.randint(0x01000001, 0xFEFFFFFF)
+                        src_port = random.randint(1024, 65535)
+
+                    pipe.write(transport.wrap_payload(mutated_bytes, src_ip=src_ip, src_port=src_port))
+
                 fuzzer_state["last_packet_time"] = time.time() 
 
-                if iteration % 10000 == 0:
+                stat_interval = 500 if protocol == "ftp" else 10000
+                if fuzzer_state["iteration"] % stat_interval == 0:
                     elapsed = time.time() - fuzzer_state["start_time"] if fuzzer_state["start_time"] else 1
-                    fuzzer_state["packets_per_sec"] = int(iteration / max(elapsed, 0.001))
+                    fuzzer_state["packets_per_sec"] = int(fuzzer_state["iteration"] / max(elapsed, 0.001))
                     print(f"[*] Streamed {iteration} mutations into memory... (Target Status: Secure)")
 
     except BrokenPipeError:

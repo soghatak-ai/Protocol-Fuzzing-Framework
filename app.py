@@ -4,6 +4,15 @@ import time
 import threading
 from flask import Flask, render_template, jsonify, Response, send_file, request
 from main import fuzzer_state, event_log, reset_state, run_fuzzer, log_event
+from protocol.ftp import FTP_STRATEGY_LABELS
+
+DNS_STRATEGY_LABELS = {
+    "smart_dns":        "Smart DNS",
+    "response_fuzz":    "Response Fuzz",
+    "compression_loop": "Compression Loop",
+    "label_complexity": "Label Complexity",
+    "state_exhaustion": "State Exhaustion",
+}
 
 app = Flask(__name__)
 
@@ -29,10 +38,13 @@ def api_state():
     hours, rem = divmod(int(elapsed), 3600)
     mins, secs = divmod(rem, 60)
 
+    protocol = fuzzer_state.get("protocol", "dns")
+    labels = FTP_STRATEGY_LABELS if protocol == "ftp" else DNS_STRATEGY_LABELS
     data = {
         "iteration": fuzzer_state["iteration"],
         "status": fuzzer_state["status"],
         "running": fuzzer_state["running"],
+        "protocol": protocol,
         "anomaly_detected": fuzzer_state["anomaly_detected"],
         "current_strategy": fuzzer_state["current_strategy"],
         "baseline_mem_mb": fuzzer_state["baseline_mem_mb"],
@@ -44,6 +56,7 @@ def api_state():
         "last_crash_type": fuzzer_state.get("last_crash_type"),
         "packets_per_sec": fuzzer_state.get("packets_per_sec", 0),
         "strategy_stats": fuzzer_state.get("strategy_stats", {}),
+        "strategy_labels": labels,
         "runtime": f"{hours:02d}:{mins:02d}:{secs:02d}",
         "trigger_detail": fuzzer_state.get("trigger_detail"),
     }
@@ -70,10 +83,13 @@ def api_stream():
             hours, rem = divmod(int(elapsed), 3600)
             mins, secs = divmod(rem, 60)
 
+            protocol = fuzzer_state.get("protocol", "dns")
+            labels = FTP_STRATEGY_LABELS if protocol == "ftp" else DNS_STRATEGY_LABELS
             data = {
                 "iteration": fuzzer_state["iteration"],
                 "status": fuzzer_state["status"],
                 "running": fuzzer_state["running"],
+                "protocol": protocol,
                 "anomaly_detected": fuzzer_state["anomaly_detected"],
                 "current_strategy": fuzzer_state["current_strategy"],
                 "baseline_mem_mb": fuzzer_state["baseline_mem_mb"],
@@ -85,6 +101,7 @@ def api_stream():
                 "last_crash_type": fuzzer_state.get("last_crash_type"),
                 "packets_per_sec": fuzzer_state.get("packets_per_sec", 0),
                 "strategy_stats": fuzzer_state.get("strategy_stats", {}),
+                "strategy_labels": labels,
                 "runtime": f"{hours:02d}:{mins:02d}:{secs:02d}",
                 "trigger_detail": fuzzer_state.get("trigger_detail"),
                 "events": event_log[-20:],
@@ -101,8 +118,13 @@ def api_start():
     if fuzzer_state["running"]:
         return jsonify({"error": "Fuzzer is already running"}), 400
 
+    body = request.json or {}
+    protocol = body.get("protocol", "dns").lower()
+    if protocol not in ("dns", "ftp"):
+        protocol = "dns"
+    fuzzer_state["protocol"] = protocol  # set before reset so reset_state preserves it
     reset_state()
-    log_event("INFO", "Fuzzer started from UI")
+    log_event("INFO", f"Fuzzer started from UI (protocol: {protocol.upper()}")
 
     def _run():
         try:
@@ -130,11 +152,17 @@ def api_stop():
 def api_crashes():
     os.makedirs(CRASHES_DIR, exist_ok=True)
     reports = []
-    for fname in sorted(os.listdir(CRASHES_DIR), reverse=True):
+    
+    files_with_mtime = []
+    for fname in os.listdir(CRASHES_DIR):
         if not fname.endswith(".txt"):
             continue
         fpath = os.path.join(CRASHES_DIR, fname)
-        stat = os.stat(fpath)
+        files_with_mtime.append((fname, fpath, os.stat(fpath)))
+        
+    files_with_mtime.sort(key=lambda x: x[2].st_mtime, reverse=True)
+    
+    for fname, fpath, stat in files_with_mtime:
         parts = fname.replace(".txt", "").split("_report_")
         anomaly_type = parts[0] if parts else fname
         iteration = ""
@@ -150,6 +178,7 @@ def api_crashes():
             "iteration": iteration,
             "size": stat.st_size,
             "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
+            "mtime": stat.st_mtime  
         })
     return jsonify(reports)
 
@@ -184,3 +213,4 @@ def api_crash_delete(filename):
 
 if __name__ == "__main__":
     app.run(debug=False, host="0.0.0.0", port=5000, threaded=True)
+

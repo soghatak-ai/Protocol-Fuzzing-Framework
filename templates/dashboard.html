@@ -200,6 +200,26 @@
 
         .ctrl-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
+        .proto-select {
+            appearance: none;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            font-size: 13px;
+            font-family: inherit;
+            padding: 6px 28px 6px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            outline: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23888'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 10px center;
+            transition: border-color 0.15s;
+        }
+        .proto-select:hover { border-color: var(--border-light); }
+        .proto-select:disabled { opacity: 0.3; cursor: not-allowed; }
+        .proto-select option { background: #1a1d23; }
+
         .target-info {
             display: flex;
             align-items: center;
@@ -404,6 +424,15 @@
         .s-compression_loop { background: var(--accent-orange); }
         .s-label_complexity { background: var(--accent-yellow); }
         .s-state_exhaustion { background: var(--accent-cyan); }
+
+        .s-cmd_overflow { background: var(--accent-red); }
+        .s-port_bomb { background: var(--accent-orange); }
+        .s-pipelined_auth { background: var(--accent-yellow); }
+        .s-cwd_depth { background: var(--accent-green); }
+        .s-epsv_eprt_mix { background: var(--accent-cyan); }
+        .s-stray_commands { background: var(--accent-blue); }
+        .s-boundary_port { background: var(--accent-purple); }
+        .s-oversized_site { background: #f472b6; }
 
         /* EVENT LOG */
         .event-log-panel {
@@ -673,7 +702,7 @@
         </div>
         <div class="header-right">
             <div class="target-info">
-                Target: <strong>Snort 3</strong>&nbsp;&middot;&nbsp;Protocol: <strong>DNS</strong>&nbsp;&middot;&nbsp;PID: <strong id="hdr-pid">&mdash;</strong>
+                Target: <strong>Snort 3</strong>&nbsp;&middot;&nbsp;Protocol: <strong id="hdr-protocol">DNS</strong>&nbsp;&middot;&nbsp;PID: <strong id="hdr-pid">&mdash;</strong>
             </div>
             <div id="status-badge" class="status-badge status-idle">
                 <div class="dot"></div>
@@ -696,6 +725,10 @@
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
                     Stop
                 </button>
+                <select id="proto-select" class="proto-select" title="Target protocol">
+                    <option value="dns">DNS</option>
+                    <option value="ftp">FTP</option>
+                </select>
             </div>
             <div class="target-info">
                 Runtime: <strong id="ctrl-runtime">00:00:00</strong>&nbsp;&middot;&nbsp;
@@ -835,7 +868,7 @@
         let evtSource = null;
         let pendingDeleteFile = null;
 
-        const stratLabels = {
+        let stratLabels = {
             smart_dns: 'Smart DNS',
             response_fuzz: 'Response Fuzz',
             compression_loop: 'Compression Loop',
@@ -866,6 +899,15 @@
             document.getElementById('status-text').textContent = data.status.toUpperCase().replace('_', ' ');
 
             document.getElementById('hdr-pid').textContent = data.snort_pid || '\u2014';
+            if (data.protocol) {
+                document.getElementById('hdr-protocol').textContent = data.protocol.toUpperCase();
+                if (data.running) {
+                    document.getElementById('proto-select').value = data.protocol;
+                }
+            }
+            document.getElementById('proto-select').disabled = data.running;
+
+            if (data.strategy_labels) stratLabels = data.strategy_labels;
 
             document.getElementById('btn-start').disabled = data.running;
             document.getElementById('btn-stop').disabled = !data.running;
@@ -941,8 +983,14 @@
 
         async function startFuzzer() {
             document.getElementById('btn-start').disabled = true;
+            document.getElementById('proto-select').disabled = true;
+            const protocol = document.getElementById('proto-select').value;
             try {
-                const res = await fetch('/api/start', { method: 'POST' });
+                const res = await fetch('/api/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ protocol })
+                });
                 const data = await res.json();
                 if (data.error) alert(data.error);
             } catch (e) { alert('Failed to start: ' + e); }
@@ -967,13 +1015,19 @@
                     return;
                 }
                 let html = '';
-                for (const c of crashes) {
+                // Since the API now sorts by mtime descending, the first item is the most recent
+                for (let i = 0; i < crashes.length; i++) {
+                    const c = crashes[i];
                     let badgeClass = 'badge-crash';
                     if (c.anomaly_type.includes('MEMORY')) badgeClass = 'badge-memory';
                     else if (c.anomaly_type.includes('HANG') || c.anomaly_type.includes('TIMEOUT')) badgeClass = 'badge-hang';
 
-                    html += `<tr>
-                        <td><span class="crash-type-badge ${badgeClass}">${c.anomaly_type}</span></td>
+                    const isRecent = i === 0;
+                    const rowStyle = isRecent ? 'background: rgba(255,255,255,0.03);' : '';
+                    const recentTag = isRecent ? '<span style="margin-left:8px;font-size:9px;color:var(--accent-green);border:1px solid rgba(74,222,128,0.3);padding:2px 6px;border-radius:4px;">NEW</span>' : '';
+
+                    html += `<tr style="${rowStyle}">
+                        <td><span class="crash-type-badge ${badgeClass}">${c.anomaly_type}</span>${recentTag}</td>
                         <td style="font-family:'JetBrains Mono',monospace;font-size:13px;">${formatNum(c.iteration)}</td>
                         <td style="color:var(--text-muted);font-size:13px;">${c.modified}</td>
                         <td style="color:var(--text-muted);font-size:12px;">${(c.size / 1024).toFixed(1)} KB</td>
