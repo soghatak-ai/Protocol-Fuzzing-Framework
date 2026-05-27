@@ -378,61 +378,75 @@
         .strat-list {
             display: flex;
             flex-direction: column;
-            gap: 16px;
+            gap: 6px;
         }
 
+        .strat-header {
+            display: grid;
+            grid-template-columns: 140px 1fr 56px 56px 56px;
+            gap: 8px;
+            padding: 0 0 8px 0;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 4px;
+        }
+
+        .strat-header span {
+            font-size: 10px;
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .strat-header span:nth-child(n+3) { text-align: right; }
+
         .strat-row {
-            display: flex;
+            display: grid;
+            grid-template-columns: 140px 1fr 56px 56px 56px;
+            gap: 8px;
             align-items: center;
-            gap: 12px;
+            padding: 3px 0;
         }
 
         .strat-name {
             font-size: 11px;
             color: var(--text-muted);
-            width: 130px;
-            flex-shrink: 0;
             font-family: 'JetBrains Mono', monospace;
             font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
 
         .strat-bar-track {
-            flex: 1;
-            height: 16px;
+            height: 14px;
             background: rgba(255,255,255,0.04);
-            border-radius: 4px;
+            border-radius: 3px;
             overflow: hidden;
         }
 
         .strat-bar-fill {
             height: 100%;
-            border-radius: 4px;
+            border-radius: 3px;
             transition: width 0.6s ease;
-            opacity: 0.6;
+            opacity: 0.7;
         }
 
         .strat-pct {
-            font-size: 11px;
+            font-size: 10px;
             font-family: 'JetBrains Mono', monospace;
             color: var(--text-muted);
-            width: 48px;
             text-align: right;
         }
 
-        .s-smart_dns { background: var(--accent-blue); }
-        .s-response_fuzz { background: var(--accent-purple); }
-        .s-compression_loop { background: var(--accent-orange); }
-        .s-label_complexity { background: var(--accent-yellow); }
-        .s-state_exhaustion { background: var(--accent-cyan); }
+        .strat-pct.highlight {
+            color: var(--accent-cyan);
+            font-weight: 600;
+        }
 
-        .s-cmd_overflow { background: var(--accent-red); }
-        .s-port_bomb { background: var(--accent-orange); }
-        .s-pipelined_auth { background: var(--accent-yellow); }
-        .s-cwd_depth { background: var(--accent-green); }
-        .s-epsv_eprt_mix { background: var(--accent-cyan); }
-        .s-stray_commands { background: var(--accent-blue); }
-        .s-boundary_port { background: var(--accent-purple); }
-        .s-oversized_site { background: #f472b6; }
+        .strat-pct.match { color: rgba(255,255,255,0.25); }
+
+        /* Bar colors are set dynamically via JS: green (high) → red (low) */
 
         /* EVENT LOG */
         .event-log-panel {
@@ -668,15 +682,248 @@
             font-size: 13px;
         }
 
+        /* TARGET CONFIGURATION CARD */
+        .config-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            margin-bottom: 24px;
+            overflow: hidden;
+        }
+        .config-card-header {
+            padding: 14px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid var(--border);
+        }
+        .config-card-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+        }
+        .mode-toggle {
+            display: flex;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+        .mode-btn {
+            padding: 5px 16px;
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.15s;
+            font-family: inherit;
+        }
+        .mode-btn.active {
+            background: var(--bg-card);
+            color: var(--accent-blue);
+        }
+        .config-body { padding: 20px 24px; }
+        .config-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 14px;
+        }
+        .config-field { display: flex; flex-direction: column; gap: 5px; }
+        .config-label {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            color: var(--text-muted);
+        }
+        .config-input {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 7px 11px;
+            color: var(--text-primary);
+            font-size: 13px;
+            font-family: 'JetBrains Mono', monospace;
+            transition: border-color 0.15s;
+            width: 100%;
+        }
+        .config-input:focus { outline: none; border-color: var(--accent-blue); }
+        .config-input:disabled { opacity: 0.35; cursor: not-allowed; }
+        .config-section-sep {
+            font-size: 10px;
+            font-weight: 600;
+            color: var(--accent-blue);
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            margin: 18px 0 12px;
+            padding-top: 14px;
+            border-top: 1px solid var(--border);
+        }
+        .live-fields { display: none; }
+        .live-fields.visible { display: block; }
+        .pipe-note {
+            font-size: 12px;
+            color: var(--text-muted);
+            padding: 4px 0;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .pipe-note-dot {
+            width: 6px; height: 6px;
+            background: var(--accent-green);
+            border-radius: 50%;
+        }
+
         /* PAGE TABS */
-        .page-dashboard { display: block; }
-        .page-reports { display: none; }
-        body.show-reports .page-dashboard { display: none; }
+        .page-dashboard, .page-reports, .page-ai { display: none; }
+        body.show-dashboard .page-dashboard { display: block; }
         body.show-reports .page-reports { display: block; }
+        body.show-ai .page-ai { display: block; }
+
+        /* AI ANALYSIS PAGE */
+        .ai-layout { display: grid; grid-template-columns: 340px 1fr; gap: 24px; }
+        .ai-left { display: flex; flex-direction: column; gap: 16px; }
+        .ai-right { min-width: 0; }
+
+        .ai-panel { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+        .ai-panel-header { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+        .ai-panel-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-secondary); }
+        .ai-panel-body { padding: 16px 20px; }
+
+        .ai-drop-zone {
+            border: 2px dashed var(--border);
+            border-radius: 8px;
+            padding: 28px 16px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .ai-drop-zone:hover, .ai-drop-zone.dragover { border-color: var(--accent-blue); background: rgba(96,165,250,0.04); }
+        .ai-drop-zone-icon { font-size: 28px; color: var(--text-muted); margin-bottom: 8px; }
+        .ai-drop-zone-text { font-size: 13px; color: var(--text-secondary); }
+        .ai-drop-zone-hint { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+
+        .ai-file-list { max-height: 200px; overflow-y: auto; }
+        .ai-file-item {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.04); font-size: 12px;
+        }
+        .ai-file-name { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
+        .ai-file-meta { color: var(--text-muted); font-size: 11px; }
+        .ai-file-rm { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 14px; padding: 2px 6px; }
+        .ai-file-rm:hover { color: var(--accent-red); }
+
+        .ai-btn-group { display: flex; gap: 8px; margin-top: 12px; }
+        .ai-btn {
+            flex: 1; padding: 10px; border-radius: 8px; border: 1px solid var(--border);
+            background: var(--bg-card); color: var(--text-primary); font-size: 13px; font-weight: 500;
+            cursor: pointer; transition: all 0.15s; font-family: inherit; text-align: center;
+        }
+        .ai-btn:hover { border-color: var(--border-light); background: var(--bg-card-hover); }
+        .ai-btn.primary { border-color: rgba(96,165,250,0.4); color: var(--accent-blue); }
+        .ai-btn.primary:hover { background: rgba(96,165,250,0.08); }
+        .ai-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+        .ai-btn.apply { border-color: rgba(74,222,128,0.4); color: var(--accent-green); }
+        .ai-btn.apply:hover { background: rgba(74,222,128,0.08); }
+        .ai-btn.reset { border-color: rgba(251,191,36,0.4); color: var(--accent-yellow); }
+        .ai-btn.reset:hover { background: rgba(251,191,36,0.08); }
+
+        .ai-status { display: flex; align-items: center; gap: 8px; padding: 10px 0; font-size: 12px; }
+        .ai-status-dot { width: 7px; height: 7px; border-radius: 50%; }
+        .ai-status-dot.idle { background: var(--text-muted); }
+        .ai-status-dot.analyzing { background: var(--accent-blue); animation: pulse 1s infinite; }
+        .ai-status-dot.done { background: var(--accent-green); }
+        .ai-status-dot.error { background: var(--accent-red); }
+
+        .ai-spinner { display: inline-block; width: 32px; height: 32px; border: 3px solid var(--border); border-top-color: var(--accent-blue); border-radius: 50%; animation: spin 0.8s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .ai-results-placeholder { text-align: center; padding: 60px 20px; color: var(--text-muted); }
+        .ai-results-placeholder h3 { font-size: 15px; color: var(--text-secondary); margin-bottom: 8px; }
+
+        /* Vuln cards */
+        .ai-vuln-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 12px; overflow: hidden; }
+        .ai-vuln-header {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 14px 18px; cursor: pointer; transition: background 0.15s;
+        }
+        .ai-vuln-header:hover { background: var(--bg-card-hover); }
+        .ai-vuln-left { display: flex; align-items: center; gap: 12px; }
+        .ai-vuln-id {
+            width: 28px; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center;
+            font-size: 11px; font-weight: 700; flex-shrink: 0;
+        }
+        .ai-vuln-id.critical { background: rgba(248,113,113,0.15); color: var(--accent-red); }
+        .ai-vuln-id.high { background: rgba(251,191,36,0.15); color: var(--accent-yellow); }
+        .ai-vuln-id.medium { background: rgba(96,165,250,0.15); color: var(--accent-blue); }
+        .ai-vuln-id.low { background: rgba(255,255,255,0.08); color: var(--text-muted); }
+        .ai-vuln-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+        .ai-vuln-sub { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+        .ai-vuln-badge { font-size: 10px; padding: 3px 8px; border-radius: 4px; background: rgba(255,255,255,0.06); color: var(--text-muted); font-weight: 500; }
+        .ai-vuln-body { display: none; padding: 0 18px 18px; }
+        .ai-vuln-card.open .ai-vuln-body { display: block; }
+        .ai-vuln-section { margin-bottom: 14px; }
+        .ai-vuln-label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-muted); margin-bottom: 6px; }
+        .ai-vuln-text { font-size: 12px; color: var(--text-secondary); line-height: 1.6; }
+
+        .ai-payload-block { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+        .ai-payload-header { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+        .ai-payload-header span { font-size: 11px; color: var(--text-muted); }
+        .ai-payload-hex { padding: 10px 12px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--accent-green); word-break: break-all; line-height: 1.6; }
+        .ai-copy-btn { padding: 2px 8px; border: 1px solid var(--border); border-radius: 4px; background: transparent; color: var(--text-muted); font-size: 10px; cursor: pointer; font-family: inherit; }
+        .ai-copy-btn:hover { border-color: var(--accent-green); color: var(--accent-green); }
+
+        .ai-matched-strat { font-size: 11px; padding: 3px 10px; border-radius: 4px; background: rgba(74,222,128,0.12); border: 1px solid rgba(74,222,128,0.25); color: var(--accent-green); font-weight: 600; }
+        .ai-meta-row { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+        .ai-meta-tag { font-size: 11px; padding: 4px 10px; border-radius: 4px; background: rgba(255,255,255,0.04); border: 1px solid var(--border); color: var(--text-muted); }
+        .ai-meta-tag strong { color: var(--text-secondary); }
+
+        /* Weight comparison */
+        .ai-weight-section { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; margin-top: 16px; }
+        .ai-weight-section h4 { font-size: 13px; color: var(--text-primary); margin-bottom: 4px; }
+        .ai-weight-reasoning { font-size: 11px; color: var(--text-muted); margin-bottom: 14px; line-height: 1.5; }
+        .ai-w-row { display: flex; align-items: center; margin-bottom: 6px; gap: 8px; }
+        .ai-w-name { width: 120px; font-size: 11px; color: var(--text-muted); text-align: right; flex-shrink: 0; font-family: 'JetBrains Mono', monospace; }
+        .ai-w-bars { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+        .ai-w-bar-row { display: flex; align-items: center; gap: 4px; height: 12px; }
+        .ai-w-bar-lbl { font-size: 8px; color: var(--text-muted); width: 28px; flex-shrink: 0; }
+        .ai-w-bar { height: 8px; border-radius: 2px; min-width: 2px; transition: width 0.4s ease; }
+        .ai-w-bar.def { background: rgba(255,255,255,0.15); }
+        .ai-w-bar.up { background: var(--accent-green); }
+        .ai-w-bar.down { background: var(--accent-red); opacity: 0.6; }
+        .ai-w-bar.same { background: var(--accent-blue); opacity: 0.5; }
+        .ai-w-pct { font-size: 10px; color: var(--text-muted); width: 36px; text-align: right; flex-shrink: 0; font-family: 'JetBrains Mono', monospace; }
+        .ai-w-delta { font-size: 9px; font-weight: 700; width: 40px; flex-shrink: 0; font-family: 'JetBrains Mono', monospace; }
+        .ai-w-delta.up { color: var(--accent-green); }
+        .ai-w-delta.down { color: var(--accent-red); }
+        .ai-w-delta.same { color: var(--text-muted); }
+        .ai-w-legend { display: flex; gap: 14px; margin-bottom: 10px; }
+        .ai-w-legend-item { display: flex; align-items: center; gap: 5px; font-size: 10px; color: var(--text-muted); }
+        .ai-w-legend-dot { width: 8px; height: 8px; border-radius: 2px; }
+
+        .ai-summary-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; margin-bottom: 16px; }
+        .ai-summary-card h3 { font-size: 13px; color: var(--text-primary); margin-bottom: 8px; }
+        .ai-summary-card p { font-size: 12px; color: var(--text-secondary); line-height: 1.6; }
+        .ai-sev-badges { display: flex; gap: 10px; margin-top: 10px; }
+        .ai-sev-badge { font-size: 11px; padding: 4px 10px; border-radius: 12px; font-weight: 600; }
+        .ai-sev-badge.critical { background: rgba(248,113,113,0.12); color: var(--accent-red); }
+        .ai-sev-badge.high { background: rgba(251,191,36,0.12); color: var(--accent-yellow); }
+        .ai-sev-badge.medium { background: rgba(96,165,250,0.12); color: var(--accent-blue); }
+        .ai-sev-badge.low { background: rgba(255,255,255,0.06); color: var(--text-muted); }
+
+        .ai-weight-active { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-radius: 6px; font-size: 12px; margin-top: 10px; }
+        .ai-weight-active.ai-source { background: rgba(74,222,128,0.06); border: 1px solid rgba(74,222,128,0.2); color: var(--accent-green); }
+        .ai-weight-active.default-source { background: rgba(255,255,255,0.03); border: 1px solid var(--border); color: var(--text-muted); }
 
         @media (max-width: 1200px) {
             .stats-grid { grid-template-columns: repeat(3, 1fr); }
             .panels-row { grid-template-columns: 1fr; }
+            .ai-layout { grid-template-columns: 1fr; }
         }
 
         @media (max-width: 768px) {
@@ -686,7 +933,7 @@
         }
     </style>
 </head>
-<body>
+<body class="show-dashboard">
 
     <!-- HEADER -->
     <header class="header">
@@ -697,6 +944,7 @@
             </div>
             <div class="header-nav">
                 <button class="nav-btn active" onclick="showPage('dashboard')">Dashboard</button>
+                <button class="nav-btn" onclick="showPage('ai')">AI Analysis</button>
                 <button class="nav-btn" onclick="showPage('reports')">Crash Reports</button>
             </div>
         </div>
@@ -733,6 +981,67 @@
             <div class="target-info">
                 Runtime: <strong id="ctrl-runtime">00:00:00</strong>&nbsp;&middot;&nbsp;
                 Strategy: <strong id="ctrl-strategy">&mdash;</strong>
+            </div>
+        </div>
+
+        <!-- TARGET CONFIGURATION -->
+        <div class="config-card" id="config-card">
+            <div class="config-card-header">
+                <span class="config-card-title">Target Configuration</span>
+                <div class="mode-toggle">
+                    <button class="mode-btn active" id="btn-mode-pipe" onclick="setMode('pipe')">Local PCAP</button>
+                    <button class="mode-btn" id="btn-mode-live" onclick="setMode('live')">Live Network (FTD)</button>
+                </div>
+            </div>
+            <div class="config-body">
+
+                <!-- PIPE MODE NOTE -->
+                <div class="pipe-note" id="pipe-note">
+                    <div class="pipe-note-dot"></div>
+                    Local PCAP mode &mdash; Snort runs on this machine, fed via named pipe.
+                </div>
+
+                <!-- LIVE NETWORK FIELDS -->
+                <div class="live-fields" id="live-fields">
+                    <div class="config-grid">
+                        <div class="config-field">
+                            <label class="config-label" for="cfg-server-ip">Server IP *</label>
+                            <input class="config-input" id="cfg-server-ip" type="text" placeholder="192.168.1.100">
+                        </div>
+                        <div class="config-field">
+                            <label class="config-label" for="cfg-server-port">Server Port</label>
+                            <input class="config-input" id="cfg-server-port" type="number" placeholder="53" value="53">
+                        </div>
+                        <div class="config-field">
+                            <label class="config-label" for="cfg-interface">Network Interface</label>
+                            <input class="config-input" id="cfg-interface" type="text" placeholder="eth0 / en0 (optional)">
+                        </div>
+                    </div>
+
+                    <div class="config-section-sep">FTD Remote Monitoring &mdash; optional (requires SSH access)</div>
+                    <div class="config-grid">
+                        <div class="config-field">
+                            <label class="config-label" for="cfg-ftd-ip">FTD Host IP</label>
+                            <input class="config-input" id="cfg-ftd-ip" type="text" placeholder="10.0.0.1">
+                        </div>
+                        <div class="config-field">
+                            <label class="config-label" for="cfg-ftd-user">SSH User</label>
+                            <input class="config-input" id="cfg-ftd-user" type="text" placeholder="admin" value="admin">
+                        </div>
+                        <div class="config-field">
+                            <label class="config-label" for="cfg-ftd-pass">SSH Password</label>
+                            <input class="config-input" id="cfg-ftd-pass" type="password" placeholder="&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;">
+                        </div>
+                        <div class="config-field">
+                            <label class="config-label" for="cfg-ftd-ssh-port">SSH Port</label>
+                            <input class="config-input" id="cfg-ftd-ssh-port" type="number" placeholder="22" value="22">
+                        </div>
+                        <div class="config-field">
+                            <label class="config-label" for="cfg-snort-pid">Snort PID on FTD</label>
+                            <input class="config-input" id="cfg-snort-pid" type="number" placeholder="e.g. 12345">
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -814,6 +1123,90 @@
         </div>
     </div>
 
+    <!-- AI ANALYSIS PAGE -->
+    <div class="main-container page-ai">
+        <div class="ai-layout">
+            <!-- LEFT: Upload & Controls -->
+            <div class="ai-left">
+                <div class="ai-panel">
+                    <div class="ai-panel-header">
+                        <span class="ai-panel-title">Source Files</span>
+                        <span class="ai-panel-title" id="ai-file-count" style="color:var(--text-muted);">0 files</span>
+                    </div>
+                    <div class="ai-panel-body">
+                        <div class="ai-drop-zone" id="ai-drop-zone">
+                            <div class="ai-drop-zone-icon">+</div>
+                            <div class="ai-drop-zone-text">Drop C/C++ source files</div>
+                            <div class="ai-drop-zone-hint">or click to browse</div>
+                            <input type="file" id="ai-file-input" multiple accept=".c,.cc,.cpp,.h,.hpp" style="display:none">
+                        </div>
+                        <div class="ai-file-list" id="ai-file-list"></div>
+                        <div class="ai-btn-group">
+                            <button class="ai-btn primary" id="ai-btn-analyze" onclick="aiAnalyze()" disabled>Analyze</button>
+                        </div>
+                        <div class="ai-status" id="ai-status">
+                            <div class="ai-status-dot idle" id="ai-status-dot"></div>
+                            <span id="ai-status-text">Ready</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="ai-panel">
+                    <div class="ai-panel-header">
+                        <span class="ai-panel-title">Active Weights</span>
+                    </div>
+                    <div class="ai-panel-body">
+                        <div id="ai-weight-status" class="ai-weight-active default-source">
+                            Using default strategy weights
+                        </div>
+                        <div class="ai-btn-group">
+                            <button class="ai-btn apply" id="ai-btn-apply" onclick="aiApplyWeights()" disabled>Apply AI Weights</button>
+                            <button class="ai-btn reset" id="ai-btn-reset" onclick="aiResetWeights()">Reset</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="ai-panel">
+                    <div class="ai-panel-header"><span class="ai-panel-title">Agentic Pipeline</span></div>
+                    <div class="ai-panel-body" style="font-size:11px; color:var(--text-muted); line-height:1.8;">
+                        <div style="display:flex; align-items:center; gap:6px; margin-bottom:4px;">
+                            <span style="width:18px; height:18px; border-radius:50%; background:rgba(96,165,250,0.15); color:var(--accent-blue); display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:700; flex-shrink:0;">1</span>
+                            Upload IDS source code
+                        </div>
+                        <div id="pipe-step-hunter" style="display:flex; align-items:center; gap:6px; margin-bottom:4px;">
+                            <span style="width:18px; height:18px; border-radius:50%; background:rgba(251,191,36,0.15); color:var(--accent-yellow); display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:700; flex-shrink:0;">2</span>
+                            <b>Hunter</b>&nbsp;&mdash; find all vulnerabilities
+                        </div>
+                        <div id="pipe-step-verifier" style="display:flex; align-items:center; gap:6px; margin-bottom:4px;">
+                            <span style="width:18px; height:18px; border-radius:50%; background:rgba(251,146,60,0.15); color:var(--accent-orange); display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:700; flex-shrink:0;">3</span>
+                            <b>Verifier</b>&nbsp;&mdash; validate &amp; reject false positives
+                        </div>
+                        <div id="pipe-step-weigher" style="display:flex; align-items:center; gap:6px; margin-bottom:4px;">
+                            <span style="width:18px; height:18px; border-radius:50%; background:rgba(34,211,238,0.15); color:var(--accent-cyan); display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:700; flex-shrink:0;">4</span>
+                            <b>Weigher</b>&nbsp;&mdash; deterministic Python formula
+                        </div>
+                        <div style="display:flex; align-items:center; gap:6px; margin-bottom:4px;">
+                            <span style="width:18px; height:18px; border-radius:50%; background:rgba(74,222,128,0.15); color:var(--accent-green); display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:700; flex-shrink:0;">5</span>
+                            Apply weights &rarr; go to Dashboard
+                        </div>
+                        <div id="pipe-stats" style="margin-top:8px; padding-top:8px; border-top:1px solid var(--border); display:none;">
+                            <div style="font-size:10px; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:4px; color:var(--text-muted);">Last Run Stats</div>
+                            <div id="pipe-stats-content" style="font-family:'JetBrains Mono',monospace; font-size:10px;"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- RIGHT: Results -->
+            <div class="ai-right" id="ai-results-area">
+                <div class="ai-results-placeholder" id="ai-placeholder">
+                    <h3>No Analysis Yet</h3>
+                    <p>Upload source files and click "Analyze" to identify vulnerabilities and optimize mutation strategy weights.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- REPORTS PAGE -->
     <div class="main-container page-reports">
         <div class="panel crash-reports-panel">
@@ -867,25 +1260,63 @@
     <script>
         let evtSource = null;
         let pendingDeleteFile = null;
+        let currentMode = 'pipe';
+        let aiLastResults = null;
 
         let stratLabels = {
-            smart_dns: 'Smart DNS',
-            response_fuzz: 'Response Fuzz',
+            smart_dns:        'Smart DNS',
+            response_fuzz:    'Response Fuzz',
             compression_loop: 'Compression Loop',
             label_complexity: 'Label Complexity',
-            state_exhaustion: 'State Exhaustion',
+            edns_exploit:     'EDNS Exploit',
+            tcp_dns_segment:  'TCP Segment',
+            txt_rdata_bomb:   'TXT RDATA Bomb',
+            tcp_two_message:  'TCP Two-Message',
+            ip_defrag:        'IP Defrag',
+            back_orifice:     'Back Orifice',
+            dce_smb:          'DCE/SMB',
+            inspector_stress: 'Inspector Stress',
+            dnssec_exploit:     'DNSSEC Exploit',
+            dns_dynamic_update: 'DNS Dyn Update',
+            multi_query_storm:  'Multi-Query Storm',
+            cmd_overflow:           'CMD Overflow',
+            port_bomb:              'PORT Flood',
+            pipelined_auth:         'Auth Pipeline',
+            cwd_depth:              'CWD Depth Bomb',
+            epsv_eprt_mix:          'EPSV/EPRT Mix',
+            stray_commands:         'Stray Commands',
+            boundary_port:          'Boundary PORT',
+            oversized_site:         'SITE Overflow',
+            encoding_attack:        'Encoding Attack',
+            rest_overflow:          'REST Overflow',
+            data_channel_confusion: 'Data Ch. Confusion',
+            feat_negotiate:         'FEAT Negotiate',
         };
+        let cachedWeights = null;
+
+        async function fetchWeights() {
+            try {
+                const res = await fetch('/api/ai/weights');
+                cachedWeights = await res.json();
+            } catch(e) { console.error('Failed to fetch weights:', e); }
+        }
+
+        function setMode(mode) {
+            currentMode = mode;
+            document.getElementById('btn-mode-pipe').classList.toggle('active', mode === 'pipe');
+            document.getElementById('btn-mode-live').classList.toggle('active', mode === 'live');
+            document.getElementById('live-fields').classList.toggle('visible', mode === 'live');
+            document.getElementById('pipe-note').style.display = mode === 'pipe' ? '' : 'none';
+        }
 
         function showPage(page) {
+            document.body.className = 'show-' + page;
             document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-            if (page === 'reports') {
-                document.body.classList.add('show-reports');
-                document.querySelectorAll('.nav-btn')[1].classList.add('active');
-                loadCrashes();
-            } else {
-                document.body.classList.remove('show-reports');
-                document.querySelectorAll('.nav-btn')[0].classList.add('active');
-            }
+            const pages = ['dashboard', 'ai', 'reports'];
+            const idx = pages.indexOf(page);
+            if (idx >= 0) document.querySelectorAll('.nav-btn')[idx].classList.add('active');
+            if (page === 'reports') loadCrashes();
+            if (page === 'ai') aiRefreshFiles();
         }
 
         function formatNum(n) {
@@ -901,29 +1332,25 @@
             document.getElementById('hdr-pid').textContent = data.snort_pid || '\u2014';
             if (data.protocol) {
                 document.getElementById('hdr-protocol').textContent = data.protocol.toUpperCase();
-                if (data.running) {
-                    document.getElementById('proto-select').value = data.protocol;
-                }
+                if (data.running) document.getElementById('proto-select').value = data.protocol;
             }
             document.getElementById('proto-select').disabled = data.running;
-
             if (data.strategy_labels) stratLabels = data.strategy_labels;
 
             document.getElementById('btn-start').disabled = data.running;
             document.getElementById('btn-stop').disabled = !data.running;
+            const cfgCard = document.getElementById('config-card');
+            if (cfgCard) cfgCard.style.display = data.running ? 'none' : '';
             document.getElementById('ctrl-runtime').textContent = data.runtime;
             document.getElementById('ctrl-strategy').textContent = data.current_strategy || '\u2014';
 
             document.getElementById('stat-iterations').textContent = formatNum(data.iteration);
             document.getElementById('stat-pps').textContent = formatNum(data.packets_per_sec) + ' pkt/s';
-
             document.getElementById('stat-mem').textContent = data.current_mem_mb != null ? data.current_mem_mb.toFixed(1) + ' MB' : '\u2014';
             document.getElementById('stat-mem-sub').textContent = 'Baseline: ' + (data.baseline_mem_mb != null ? data.baseline_mem_mb.toFixed(1) + ' MB' : '\u2014');
             document.getElementById('stat-peak').textContent = data.peak_mem_mb != null ? data.peak_mem_mb.toFixed(1) + ' MB' : '\u2014';
-
             document.getElementById('stat-crashes').textContent = data.total_crashes || 0;
             document.getElementById('stat-last-crash').textContent = data.last_crash_time ? 'Last: ' + data.last_crash_time : 'No crashes yet';
-
             document.getElementById('stat-anomaly').textContent = data.anomaly_detected || 'None';
             document.getElementById('stat-anomaly').style.color = data.anomaly_detected ? 'var(--accent-red)' : 'var(--text-muted)';
             document.getElementById('stat-trigger').textContent = data.trigger_detail || '\u2014';
@@ -946,15 +1373,57 @@
             const total = Object.values(stats).reduce((a, b) => a + b, 0);
             document.getElementById('strat-total').textContent = formatNum(total) + ' total';
             const stratEl = document.getElementById('strat-list');
-            stratEl.innerHTML = '';
-            for (const [key, count] of Object.entries(stats)) {
-                const pct = total > 0 ? (count / total * 100) : 0;
-                stratEl.innerHTML += `<div class="strat-row">
+            const proto = data.protocol || 'dns';
+            const wDefault = cachedWeights ? (proto === 'ftp' ? cachedWeights.ftp_default : cachedWeights.dns_default) : {};
+            const wApplied = cachedWeights ? (proto === 'ftp' ? cachedWeights.ftp : cachedWeights.dns) : {};
+            const wSource = cachedWeights ? cachedWeights.source : 'default';
+
+            let html = `<div class="strat-header">
+                <span>Strategy</span><span></span>
+                <span>Original</span><span>Applied</span><span>Actual</span>
+            </div>`;
+
+            const entries = Object.entries(stats).sort((a, b) => b[1] - a[1]);
+            const maxPct = entries.length > 0 && total > 0 ? (entries[0][1] / total * 100) : 1;
+            const n = entries.length;
+
+            for (let i = 0; i < n; i++) {
+                const [key, count] = entries[i];
+                const actualPct = total > 0 ? (count / total * 100) : 0;
+                const barW = maxPct > 0 ? (actualPct / maxPct * 100) : 0;
+
+                // Green (top) → Red (bottom) based on rank
+                const t = n > 1 ? i / (n - 1) : 0;
+                const r = Math.round(34 + t * (239 - 34));
+                const g = Math.round(197 - t * (197 - 68));
+                const b = Math.round(94 - t * (94 - 68));
+                const barColor = `rgb(${r}, ${g}, ${b})`;
+
+                const dw = wDefault[key];
+                const aw = wApplied[key];
+                let origPct, applPct;
+                if (proto === 'ftp') {
+                    const dTotal = Object.values(wDefault).reduce((a,b) => a+b, 0) || 1;
+                    const aTotal = Object.values(wApplied).reduce((a,b) => a+b, 0) || 1;
+                    origPct = dw != null ? (dw / dTotal * 100) : 0;
+                    applPct = aw != null ? (aw / aTotal * 100) : 0;
+                } else {
+                    origPct = dw != null ? (dw * 100) : 0;
+                    applPct = aw != null ? (aw * 100) : 0;
+                }
+
+                const isSame = Math.abs(origPct - applPct) < 0.1;
+                const applCls = isSame ? 'strat-pct match' : 'strat-pct highlight';
+
+                html += `<div class="strat-row">
                     <span class="strat-name">${stratLabels[key] || key}</span>
-                    <div class="strat-bar-track"><div class="strat-bar-fill s-${key}" style="width:${pct}%"></div></div>
-                    <span class="strat-pct">${pct.toFixed(1)}%</span>
+                    <div class="strat-bar-track"><div class="strat-bar-fill" style="width:${barW}%;background:${barColor}"></div></div>
+                    <span class="strat-pct">${origPct.toFixed(1)}%</span>
+                    <span class="${applCls}">${applPct.toFixed(1)}%</span>
+                    <span class="strat-pct" style="color:var(--text-primary)">${actualPct.toFixed(1)}%</span>
                 </div>`;
             }
+            stratEl.innerHTML = html;
 
             if (data.events && data.events.length > 0) {
                 const logEl = document.getElementById('event-log');
@@ -985,14 +1454,40 @@
             document.getElementById('btn-start').disabled = true;
             document.getElementById('proto-select').disabled = true;
             const protocol = document.getElementById('proto-select').value;
+            const body = { protocol, mode: currentMode };
+
+            if (currentMode === 'live') {
+                const serverIp = document.getElementById('cfg-server-ip').value.trim();
+                if (!serverIp) {
+                    alert('Server IP is required for Live Network mode.');
+                    document.getElementById('btn-start').disabled = false;
+                    document.getElementById('proto-select').disabled = false;
+                    return;
+                }
+                body.live_config = {
+                    server_ip:    serverIp,
+                    server_port:  document.getElementById('cfg-server-port').value || '53',
+                    interface:    document.getElementById('cfg-interface').value.trim(),
+                    ftd_ip:       document.getElementById('cfg-ftd-ip').value.trim(),
+                    ftd_user:     document.getElementById('cfg-ftd-user').value.trim() || 'admin',
+                    ftd_pass:     document.getElementById('cfg-ftd-pass').value,
+                    ftd_ssh_port: document.getElementById('cfg-ftd-ssh-port').value || '22',
+                    snort_pid:    document.getElementById('cfg-snort-pid').value,
+                };
+            }
+
             try {
                 const res = await fetch('/api/start', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ protocol })
+                    body: JSON.stringify(body)
                 });
                 const data = await res.json();
-                if (data.error) alert(data.error);
+                if (data.error) {
+                    alert(data.error);
+                    document.getElementById('btn-start').disabled = false;
+                    document.getElementById('proto-select').disabled = false;
+                }
             } catch (e) { alert('Failed to start: ' + e); }
         }
 
@@ -1005,6 +1500,7 @@
             } catch (e) { alert('Failed to stop: ' + e); }
         }
 
+        /* ======== CRASH REPORT FUNCTIONS ======== */
         async function loadCrashes() {
             try {
                 const res = await fetch('/api/crashes');
@@ -1015,17 +1511,14 @@
                     return;
                 }
                 let html = '';
-                // Since the API now sorts by mtime descending, the first item is the most recent
                 for (let i = 0; i < crashes.length; i++) {
                     const c = crashes[i];
                     let badgeClass = 'badge-crash';
                     if (c.anomaly_type.includes('MEMORY')) badgeClass = 'badge-memory';
                     else if (c.anomaly_type.includes('HANG') || c.anomaly_type.includes('TIMEOUT')) badgeClass = 'badge-hang';
-
                     const isRecent = i === 0;
                     const rowStyle = isRecent ? 'background: rgba(255,255,255,0.03);' : '';
                     const recentTag = isRecent ? '<span style="margin-left:8px;font-size:9px;color:var(--accent-green);border:1px solid rgba(74,222,128,0.3);padding:2px 6px;border-radius:4px;">NEW</span>' : '';
-
                     html += `<tr style="${rowStyle}">
                         <td><span class="crash-type-badge ${badgeClass}">${c.anomaly_type}</span>${recentTag}</td>
                         <td style="font-family:'JetBrains Mono',monospace;font-size:13px;">${formatNum(c.iteration)}</td>
@@ -1052,43 +1545,335 @@
                 const res = await fetch('/api/crashes/' + filename);
                 const data = await res.json();
                 document.getElementById('modal-content').textContent = data.content;
-            } catch (e) {
-                document.getElementById('modal-content').textContent = 'Error loading report';
-            }
+            } catch (e) { document.getElementById('modal-content').textContent = 'Error loading report'; }
         }
 
-        function downloadCrash(filename) {
-            window.open('/api/crashes/' + filename + '/download', '_blank');
-        }
+        function downloadCrash(filename) { window.open('/api/crashes/' + filename + '/download', '_blank'); }
 
         function promptDelete(filename) {
             pendingDeleteFile = filename;
             document.getElementById('confirm-msg').textContent = 'Delete report ' + filename + '?';
             document.getElementById('confirm-overlay').classList.add('open');
         }
-
-        function cancelDelete() {
-            pendingDeleteFile = null;
-            document.getElementById('confirm-overlay').classList.remove('open');
-        }
-
+        function cancelDelete() { pendingDeleteFile = null; document.getElementById('confirm-overlay').classList.remove('open'); }
         async function confirmDelete() {
             if (!pendingDeleteFile) return;
-            try {
-                await fetch('/api/crashes/' + pendingDeleteFile, { method: 'DELETE' });
-                loadCrashes();
-            } catch (e) { alert('Failed to delete'); }
+            try { await fetch('/api/crashes/' + pendingDeleteFile, { method: 'DELETE' }); loadCrashes(); } catch (e) { alert('Failed to delete'); }
             pendingDeleteFile = null;
             document.getElementById('confirm-overlay').classList.remove('open');
         }
+        function closeModal(e) { if (e.target === document.getElementById('modal-overlay')) document.getElementById('modal-overlay').classList.remove('open'); }
 
-        function closeModal(e) {
-            if (e.target === document.getElementById('modal-overlay')) {
-                document.getElementById('modal-overlay').classList.remove('open');
+        /* ======== AI ANALYSIS FUNCTIONS ======== */
+        const dropZone = document.getElementById('ai-drop-zone');
+        const fileInput = document.getElementById('ai-file-input');
+
+        dropZone.addEventListener('click', () => fileInput.click());
+        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+        dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault(); dropZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length) aiUploadFiles(e.dataTransfer.files);
+        });
+        fileInput.addEventListener('change', () => { if (fileInput.files.length) aiUploadFiles(fileInput.files); });
+
+        async function aiUploadFiles(files) {
+            const fd = new FormData();
+            for (const f of files) fd.append('files', f);
+            try {
+                const res = await fetch('/api/ai/upload', { method: 'POST', body: fd });
+                const data = await res.json();
+                if (data.error) { alert(data.error); return; }
+                aiRefreshFiles();
+            } catch (e) { alert('Upload failed: ' + e); }
+        }
+
+        async function aiRefreshFiles() {
+            try {
+                const res = await fetch('/api/ai/files');
+                const data = await res.json();
+                const list = document.getElementById('ai-file-list');
+                const count = data.files.length;
+                document.getElementById('ai-file-count').textContent = count + ' file' + (count !== 1 ? 's' : '');
+                document.getElementById('ai-btn-analyze').disabled = count === 0;
+                if (count === 0) { list.innerHTML = ''; return; }
+                let html = '';
+                for (const f of data.files) {
+                    html += `<div class="ai-file-item">
+                        <span class="ai-file-name" title="${f.name}">${f.name}</span>
+                        <span class="ai-file-meta">${f.lines} lines</span>
+                        <button class="ai-file-rm" onclick="aiRemoveFile('${f.name}')" title="Remove">&times;</button>
+                    </div>`;
+                }
+                list.innerHTML = html;
+            } catch (e) {}
+        }
+
+        async function aiRemoveFile(filename) {
+            await fetch('/api/ai/files/' + encodeURIComponent(filename), { method: 'DELETE' });
+            aiRefreshFiles();
+        }
+
+        function aiSetStatus(status, text) {
+            const dot = document.getElementById('ai-status-dot');
+            dot.className = 'ai-status-dot ' + status;
+            document.getElementById('ai-status-text').textContent = text;
+        }
+
+        let pipelinePoller = null;
+
+        async function aiAnalyze() {
+            const btn = document.getElementById('ai-btn-analyze');
+            btn.disabled = true;
+            aiSetStatus('analyzing', 'Starting agentic pipeline...');
+            document.getElementById('ai-results-area').innerHTML = '<div class="ai-results-placeholder"><div class="ai-spinner"></div><h3 style="margin-top:16px;">Agentic Analysis Running</h3><p id="pipeline-status-msg">Pass 1/3: Hunter is scanning for vulnerabilities...</p></div>';
+
+            // Poll analysis status to update pipeline step display
+            pipelinePoller = setInterval(async () => {
+                try {
+                    const r = await fetch('/api/ai/results');
+                    const d = await r.json();
+                    const s = d.status || '';
+                    const msgEl = document.getElementById('pipeline-status-msg');
+                    if (!msgEl) return;
+                    if (s.includes('pass 1')) msgEl.textContent = 'Pass 1/3: Scanning for vulnerabilities...';
+                    else if (s.includes('pass 2')) msgEl.textContent = 'Pass 2/3: Validating findings...';
+                    else if (s.includes('pass 3')) msgEl.textContent = 'Pass 3/3: Computing weights...';
+                } catch(e) {}
+            }, 2000);
+
+            try {
+                const res = await fetch('/api/ai/analyze', { method: 'POST' });
+                clearInterval(pipelinePoller);
+                const data = await res.json();
+                if (data.error) {
+                    aiSetStatus('error', 'Error: ' + data.error);
+                    document.getElementById('ai-results-area').innerHTML = `<div class="ai-results-placeholder"><h3 style="color:var(--accent-red);">Analysis Failed</h3><p>${data.error}</p></div>`;
+                    btn.disabled = false;
+                    return;
+                }
+                aiLastResults = data.results;
+                const pipe = data.results.pipeline || {};
+                const modelName = data.results.model_used || 'Gemini';
+                aiSetStatus('done', `Done: ${pipe.pass2_verified || 0} verified vulns (${modelName})`);
+                aiRenderResults(data.results);
+                aiUpdatePipelineStats(data.results);
+                document.getElementById('ai-btn-apply').disabled = !data.results.recommended_weights;
+            } catch (e) {
+                clearInterval(pipelinePoller);
+                aiSetStatus('error', 'Request failed');
+                document.getElementById('ai-results-area').innerHTML = `<div class="ai-results-placeholder"><h3 style="color:var(--accent-red);">Request Failed</h3><p>${e}</p></div>`;
             }
+            btn.disabled = false;
+        }
+
+        function aiUpdatePipelineStats(results) {
+            const pipe = results.pipeline || {};
+            const statsEl = document.getElementById('pipe-stats');
+            const contentEl = document.getElementById('pipe-stats-content');
+            if (!statsEl || !contentEl) return;
+            statsEl.style.display = '';
+            contentEl.innerHTML = `
+                <div style="color:var(--accent-yellow)">Hunter found: <b>${pipe.pass1_vulns || 0}</b> vulns</div>
+                <div style="color:var(--accent-green)">Verified: <b>${pipe.pass2_verified || 0}</b></div>
+                <div style="color:var(--accent-red)">Rejected: <b>${pipe.pass2_rejected || 0}</b></div>
+                <div style="color:var(--accent-cyan)">Weights: <b>deterministic</b></div>
+            `;
+        }
+
+        function aiRenderResults(results) {
+            const area = document.getElementById('ai-results-area');
+            let html = '';
+
+            // Summary card with pipeline stats
+            const vulns = results.vulnerabilities || [];
+            const rejected = results.rejected_vulnerabilities || [];
+            const pipe = results.pipeline || {};
+            const sevCounts = { critical: 0, high: 0, medium: 0, low: 0 };
+            vulns.forEach(v => { if (sevCounts[v.severity] !== undefined) sevCounts[v.severity]++; });
+            html += `<div class="ai-summary-card">
+                <h3>${results.file_summary || 'Analysis Results'}</h3>
+                ${pipe.pass1_vulns != null ? `<p style="font-size:11px; color:var(--text-muted); margin-bottom:6px;">
+                    Pipeline: <span style="color:var(--accent-yellow)">${pipe.pass1_vulns} hunted</span> &rarr;
+                    <span style="color:var(--accent-green)">${pipe.pass2_verified} verified</span> &rarr;
+                    <span style="color:var(--accent-red)">${pipe.pass2_rejected} rejected</span> &rarr;
+                    <span style="color:var(--accent-cyan)">weights computed</span>
+                </p>` : ''}
+                <p>Found <strong>${vulns.length}</strong> verified vulnerabilities</p>
+                <div class="ai-sev-badges">
+                    ${sevCounts.critical ? `<span class="ai-sev-badge critical">${sevCounts.critical} Critical</span>` : ''}
+                    ${sevCounts.high ? `<span class="ai-sev-badge high">${sevCounts.high} High</span>` : ''}
+                    ${sevCounts.medium ? `<span class="ai-sev-badge medium">${sevCounts.medium} Medium</span>` : ''}
+                    ${sevCounts.low ? `<span class="ai-sev-badge low">${sevCounts.low} Low</span>` : ''}
+                    ${vulns.length === 0 ? '<span class="ai-sev-badge low">No vulnerabilities found</span>' : ''}
+                </div>
+                ${results.verifier_summary ? `<p style="font-size:11px; color:var(--text-muted); margin-top:8px; font-style:italic;">${results.verifier_summary}</p>` : ''}
+            </div>`;
+
+            // Verified vulnerability cards
+            vulns.forEach(v => {
+                const confColor = (v.confidence || 0) >= 90 ? 'var(--accent-green)' : (v.confidence || 0) >= 70 ? 'var(--accent-yellow)' : 'var(--accent-orange)';
+                html += `<div class="ai-vuln-card" onclick="this.classList.toggle('open')">
+                    <div class="ai-vuln-header">
+                        <div class="ai-vuln-left">
+                            <div class="ai-vuln-id ${v.severity}">${v.original_id || v.id || '?'}</div>
+                            <div>
+                                <div class="ai-vuln-title">${v.bug_class} in ${v.function}</div>
+                                <div class="ai-vuln-sub">Lines ${v.line_range}${v.confidence ? ` · <span style="color:${confColor}">${v.confidence}% confidence</span>` : ''}</div>
+                            </div>
+                        </div>
+                        <div style="display:flex; align-items:center; gap:8px;">
+                            ${v.matched_strategy ? `<span class="ai-matched-strat">${stratLabels[v.matched_strategy] || v.matched_strategy}</span>` : ''}
+                            <span class="ai-vuln-badge">${v.severity}</span>
+                        </div>
+                    </div>
+                    <div class="ai-vuln-body">
+                        ${v.verification_notes ? `<div class="ai-vuln-section"><div class="ai-vuln-label">Verification</div><div class="ai-vuln-text" style="color:var(--accent-green)">${v.verification_notes}</div></div>` : ''}
+                        <div class="ai-vuln-section">
+                            <div class="ai-vuln-label">Reasoning</div>
+                            <div class="ai-vuln-text">${v.reasoning || ''}</div>
+                        </div>
+                        ${v.strategy_reasoning ? `<div class="ai-vuln-section"><div class="ai-vuln-label">Strategy Match</div><div class="ai-vuln-text">${v.strategy_reasoning}</div></div>` : ''}
+                        ${v.payload_hex ? `<div class="ai-vuln-section">
+                            <div class="ai-vuln-label">Exploit Payload</div>
+                            <div class="ai-payload-block">
+                                <div class="ai-payload-header">
+                                    <span>${v.payload_description || 'Raw hex payload'}</span>
+                                    <button class="ai-copy-btn" onclick="event.stopPropagation(); navigator.clipboard.writeText('${v.payload_hex}')">Copy</button>
+                                </div>
+                                <div class="ai-payload-hex">${v.payload_hex}</div>
+                            </div>
+                        </div>` : ''}
+                        <div class="ai-meta-row">
+                            <span class="ai-meta-tag"><strong>Protocol:</strong> ${v.protocol || '?'}/${v.port || '?'}</span>
+                            ${v.preconditions ? `<span class="ai-meta-tag"><strong>Precondition:</strong> ${v.preconditions}</span>` : ''}
+                        </div>
+                    </div>
+                </div>`;
+            });
+
+            // Rejected vulnerabilities (collapsed section)
+            if (rejected.length > 0) {
+                html += `<div class="ai-weight-section" style="margin-top:16px; opacity:0.7;">
+                    <h4 style="color:var(--accent-red);">Rejected Findings (${rejected.length})</h4>`;
+                rejected.forEach(r => {
+                    html += `<div style="font-size:11px; color:var(--text-muted); padding:6px 0; border-bottom:1px solid var(--border);">
+                        <span style="color:var(--accent-red);">#${r.original_id}</span> — ${r.reason}
+                    </div>`;
+                });
+                html += '</div>';
+            }
+
+            // Weight comparison
+            if (results.recommended_weights) {
+                const rec = results.recommended_weights;
+                html += aiRenderWeightComparison(rec);
+            }
+
+            // Attack chains
+            if (results.attack_chains && results.attack_chains.length) {
+                html += `<div class="ai-weight-section" style="margin-top:16px"><h4>Attack Chains</h4>`;
+                results.attack_chains.forEach(chain => {
+                    html += `<div style="margin:10px 0 6px;font-size:12px;color:var(--text-primary);font-weight:600;">${chain.description}</div>`;
+                    chain.steps.forEach((step, i) => {
+                        html += `<div style="font-size:11px;color:var(--text-muted);padding-left:12px;">${i+1}. ${step}</div>`;
+                    });
+                });
+                html += '</div>';
+            }
+
+            area.innerHTML = html;
+        }
+
+        function aiRenderWeightComparison(rec) {
+            let html = '';
+            const sections = [
+                { key: 'dns', title: 'DNS Strategy Weights', defKey: 'dns_default' },
+                { key: 'ftp', title: 'FTP Strategy Weights', defKey: 'ftp_default' }
+            ];
+
+            for (const sec of sections) {
+                const aiW = rec[sec.key] || {};
+                const names = Object.keys(aiW);
+                if (names.length === 0) continue;
+
+                const total = Object.values(aiW).reduce((a, b) => a + b, 0);
+                const maxVal = Math.max(...Object.values(aiW), 0.01);
+
+                html += `<div class="ai-weight-section">
+                    <h4>${sec.title} — AI Recommended</h4>
+                    <div class="ai-weight-reasoning">${rec.weight_reasoning || ''}</div>
+                    <div class="ai-w-legend">
+                        <div class="ai-w-legend-item"><div class="ai-w-legend-dot" style="background:var(--accent-green)"></div> Boosted</div>
+                        <div class="ai-w-legend-item"><div class="ai-w-legend-dot" style="background:var(--accent-red); opacity:0.6"></div> Reduced</div>
+                        <div class="ai-w-legend-item"><div class="ai-w-legend-dot" style="background:var(--accent-blue); opacity:0.5"></div> Unchanged</div>
+                    </div>`;
+
+                for (const name of names) {
+                    const val = aiW[name] || 0;
+                    const pct = total > 0 ? (val / total * 100) : 0;
+                    const barW = (val / maxVal * 100);
+
+                    let cls = 'same', delta = '';
+                    // Simple heuristic: if pct > 100/names.length * 1.5 it's boosted
+                    const avg = 100 / names.length;
+                    if (pct > avg * 1.3) { cls = 'up'; delta = '+' + (pct - avg).toFixed(0) + '%'; }
+                    else if (pct < avg * 0.7) { cls = 'down'; delta = (pct - avg).toFixed(0) + '%'; }
+
+                    html += `<div class="ai-w-row">
+                        <span class="ai-w-name">${stratLabels[name] || name}</span>
+                        <div style="flex:1;"><div class="ai-w-bar ${cls}" style="width:${barW}%"></div></div>
+                        <span class="ai-w-pct">${pct.toFixed(1)}%</span>
+                        <span class="ai-w-delta ${cls}">${delta || '='}</span>
+                    </div>`;
+                }
+                html += '</div>';
+            }
+            return html;
+        }
+
+        async function aiApplyWeights() {
+            try {
+                const res = await fetch('/api/ai/apply_weights', { method: 'POST' });
+                const data = await res.json();
+                if (data.error) { alert(data.error); return; }
+                const ws = document.getElementById('ai-weight-status');
+                ws.className = 'ai-weight-active ai-source';
+                ws.textContent = 'AI-tuned weights active';
+                fetchWeights();
+                aiRefreshWeightStatus();
+            } catch (e) { alert('Failed to apply weights: ' + e); }
+        }
+
+        async function aiResetWeights() {
+            try {
+                await fetch('/api/ai/reset_weights', { method: 'POST' });
+                const ws = document.getElementById('ai-weight-status');
+                ws.className = 'ai-weight-active default-source';
+                ws.textContent = 'Using default strategy weights';
+                fetchWeights();
+                aiRefreshWeightStatus();
+            } catch (e) { alert('Failed to reset: ' + e); }
+        }
+
+        async function aiRefreshWeightStatus() {
+            try {
+                const res = await fetch('/api/ai/weights');
+                const data = await res.json();
+                const ws = document.getElementById('ai-weight-status');
+                if (data.source === 'ai') {
+                    ws.className = 'ai-weight-active ai-source';
+                    ws.textContent = 'AI-tuned weights active';
+                } else {
+                    ws.className = 'ai-weight-active default-source';
+                    ws.textContent = 'Using default strategy weights';
+                }
+            } catch (e) {}
         }
 
         connectSSE();
+        fetchWeights();
+        aiRefreshWeightStatus();
     </script>
 </body>
 </html>

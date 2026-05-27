@@ -2,6 +2,7 @@ import os
 import copy
 import time
 import random
+import struct
 import subprocess
 import threading
 import platform
@@ -9,8 +10,40 @@ from datetime import datetime
 import psutil
 from protocol.dns import DNSMessage, DNSHeader, DNSQuestion
 from protocol.ftp import FtpMutator, FTP_STRATEGY_LABELS
-from engine.mutator import SmartDNSMutator, ByteMutator, CompressionLoopMutator, LabelComplexityMutator, ResponseMutator
-from transport.network import StreamTransport, LiveTransport
+from engine.mutator import (SmartDNSMutator, ByteMutator, CompressionLoopMutator,
+                            LabelComplexityMutator, ResponseMutator,
+                            EDNSExploitMutator, DNSSECRecordMutator, TCPDNSSegmentMutator,
+                            TxtRdataBombMutator, TcpTwoMessageMutator,
+                            InspectorStressMutator,
+                            IPDefragMutator, BackOrificeMutator, DCESmbMutator,
+                            DNSDynamicUpdateMutator, MultiQueryStormMutator)
+from transport.network import StreamTransport, LiveTransport, LiveNetworkTransport
+
+DNS_STRATEGY_NAMES = [
+    "smart_dns", "response_fuzz", "compression_loop",
+    "label_complexity", "edns_exploit", "tcp_dns_segment",
+    "txt_rdata_bomb", "tcp_two_message", "ip_defrag",
+    "back_orifice", "dce_smb", "inspector_stress",
+    "dnssec_exploit", "dns_dynamic_update", "multi_query_storm",
+]
+
+DNS_DEFAULT_WEIGHTS = [0.10, 0.14, 0.07, 0.06, 0.08, 0.04, 0.06, 0.05,
+                       0.08, 0.07, 0.06, 0.00, 0.07, 0.06, 0.06]
+
+FTP_STRATEGY_NAMES = [
+    "cmd_overflow", "port_bomb", "pipelined_auth", "cwd_depth",
+    "epsv_eprt_mix", "stray_commands", "boundary_port", "oversized_site",
+    "encoding_attack", "rest_overflow", "data_channel_confusion", "feat_negotiate",
+]
+
+FTP_DEFAULT_WEIGHTS = [18, 18, 12, 12, 8, 8, 4, 4, 6, 4, 4, 2]
+
+ai_weights = {
+    "source": "default",
+    "dns": dict(zip(DNS_STRATEGY_NAMES, DNS_DEFAULT_WEIGHTS)),
+    "ftp": dict(zip(FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS)),
+    "reasoning": "",
+}
 
 fuzzer_state = {
     "iteration": 0,
@@ -20,6 +53,7 @@ fuzzer_state = {
     "anomaly_detected": None,
     "current_strategy": "smart_dns",
     "start_time": None,
+    "run_id": 0,
     "baseline_mem_mb": None,
     "peak_mem_mb": None,
     "current_mem_mb": None,
@@ -30,13 +64,7 @@ fuzzer_state = {
     "last_crash_time": None,
     "last_crash_type": None,
     "packets_per_sec": 0,
-    "strategy_stats": {
-        "smart_dns": 0,
-        "response_fuzz": 0,
-        "compression_loop": 0,
-        "label_complexity": 0,
-        "state_exhaustion": 0,
-    },
+    "strategy_stats": {},
 }
 
 event_log = []
@@ -62,6 +90,7 @@ def reset_state():
         "anomaly_detected": None,
         "current_strategy": "",
         "start_time": None,
+        "run_id": fuzzer_state.get("run_id", 0) + 1,
         "baseline_mem_mb": None,
         "peak_mem_mb": None,
         "current_mem_mb": None,
@@ -139,10 +168,105 @@ def save_crash_log(iteration: int, stderr_data: bytes, anomaly_type: str = "CRAS
     print(f"\n[!!!] {anomaly_type} DETECTED AT ITERATION {iteration:,} [!!!]")
     print(f"[+] Diagnostic trace saved to: {report_path}")
 
-def watchdog_monitor(pid: int):
+def _build_dns_mutation(strategy: str, seed_message):
+    """Build one DNS mutation payload. Returns (mutated_bytes, tcp_payload, split_at).
+    Exactly one of mutated_bytes / tcp_payload will be non-None.
+    split_at is set only when the TCP payload must be delivered in two segments."""
+    mutated_bytes = None
+    tcp_payload = None
+    split_at = None
+
+    if strategy == "smart_dns":
+        mutator = SmartDNSMutator(seed_message)
+        mutated_bytes = mutator.mutate().to_bytes()
+        if random.random() < 0.2:
+            mutated_bytes = ByteMutator.bit_flip(mutated_bytes)
+    elif strategy == "response_fuzz":
+        mutated_bytes = ResponseMutator.mutate()
+        if random.random() < 0.3:
+            mutated_bytes = ByteMutator.bit_flip(mutated_bytes)
+    elif strategy == "compression_loop":
+        mutated_bytes = CompressionLoopMutator.mutate()
+    elif strategy == "label_complexity":
+        mutated_bytes = LabelComplexityMutator.mutate()
+    elif strategy == "edns_exploit":
+        mutated_bytes = EDNSExploitMutator.mutate()
+    elif strategy == "tcp_dns_segment":
+        tcp_payload = TCPDNSSegmentMutator.mutate()
+        split_at = random.choice([1, 2, 3, 13, max(1, len(tcp_payload) // 2)])
+    elif strategy == "txt_rdata_bomb":
+        tcp_payload = TxtRdataBombMutator.mutate()
+    elif strategy == "tcp_two_message":
+        tcp_payload = TcpTwoMessageMutator.mutate()
+        split_at = random.choice([1, 2, max(1, len(tcp_payload) // 3)])
+    elif strategy == "inspector_stress":
+        udp_pay, tcp_pay = InspectorStressMutator.mutate()
+        if udp_pay is not None:
+            mutated_bytes = udp_pay
+        else:
+            tcp_payload = tcp_pay
+    elif strategy == "dnssec_exploit":
+        mutated_bytes = DNSSECRecordMutator.mutate()
+    elif strategy == "dns_dynamic_update":
+        mutated_bytes = DNSDynamicUpdateMutator.mutate()
+    elif strategy == "multi_query_storm":
+        mutated_bytes = MultiQueryStormMutator.mutate()
+
+    return mutated_bytes, tcp_payload, split_at
+
+
+def _remote_watchdog(monitor):
+    """SSH-based watchdog for Snort running on a remote FTD host.
+    Mirrors watchdog_monitor() but polls via SSH instead of psutil."""
+    baseline_mem = None
+    for _ in range(5):
+        mem = monitor.get_memory_mb()
+        if mem is not None:
+            baseline_mem = mem
+            fuzzer_state["baseline_mem_mb"] = round(mem, 2)
+            fuzzer_state["peak_mem_mb"] = round(mem, 2)
+            log_event("INFO", f"Remote watchdog baseline: {mem:.2f} MB on {monitor.host}")
+            break
+        time.sleep(1.0)
+
+    if baseline_mem is None:
+        log_event("WARNING", "Could not read remote Snort memory — process monitoring limited to liveness.")
+
+    while fuzzer_state["running"]:
+        time.sleep(2.0)
+        alive = monitor.is_alive()
+        if alive is False:
+            fuzzer_state["anomaly_detected"] = "REMOTE_SNORT_CRASH"
+            fuzzer_state["status"] = "crash_detected"
+            fuzzer_state["trigger_detail"] = (
+                f"Snort PID {monitor.snort_pid} on {monitor.host} stopped responding. "
+                "Process vanished \u2014 likely crashed or killed by the FTD watchdog."
+            )
+            fuzzer_state["running"] = False
+            log_event("CRITICAL", f"Remote Snort crash on {monitor.host} (PID {monitor.snort_pid})")
+            break
+
+        mem = monitor.get_memory_mb()
+        if mem is not None:
+            fuzzer_state["current_mem_mb"] = round(mem, 2)
+            if mem > (fuzzer_state.get("peak_mem_mb") or 0):
+                fuzzer_state["peak_mem_mb"] = round(mem, 2)
+            if baseline_mem and (mem - baseline_mem) > 4096.0:
+                fuzzer_state["anomaly_detected"] = "REMOTE_MEMORY_LEAK"
+                fuzzer_state["status"] = "crash_detected"
+                fuzzer_state["running"] = False
+                log_event("CRITICAL", f"Remote memory bloat: +{mem - baseline_mem:.2f} MB")
+                break
+
+    monitor.close()
+
+
+def watchdog_monitor(pid: int, run_id: int = 0):
     try:
         proc = psutil.Process(pid)
         time.sleep(2.0)
+        if fuzzer_state.get("run_id", 0) != run_id:
+            return  # stale watchdog from a previous run
         baseline_mem = None
         print(f"[Watchdog] Starting watchdog for PID: {proc}")
         for attempt in range(10):
@@ -172,6 +296,8 @@ def watchdog_monitor(pid: int):
             # Calculate exact silence threshold
             time_since_last_packet = time.time() - fuzzer_state["last_packet_time"]
             
+            if fuzzer_state.get("run_id", 0) != run_id:
+                return  # stale watchdog — new run started
             if time_since_last_packet > 3.0:
                 current_strat = fuzzer_state.get("current_strategy", "unknown")
                 
@@ -198,9 +324,9 @@ def watchdog_monitor(pid: int):
                     fuzzer_state["peak_mem_mb"] = round(current_mem_mb, 2)
                 memory_growth = current_mem_mb - baseline_mem
                 
-                if memory_growth > 500.0:
+                if memory_growth > 4096.0:
                     fuzzer_state["anomaly_detected"] = "MEMORY_LEAK_AMPLIFICATION"
-                    fuzzer_state["trigger_detail"] = f"RSS grew from {baseline_mem:.2f} MB to {current_mem_mb:.2f} MB (+{memory_growth:.2f} MB, {memory_growth/baseline_mem*100:.1f}% increase). Threshold: 500 MB."
+                    fuzzer_state["trigger_detail"] = f"RSS grew from {baseline_mem:.2f} MB to {current_mem_mb:.2f} MB (+{memory_growth:.2f} MB, {memory_growth/baseline_mem*100:.1f}% increase). Threshold: 4096 MB."
                     fuzzer_state["status"] = "crash_detected"
                     log_event("CRITICAL", f"Memory bloat: +{memory_growth:.2f} MB (RSS: {current_mem_mb:.2f} MB)")
                     print(f"\n[Watchdog Trigger] Excessive RAM bloat detected (+{memory_growth:.2f} MB)!")
@@ -220,7 +346,7 @@ def run_fuzzer(build_dir: str):
 
     if protocol == "ftp":
         transport = StreamTransport(target_port=21)
-        ftp_mutator = FtpMutator()
+        ftp_mutator = FtpMutator(external_weights=ai_weights.get("ftp"))
         seed_message = None
     else:
         transport = StreamTransport(target_port=53)
@@ -250,7 +376,8 @@ def run_fuzzer(build_dir: str):
     fuzzer_state["running"] = True
     log_event("INFO", f"Snort launched (PID {target_process.pid})")
 
-    watchdog = threading.Thread(target=watchdog_monitor, args=(target_process.pid,), daemon=True)
+    current_run_id = fuzzer_state["run_id"]
+    watchdog = threading.Thread(target=watchdog_monitor, args=(target_process.pid, current_run_id), daemon=True)
     watchdog.start()
 
     try:
@@ -273,45 +400,40 @@ def run_fuzzer(build_dir: str):
                     fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
                     src_port = random.randint(1025, 65534)
                     pipe.write(transport.wrap_tcp_session(payload, src_port=src_port))
-                    fuzzer_state["iteration"] += 3  # 4 PCAP records per TCP session
+                    fuzzer_state["iteration"] += 4  # 5 PCAP records per TCP session (includes FIN-ACK)
                 else:
+                    dns_w = ai_weights.get("dns", {})
                     strategy = random.choices(
-                        ["smart_dns", "response_fuzz", "compression_loop", "label_complexity", "state_exhaustion"],
-                        weights=[0.25, 0.30, 0.10, 0.10, 0.25]
+                        DNS_STRATEGY_NAMES,
+                        weights=[dns_w.get(s, 0.05) for s in DNS_STRATEGY_NAMES]
                     )[0]
                     fuzzer_state["current_strategy"] = strategy
                     fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
-                    src_ip, src_port = 0x7f000001, 12345
 
-                    if strategy == "smart_dns":
-                        mutator = SmartDNSMutator(seed_message)
-                        mutated_bytes = mutator.mutate().to_bytes()
-                        if random.random() < 0.2:
-                            mutated_bytes = ByteMutator.bit_flip(mutated_bytes)
-
-                    elif strategy == "response_fuzz":
-                        mutated_bytes = ResponseMutator.mutate()
-                        if random.random() < 0.3:
-                            mutated_bytes = ByteMutator.bit_flip(mutated_bytes)
-
-                    elif strategy == "compression_loop":
-                        mutated_bytes = CompressionLoopMutator.mutate()
-
-                    elif strategy == "label_complexity":
-                        mutated_bytes = LabelComplexityMutator.mutate()
-
-                    elif strategy == "state_exhaustion":
-                        tc_header = DNSHeader()
-                        tc_header.tc = 1
-                        tc_message = DNSMessage(
-                            header=tc_header,
-                            questions=[copy.deepcopy(seed_message.questions[0])]
-                        )
-                        mutated_bytes = tc_message.to_bytes()
+                    if strategy == "ip_defrag":
+                        frags = IPDefragMutator.mutate()
                         src_ip = random.randint(0x01000001, 0xFEFFFFFF)
-                        src_port = random.randint(1024, 65535)
-
-                    pipe.write(transport.wrap_payload(mutated_bytes, src_ip=src_ip, src_port=src_port))
+                        pipe.write(transport.wrap_ip_fragments(frags, src_ip=src_ip))
+                        fuzzer_state["iteration"] += len(frags) - 1
+                    elif strategy == "back_orifice":
+                        bo_payload = BackOrificeMutator.mutate()
+                        src_ip = random.randint(0x01000001, 0xFEFFFFFF)
+                        pipe.write(transport.wrap_udp_to_port(bo_payload, 31337, src_ip=src_ip))
+                    elif strategy == "dce_smb":
+                        smb_payload = DCESmbMutator.mutate()
+                        src_ip = random.randint(0x01000001, 0xFEFFFFFF)
+                        pipe.write(transport.wrap_tcp_session_to_port(smb_payload, 445, src_ip=src_ip))
+                        fuzzer_state["iteration"] += 4
+                    else:
+                        mutated_bytes, tcp_payload, split_at = _build_dns_mutation(strategy, seed_message)
+                        if mutated_bytes is not None:
+                            pipe.write(transport.wrap_payload(mutated_bytes, src_ip=0x7f000001, src_port=12345))
+                        elif tcp_payload is not None:
+                            src_ip = random.randint(0x01000001, 0xFEFFFFFF)
+                            if split_at is not None:
+                                pipe.write(transport.wrap_split_tcp_session(tcp_payload, split_at=split_at, src_ip=src_ip))
+                            else:
+                                pipe.write(transport.wrap_tcp_session(tcp_payload, src_ip=src_ip))
 
                 fuzzer_state["last_packet_time"] = time.time() 
 
@@ -360,116 +482,138 @@ def run_fuzzer(build_dir: str):
         if os.path.exists(pipe_path):
             os.remove(pipe_path)
 
-def run_fuzzer_live(build_dir: str):
-    live = LiveTransport(target_host="127.0.0.1", target_port=53)
+def run_fuzzer_live(config: dict):
+    """
+    Live network fuzzing mode.
+    Sends real DNS/FTP packets via a network interface to a target server.
+    A Cisco FTD (or any inline Snort 3 device) sitting between this machine
+    and the server will inspect and process the malformed traffic.
 
-    seed_question = DNSQuestion(qname="example.com")
-    seed_message = DNSMessage(header=DNSHeader(), questions=[seed_question])
+    config keys:
+        server_ip      : target DNS/FTP server IP
+        server_port    : target port (default 53)
+        interface      : NIC name, e.g. eth0 / en0 (optional)
+        ftd_ip         : FTD management IP for SSH monitoring (optional)
+        ftd_user       : SSH username on FTD (default admin)
+        ftd_pass       : SSH password
+        ftd_ssh_port   : SSH port on FTD (default 22)
+        snort_pid      : Snort process PID on FTD for health tracking
+    """
+    from monitor.remote_monitor import RemoteSnortMonitor
 
-    cmd = [
-        "./src/snort",
-        "-c", "../lua/snort.lua",
-        "-i", "lo0",
-    ]
-    print("[*] Launching Snort in live IDS mode on lo0 (requires sudo)...")
-    target_process = subprocess.Popen(
-        cmd, cwd=build_dir, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
-    )
-    time.sleep(3.0)
+    server_ip   = config.get("server_ip", "127.0.0.1")
+    server_port = int(config.get("server_port", 53))
+    interface   = config.get("interface") or None
+    ftd_ip      = config.get("ftd_ip") or None
+    ftd_user    = config.get("ftd_user", "admin")
+    ftd_pass    = config.get("ftd_pass", "")
+    ftd_ssh_port = int(config.get("ftd_ssh_port", 22))
+    snort_pid   = config.get("snort_pid")
 
-    stderr_chunks = []
-    def drain_stderr(pipe, chunks):
-        try:
-            while True:
-                chunk = pipe.read(4096)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-        except (ValueError, OSError):
-            pass
+    protocol = fuzzer_state.get("protocol", "dns")
+    live_transport = LiveNetworkTransport(server_ip, server_port, interface)
 
-    stderr_thread = threading.Thread(target=drain_stderr, args=(target_process.stderr, stderr_chunks), daemon=True)
-    stderr_thread.start()
+    if protocol == "ftp":
+        ftp_mutator_inst = FtpMutator(external_weights=ai_weights.get("ftp"))
+        seed_message = None
+    else:
+        ftp_mutator_inst = None
+        seed_question = DNSQuestion(qname="example.com")
+        seed_message = DNSMessage(header=DNSHeader(), questions=[seed_question])
 
-    if target_process.poll() is not None:
-        stderr_thread.join(timeout=3.0)
-        err_msg = b"".join(stderr_chunks).decode("utf-8", errors="ignore")
-        print(f"\n[FATAL] Snort exited immediately (code {target_process.returncode}).")
-        print(f"[FATAL] Stderr:\n{err_msg}")
-        print("[HINT] Live mode requires root. Run: sudo python3 main.py")
-        live.close()
-        return
+    fuzzer_state["start_time"] = time.time()
+    fuzzer_state["status"] = "running"
+    fuzzer_state["running"] = True
+    iface_label = interface or "default route"
+    log_event("INFO", f"Live fuzzer started → {server_ip}:{server_port} via {iface_label} ({protocol.upper()})")
+    print(f"[+] Live network fuzzer → {server_ip}:{server_port} (iface: {iface_label})")
 
-    watchdog = threading.Thread(target=watchdog_monitor, args=(target_process.pid,), daemon=True)
-    watchdog.start()
-    print(f"[+] Snort is alive (PID {target_process.pid}). Injecting payloads...")
+    if ftd_ip and snort_pid:
+        snort_pid = int(snort_pid)
+        fuzzer_state["snort_pid"] = snort_pid
+        monitor = RemoteSnortMonitor(ftd_ip, snort_pid, ftd_user, ftd_pass, ftd_ssh_port)
+        if monitor.connect():
+            log_event("INFO", f"SSH monitor connected to {ftd_ip} — watching PID {snort_pid}")
+            print(f"[+] Remote Snort monitor active: {ftd_ip} PID {snort_pid}")
+            wdog = threading.Thread(target=_remote_watchdog, args=(monitor,), daemon=True)
+            wdog.start()
+        else:
+            log_event("WARNING", f"SSH to {ftd_ip} failed — running without remote monitoring")
+            monitor = None
+    else:
+        monitor = None
+        log_event("WARNING", "No FTD IP / Snort PID provided — fire-and-forget mode (no health tracking)")
+
+    _ftp_payload, _ftp_strategy = None, None
 
     try:
-        while True:
+        while fuzzer_state["running"] and not fuzzer_state["anomaly_detected"]:
             fuzzer_state["iteration"] += 1
             iteration = fuzzer_state["iteration"]
 
-            if iteration % 1000 == 0 and target_process.poll() is not None:
-                print(f"\n[-] Snort died during fuzzing at iteration {iteration}.")
-                break
+            if protocol == "ftp":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _ftp_payload, _ftp_strategy = ftp_mutator_inst.mutate()
+                strategy = _ftp_strategy
+                fuzzer_state["current_strategy"] = strategy
+                fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_tcp(_ftp_payload)
+                fuzzer_state["iteration"] += 1
+            else:
+                dns_w = ai_weights.get("dns", {})
+                strategy = random.choices(
+                    DNS_STRATEGY_NAMES,
+                    weights=[dns_w.get(s, 0.05) for s in DNS_STRATEGY_NAMES]
+                )[0]
+                fuzzer_state["current_strategy"] = strategy
+                fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
 
-            strategy = random.choices(
-                ["smart_dns", "compression_loop", "label_complexity", "state_exhaustion"],
-                weights=[0.40, 0.20, 0.20, 0.20]
-            )[0]
-            fuzzer_state["current_strategy"] = strategy
-
-            try:
-                if strategy == "smart_dns":
-                    mutator = SmartDNSMutator(seed_message)
-                    mutated_bytes = mutator.mutate().to_bytes()
-                    if random.random() < 0.2:
-                        mutated_bytes = ByteMutator.bit_flip(mutated_bytes)
-                    live.send(mutated_bytes)
-
-                elif strategy == "compression_loop":
-                    live.send(CompressionLoopMutator.mutate())
-
-                elif strategy == "label_complexity":
-                    live.send(LabelComplexityMutator.mutate())
-
-                elif strategy == "state_exhaustion":
-                    tc_header = DNSHeader()
-                    tc_header.tc = 1
-                    tc_message = DNSMessage(
-                        header=tc_header,
-                        questions=[copy.deepcopy(seed_message.questions[0])]
-                    )
-                    live.send_spoofed(tc_message.to_bytes())
-            except OSError:
-                pass
+                if strategy == "back_orifice":
+                    bo_payload = BackOrificeMutator.mutate()
+                    live_transport.send_udp(bo_payload, port=31337)
+                elif strategy == "dce_smb":
+                    smb_payload = DCESmbMutator.mutate()
+                    live_transport.send_tcp(smb_payload, port=445)
+                    time.sleep(0.001)
+                else:
+                    mutated_bytes, tcp_payload, split_at = _build_dns_mutation(strategy, seed_message)
+                    if mutated_bytes is not None:
+                        live_transport.send_udp(mutated_bytes)
+                    elif tcp_payload is not None:
+                        if split_at is not None:
+                            live_transport.send_split_tcp(tcp_payload, split_at)
+                        else:
+                            live_transport.send_tcp(tcp_payload)
+                        time.sleep(0.001)
 
             fuzzer_state["last_packet_time"] = time.time()
 
-            if iteration % 10000 == 0:
-                print(f"[*] Injected {iteration} live packets... (Target Status: Secure)")
+            stat_interval = 500 if protocol == "ftp" else 10000
+            if fuzzer_state["iteration"] % stat_interval == 0:
+                elapsed = time.time() - fuzzer_state["start_time"] if fuzzer_state["start_time"] else 1
+                fuzzer_state["packets_per_sec"] = int(fuzzer_state["iteration"] / max(elapsed, 0.001))
+                status = "ANOMALY" if fuzzer_state["anomaly_detected"] else "Secure"
+                print(f"[*] Sent {iteration} live mutations... (Target Status: {status})")
 
     except KeyboardInterrupt:
-        print(f"\n[*] Fuzzer halted manually. Total live packets: {fuzzer_state['iteration']}")
+        log_event("WARNING", f"Live fuzzer halted manually at iteration {fuzzer_state['iteration']}")
+        print(f"\n[*] Live fuzzer halted. Total packets sent: {fuzzer_state['iteration']}")
+
+    except Exception as e:
+        log_event("ERROR", f"Live fuzzer error: {e}")
+        print(f"\n[!] Live fuzzer error: {e}")
 
     finally:
         fuzzer_state["running"] = False
-        live.close()
-
-        if target_process.poll() is None:
-            target_process.terminate()
-
-        target_process.wait()
-        stderr_thread.join(timeout=5.0)
-        stderr = b"".join(stderr_chunks)
-
-        if fuzzer_state["anomaly_detected"]:
-            save_crash_log(fuzzer_state["iteration"], stderr, anomaly_type=fuzzer_state["anomaly_detected"])
-        elif target_process.returncode != 0 and target_process.returncode is not None and target_process.returncode != -15:
-            save_crash_log(fuzzer_state["iteration"], stderr, anomaly_type="MEMORY_CORRUPTION")
-        else:
-            print("\n=== SNORT LIVE SESSION SUMMARY ===")
-            print(f"Snort exited cleanly (code {target_process.returncode}). No anomalies detected.")
+        fuzzer_state["status"] = "stopped" if not fuzzer_state["anomaly_detected"] else "crash_detected"
+        if fuzzer_state.get("anomaly_detected"):
+            save_crash_log(
+                fuzzer_state["iteration"],
+                b"",
+                anomaly_type=fuzzer_state["anomaly_detected"],
+                return_code=None,
+            )
+        log_event("INFO", "Live network fuzzer stopped.")
 
 
 if __name__ == "__main__":

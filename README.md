@@ -7,7 +7,7 @@ A high-performance, specialized protocol fuzzer designed to uncover memory corru
 * **Deep Parser Fuzzing:** Targets complex protocol parsers (like DNS responses, QR=1) with intentional RFC violations, including `RDLENGTH` mismatches, out-of-bounds CNAME pointers, and overlapping compression records to trigger Heap Overflows and Out-Of-Bounds (OOB) reads.
 * **Algorithmic Complexity Exploitation:** Crafts cyclic compression pointer loops and label floods designed to trap the IDS parser in infinite recursion or exhaust CPU cycles.
 * **State Exhaustion & Memory Leak Amplification:** Automatically spoofs millions of unique 5-tuples (IPs/Ports) paired with synchronized wall-clock timestamps to force the IDS to track massive concurrent sessions, triggering memory leaks and state table exhaustion.
-* **Intelligent Watchdog:** A background thread that continuously monitors the target process's RSS memory footprint and processing latency. It can accurately detect silent hangs (infinite loops) and massive RAM bloat (>500MB over baseline).
+* **Intelligent Watchdog:** A background thread that continuously monitors the target process's RSS memory footprint and processing latency. It can accurately detect silent hangs (infinite loops) and massive RAM bloat (>4096MB over baseline).
 * **Automated Crash Reporting:** Upon detecting an anomaly or crash, the fuzzer extracts the AddressSanitizer (ASan) stack trace from `stderr` and dumps a detailed diagnostic log containing the exact fuzzing iteration and strategy that caused the failure.
 * **Dual Delivery Modes:** 
   * **PCAP Pipe Mode:** Wraps raw payloads in synthetic Ethernet/IP/UDP headers and streams them into the IDS via a POSIX named pipe (highly performant, offline replay).

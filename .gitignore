@@ -6,3 +6,4 @@ venv/
 target.pipe
 *.pptx
 generate_ppt.py
+.env

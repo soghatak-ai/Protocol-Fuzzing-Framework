@@ -1,17 +1,34 @@
 import os
 import json
 import time
+import traceback
 import threading
+from dotenv import load_dotenv
 from flask import Flask, render_template, jsonify, Response, send_file, request
-from main import fuzzer_state, event_log, reset_state, run_fuzzer, log_event
+import google.generativeai as genai
+from main import (fuzzer_state, event_log, reset_state, run_fuzzer, run_fuzzer_live,
+                  log_event, ai_weights, DNS_STRATEGY_NAMES, DNS_DEFAULT_WEIGHTS,
+                  FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS)
 from protocol.ftp import FTP_STRATEGY_LABELS
 
+load_dotenv()
+
 DNS_STRATEGY_LABELS = {
-    "smart_dns":        "Smart DNS",
-    "response_fuzz":    "Response Fuzz",
-    "compression_loop": "Compression Loop",
-    "label_complexity": "Label Complexity",
-    "state_exhaustion": "State Exhaustion",
+    "smart_dns":          "Smart DNS",
+    "response_fuzz":      "Response Fuzz",
+    "compression_loop":   "Compression Loop",
+    "label_complexity":   "Label Complexity",
+    "edns_exploit":       "EDNS Exploit",
+    "tcp_dns_segment":    "TCP Segment",
+    "txt_rdata_bomb":     "TXT RDATA Bomb",
+    "tcp_two_message":    "TCP Two-Message",
+    "inspector_stress":   "Inspector Stress",
+    "ip_defrag":          "IP Defrag Exploit",
+    "back_orifice":       "Back Orifice Exploit",
+    "dce_smb":            "DCE/RPC SMB Exploit",
+    "dnssec_exploit":     "DNSSEC Exploit",
+    "dns_dynamic_update": "DNS Dynamic Update",
+    "multi_query_storm":  "Multi-Query Storm",
 }
 
 app = Flask(__name__)
@@ -19,6 +36,239 @@ app = Flask(__name__)
 SNORT_BUILD = "/Users/soghatak/snort3/build"
 CRASHES_DIR = os.path.join(os.path.dirname(__file__), "crashes")
 fuzzer_thread = None
+
+# ---------------------------------------------------------------------------
+# Gemini configuration
+# ---------------------------------------------------------------------------
+GEMINI_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
+GEMINI_MODELS = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite"]
+
+STRATEGY_DESCRIPTIONS = """
+The fuzzer has these MUTATION STRATEGIES available. Each generates a specific type of malformed packet:
+
+DNS STRATEGIES (used when fuzzing DNS/network inspectors):
+- smart_dns: Swaps DNS header fields with boundary values (0x0000, 0xFFFF, etc.). Triggers: integer-overflow, null-deref, header-parsing bugs
+- response_fuzz: Injects deep anomaly structures in DNS responses (mismatched RDLENGTH, zero-length pointers, OOB CNAME pointers). Triggers: oob-read, heap-overflow, buffer-overread
+- compression_loop: Creates cyclic DNS compression pointer loops to cause infinite recursion. Triggers: infinite-loop, stack-overflow, algorithmic-complexity
+- label_complexity: Generates massive DNS label floods to exhaust CPU. Triggers: algorithmic-complexity, memory-exhaustion, DoS
+- edns_exploit: Crafts malformed EDNS OPT records. Triggers: oob-read, integer-overflow, heap-overflow
+- tcp_dns_segment: Splits DNS-over-TCP at adversarial byte offsets to break reassembly. Triggers: oob-read, buffer-overflow, off-by-one
+- txt_rdata_bomb: Oversized TXT RDATA payloads to overflow record parsing buffers. Triggers: heap-overflow, buffer-overflow
+- tcp_two_message: Sends two DNS messages in one TCP segment to confuse message boundary parsing. Triggers: oob-read, buffer-overflow, state-corruption
+- ip_defrag: Creates overlapping/malformed IP fragments targeting the IP defragmentation engine. Triggers: heap-overflow, oob-write, memory-corruption
+- back_orifice: Sends crafted Back Orifice UDP packets (port 31337) with XOR-encrypted payloads. Triggers: oob-read, integer-underflow, heap-overflow
+- dce_smb: Sends malformed DCE/RPC over SMB (TCP port 445) with crafted NetBIOS+SMB headers. Triggers: oob-read, heap-overflow, pointer-arithmetic bugs
+- inspector_stress: Randomizes source IPs/ports to force massive concurrent session tracking. Triggers: memory-leak, state-table-exhaustion, DoS
+- dnssec_exploit: Crafts malformed DNSSEC records (RRSIG OOB signer names, NSEC3 hash overflow, DNSKEY flag exploits, NSEC bitmap overflow). Triggers: oob-read, heap-overflow, buffer-overread
+- dns_dynamic_update: Sends DNS UPDATE (RFC 2136) packets with malformed zone/prereq/update sections, forged TSIG records. Targets rarely-exercised opcode=5 parser path. Triggers: oob-read, state-corruption, integer-overflow
+- multi_query_storm: Multiple questions per packet with conflicting/unusual types (CHAOS class, OPT-in-question, root-label floods). Triggers: type-confusion, oob-read, algorithmic-complexity
+
+FTP STRATEGIES (used when fuzzing FTP inspectors):
+- cmd_overflow: Sends oversized FTP commands (USER/PASS/RETR) to overflow command parsing buffers. Triggers: stack-overflow, heap-overflow, buffer-overflow
+- port_bomb: Floods with malformed PORT commands with invalid IP/port values. Triggers: memory-leak, integer-overflow, state-exhaustion
+- pipelined_auth: Sends rapid pipelined AUTH sequences to confuse state machines. Triggers: state-corruption, use-after-free, race-condition
+- cwd_depth: Deeply nested CWD commands to exhaust path traversal logic. Triggers: stack-overflow, algorithmic-complexity, DoS
+- epsv_eprt_mix: Mixes EPSV and EPRT commands to confuse extended passive/active mode handling. Triggers: state-corruption, null-deref
+- stray_commands: Sends unexpected/invalid FTP commands mid-session. Triggers: state-corruption, null-deref, use-after-free
+- boundary_port: PORT commands with boundary values (0, 255, 65535). Triggers: integer-overflow, integer-underflow, oob-write
+- oversized_site: Oversized SITE command arguments. Triggers: format-string, heap-overflow, buffer-overflow
+- encoding_attack: Null bytes, UTF-8 BOM, overlong UTF-8, backslash confusion, Telnet IAC sequences in FTP stream. Targets command normalization. Triggers: evasion, oob-read, state-corruption
+- rest_overflow: REST command with boundary integer values (LLONG_MAX, negative, sequential overflow). Targets file position tracking. Triggers: integer-overflow, integer-underflow, oob-write
+- data_channel_confusion: Rapid PASV/PORT mode switching, simultaneous transfers, aborted transfers. Targets data channel state tracking. Triggers: use-after-free, state-corruption, memory-leak
+- feat_negotiate: AUTH TLS cleartext evasion, FEAT floods, OPTS overflow, rapid mode switching. Targets feature negotiation state. Triggers: evasion, state-corruption, buffer-overflow
+"""
+
+# ---------------------------------------------------------------------------
+# PASS 1: HUNTER — finds all potential vulnerabilities (no weights)
+# ---------------------------------------------------------------------------
+HUNTER_PROMPT = """You are an expert security researcher specializing in memory corruption vulnerabilities in C/C++ network software.
+
+You will be given source code file(s) from a network intrusion detection system (IDS).
+
+YOUR ONLY TASK: Find ALL potential vulnerabilities. Do NOT compute weights — that will be done later.
+
+For each vulnerability found, provide:
+  - The exact function name and line range
+  - The bug class: heap-overflow | stack-overflow | integer-overflow | integer-underflow | oob-read | oob-write | use-after-free | null-deref | infinite-loop | format-string | race-condition | state-corruption | memory-leak
+  - A step-by-step reasoning chain: what input → what code path → what goes wrong
+  - A concrete byte-level payload (hex string) that triggers it
+  - The severity: critical | high | medium | low
+    (critical = RCE/arbitrary write; high = crash/DoS; medium = info leak; low = minor)
+  - Protocol and port the payload should be sent on
+  - Which mutation strategy from the list below BEST triggers this vulnerability
+
+Be thorough but precise:
+- Do NOT report theoretical bugs guarded by runtime checks
+- Only report bugs where you can construct a concrete input that reaches the vulnerable code
+- Pay attention to the GAP between validation and the dangerous operation
+- Consider multi-packet stateful attacks
+
+AVAILABLE MUTATION STRATEGIES:
+""" + STRATEGY_DESCRIPTIONS + """
+
+Respond in valid JSON:
+{
+  "file_summary": "What this code does",
+  "vulnerabilities": [
+    {
+      "id": 1,
+      "function": "function_name",
+      "line_range": "100-120",
+      "bug_class": "heap-overflow",
+      "severity": "critical",
+      "reasoning": "Step-by-step chain...",
+      "payload_hex": "deadbeef...",
+      "payload_description": "Human-readable payload description",
+      "protocol": "UDP",
+      "port": 31337,
+      "preconditions": "Setup needed",
+      "matched_strategy": "back_orifice",
+      "strategy_reasoning": "Why this strategy triggers it"
+    }
+  ],
+  "attack_chains": [
+    {
+      "description": "Multi-step attack",
+      "steps": ["Step 1", "Step 2"]
+    }
+  ]
+}
+
+If no exploitable vulnerabilities are found:
+{
+  "file_summary": "...",
+  "vulnerabilities": [],
+  "attack_chains": [],
+  "notes": "Why the code appears safe"
+}
+"""
+
+# ---------------------------------------------------------------------------
+# PASS 2: VERIFIER — critiques and filters hunter's findings
+# ---------------------------------------------------------------------------
+VERIFIER_PROMPT = """You are a senior security auditor reviewing vulnerability findings from a junior researcher.
+
+You will receive:
+1. The original source code
+2. A list of claimed vulnerabilities with reasoning and payloads
+
+For EACH claimed vulnerability, you must:
+1. RE-READ the relevant source code lines
+2. Check: Does a bounds check, guard, or sanitization BEFORE the vulnerable line prevent this?
+3. Check: Does the payload actually reach the vulnerable code path?
+4. Check: Is the bug class correctly identified?
+5. Check: Is the matched_strategy the BEST choice from the available strategies?
+6. Assign a confidence: verified (90-100%) | likely (60-89%) | uncertain (30-59%) | rejected (0-29%)
+
+AVAILABLE MUTATION STRATEGIES:
+""" + STRATEGY_DESCRIPTIONS + """
+
+Return ONLY the verified/likely vulnerabilities (confidence >= 60%). Drop rejected and uncertain ones.
+
+Respond in valid JSON:
+{
+  "verified_vulnerabilities": [
+    {
+      "original_id": 1,
+      "function": "function_name",
+      "line_range": "100-120",
+      "bug_class": "heap-overflow",
+      "severity": "critical",
+      "confidence": 95,
+      "verification_notes": "Confirmed: the check at line 98 uses signed comparison, attacker can bypass with negative value",
+      "matched_strategy": "back_orifice",
+      "strategy_reasoning": "Revised reasoning if needed",
+      "payload_hex": "deadbeef...",
+      "payload_description": "Human-readable description",
+      "protocol": "UDP",
+      "port": 31337,
+      "reasoning": "Original or improved reasoning"
+    }
+  ],
+  "rejected_vulnerabilities": [
+    {
+      "original_id": 2,
+      "reason": "Guard at line 45 prevents this — memcpy length is capped by MIN(len, sizeof(buf))"
+    }
+  ],
+  "attack_chains": [
+    {
+      "description": "Multi-step attack (only if verified vulns support it)",
+      "steps": ["Step 1", "Step 2"]
+    }
+  ],
+  "summary": "X of Y findings verified, Z rejected. Overall assessment."
+}
+"""
+
+
+# ---------------------------------------------------------------------------
+# PASS 3: DETERMINISTIC PYTHON WEIGHER — no LLM involved
+# ---------------------------------------------------------------------------
+SEVERITY_MULTIPLIERS = {
+    "critical": 5.0,
+    "high":     3.0,
+    "medium":   2.0,
+    "low":      1.5,
+}
+
+def compute_weights_from_vulns(verified_vulns):
+    """Deterministic weight computation from verified vulnerabilities.
+    Returns (dns_weights, ftp_weights, reasoning_str)."""
+
+    # Start with default weights
+    dns_w = dict(zip(DNS_STRATEGY_NAMES, DNS_DEFAULT_WEIGHTS))
+    ftp_w = dict(zip(FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS))
+
+    reasoning_lines = ["Weight computation (deterministic formula):"]
+    reasoning_lines.append(f"  Starting from default weights. {len(verified_vulns)} verified vulnerabilities.")
+
+    # Apply multipliers
+    for v in verified_vulns:
+        strat = v.get("matched_strategy", "")
+        sev = v.get("severity", "medium").lower()
+        mult = SEVERITY_MULTIPLIERS.get(sev, 1.5)
+        conf = v.get("confidence", 80) / 100.0  # scale multiplier by confidence
+
+        effective_mult = 1.0 + (mult - 1.0) * conf
+        func = v.get("function", "?")
+
+        if strat in dns_w:
+            old = dns_w[strat]
+            dns_w[strat] = old * effective_mult
+            reasoning_lines.append(
+                f"  DNS/{strat}: {old:.4f} × {effective_mult:.2f} "
+                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {dns_w[strat]:.4f}")
+        elif strat in ftp_w:
+            old = ftp_w[strat]
+            ftp_w[strat] = old * effective_mult
+            reasoning_lines.append(
+                f"  FTP/{strat}: {old:.1f} × {effective_mult:.2f} "
+                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {ftp_w[strat]:.1f}")
+        else:
+            reasoning_lines.append(f"  WARNING: strategy '{strat}' not recognized, skipping")
+
+    # Normalize DNS to sum=1.0
+    dns_total = sum(dns_w.values())
+    if dns_total > 0:
+        dns_w = {s: round(v / dns_total, 4) for s, v in dns_w.items()}
+    reasoning_lines.append(f"  DNS normalized (sum was {dns_total:.4f})")
+
+    # Normalize FTP to sum=100
+    ftp_total = sum(ftp_w.values())
+    if ftp_total > 0:
+        ftp_w = {s: round(v / ftp_total * 100, 1) for s, v in ftp_w.items()}
+    reasoning_lines.append(f"  FTP normalized (sum was {ftp_total:.1f})")
+
+    return dns_w, ftp_w, "\n".join(reasoning_lines)
+
+# AI analysis state
+analysis_state = {
+    "files": {},
+    "results": None,
+    "status": "idle",
+    "error": None,
+}
 
 
 @app.route("/")
@@ -112,6 +362,18 @@ def api_stream():
     return Response(generate(), mimetype="text/event-stream")
 
 
+@app.route("/api/config", methods=["GET"])
+def api_config_get():
+    return jsonify(fuzzer_state.get("live_config", {}))
+
+
+@app.route("/api/config", methods=["POST"])
+def api_config_set():
+    body = request.json or {}
+    fuzzer_state["live_config"] = body
+    return jsonify({"status": "saved"})
+
+
 @app.route("/api/start", methods=["POST"])
 def api_start():
     global fuzzer_thread
@@ -122,13 +384,24 @@ def api_start():
     protocol = body.get("protocol", "dns").lower()
     if protocol not in ("dns", "ftp"):
         protocol = "dns"
-    fuzzer_state["protocol"] = protocol  # set before reset so reset_state preserves it
+    mode = body.get("mode", "pipe").lower()
+    live_config = body.get("live_config", {})
+
+    fuzzer_state["protocol"] = protocol
+    fuzzer_state["mode"] = mode
+    if live_config:
+        fuzzer_state["live_config"] = live_config
     reset_state()
-    log_event("INFO", f"Fuzzer started from UI (protocol: {protocol.upper()}")
+    fuzzer_state["mode"] = mode
+    log_event("INFO", f"Fuzzer started from UI (protocol: {protocol.upper()}, mode: {mode})")
 
     def _run():
         try:
-            run_fuzzer(SNORT_BUILD)
+            if mode == "live":
+                cfg = fuzzer_state.get("live_config", {})
+                run_fuzzer_live(cfg)
+            else:
+                run_fuzzer(SNORT_BUILD)
         except Exception as e:
             log_event("ERROR", f"Fuzzer crashed: {e}")
             fuzzer_state["status"] = "error"
@@ -136,7 +409,7 @@ def api_start():
 
     fuzzer_thread = threading.Thread(target=_run, daemon=True)
     fuzzer_thread.start()
-    return jsonify({"status": "started"})
+    return jsonify({"status": "started", "mode": mode})
 
 
 @app.route("/api/stop", methods=["POST"])
@@ -211,6 +484,262 @@ def api_crash_delete(filename):
     return jsonify({"status": "deleted"})
 
 
+# ---------------------------------------------------------------------------
+# AI Analysis Routes
+# ---------------------------------------------------------------------------
+@app.route("/api/ai/upload", methods=["POST"])
+def ai_upload():
+    if "files" not in request.files:
+        return jsonify({"error": "No files provided"}), 400
+    uploaded = request.files.getlist("files")
+    for f in uploaded:
+        if f.filename:
+            content = f.read().decode("utf-8", errors="replace")
+            analysis_state["files"][f.filename] = content
+    return jsonify({
+        "status": "ok",
+        "files": list(analysis_state["files"].keys()),
+        "total_lines": sum(c.count("\n") + 1 for c in analysis_state["files"].values()),
+    })
+
+
+@app.route("/api/ai/files", methods=["GET"])
+def ai_files():
+    files = []
+    for name, content in analysis_state["files"].items():
+        files.append({"name": name, "lines": content.count("\n") + 1, "size": len(content)})
+    return jsonify({"files": files})
+
+
+@app.route("/api/ai/files/<filename>", methods=["DELETE"])
+def ai_delete_file(filename):
+    if filename in analysis_state["files"]:
+        del analysis_state["files"][filename]
+        return jsonify({"status": "removed", "files": list(analysis_state["files"].keys())})
+    return jsonify({"error": "File not found"}), 404
+
+
+def _gemini_call(prompt_text, user_text):
+    """Call Gemini with model fallback. Returns (parsed_json, model_name)."""
+    genai.configure(api_key=GEMINI_API_KEY)
+    last_error = None
+    for model_name in GEMINI_MODELS:
+        try:
+            print(f"[AI] Trying model: {model_name}")
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(
+                [{"role": "user", "parts": [prompt_text + "\n\n" + user_text]}],
+                generation_config=genai.GenerationConfig(
+                    temperature=0.0,
+                    response_mime_type="application/json",
+                ),
+            )
+            raw_text = response.text.strip()
+            print(f"[AI] Success with model: {model_name}")
+
+            try:
+                parsed = json.loads(raw_text)
+            except json.JSONDecodeError:
+                if "```json" in raw_text:
+                    json_str = raw_text.split("```json")[1].split("```")[0].strip()
+                    parsed = json.loads(json_str)
+                elif "```" in raw_text:
+                    json_str = raw_text.split("```")[1].split("```")[0].strip()
+                    parsed = json.loads(json_str)
+                else:
+                    parsed = {"raw_response": raw_text, "parse_error": True}
+
+            return parsed, model_name
+        except Exception as model_err:
+            last_error = model_err
+            print(f"[AI] {model_name} failed: {model_err}")
+            continue
+    raise last_error or Exception("All models failed")
+
+
+@app.route("/api/ai/analyze", methods=["POST"])
+def ai_analyze():
+    if not analysis_state["files"]:
+        return jsonify({"error": "No files uploaded"}), 400
+    if not GEMINI_API_KEY:
+        return jsonify({"error": "GOOGLE_API_KEY not set in .env"}), 500
+
+    analysis_state["status"] = "analyzing"
+    analysis_state["results"] = None
+    analysis_state["error"] = None
+
+    try:
+        # Build code context
+        code_blocks = []
+        for filename, content in analysis_state["files"].items():
+            code_blocks.append(f"=== FILE: {filename} ===\n{content}\n=== END: {filename} ===")
+        code_context = "\n\n".join(code_blocks)
+
+        # ── PASS 1: HUNTER ────────────────────────────────────────
+        print("[AI] ══ PASS 1: finding vulnerabilities ══")
+        analysis_state["status"] = "analyzing (pass 1/3: hunting)"
+        hunter_prompt = f"""Analyze the following source code file(s) for security vulnerabilities.
+For each vulnerability, provide a concrete byte-level payload that would trigger it.
+
+{code_context}"""
+
+        hunter_results, model_used = _gemini_call(HUNTER_PROMPT, hunter_prompt)
+        raw_vulns = hunter_results.get("vulnerabilities", [])
+        print(f"[AI] Pass 1 found {len(raw_vulns)} potential vulnerabilities")
+
+        if not raw_vulns:
+            # No vulns found — skip verification
+            hunter_results["model_used"] = model_used
+            hunter_results["pipeline"] = {"pass1_vulns": 0, "pass2_verified": 0, "pass2_rejected": 0}
+            hunter_results["recommended_weights"] = None
+            analysis_state["results"] = hunter_results
+            analysis_state["status"] = "done"
+            return jsonify({"status": "done", "results": hunter_results})
+
+        # ── PASS 2: VERIFIER ──────────────────────────────────────
+        print("[AI] ══ PASS 2: Validating findings ══")
+        analysis_state["status"] = "analyzing (pass 2/3: verifying)"
+        verifier_input = f"""Here is the source code:
+
+{code_context}
+
+Here are the vulnerability findings from the initial analysis:
+
+{json.dumps(raw_vulns, indent=2)}
+
+Review each finding against the actual source code. Verify or reject each one."""
+
+        verifier_results, _ = _gemini_call(VERIFIER_PROMPT, verifier_input)
+        verified_vulns = verifier_results.get("verified_vulnerabilities", [])
+        rejected_vulns = verifier_results.get("rejected_vulnerabilities", [])
+        print(f"[AI] Pass 2: {len(verified_vulns)} verified, {len(rejected_vulns)} rejected")
+
+        # ── PASS 3: DETERMINISTIC PYTHON WEIGHER ──────────────────
+        print("[AI] ══ PASS 3: Computing weights (Python) ══")
+        analysis_state["status"] = "analyzing (pass 3/3: computing weights)"
+        dns_w, ftp_w, reasoning = compute_weights_from_vulns(verified_vulns)
+        print(f"[AI] Pass 3 complete. Weights computed deterministically.")
+
+        # Assemble final results
+        results = {
+            "file_summary": hunter_results.get("file_summary", ""),
+            "vulnerabilities": verified_vulns,
+            "rejected_vulnerabilities": rejected_vulns,
+            "attack_chains": verifier_results.get("attack_chains", hunter_results.get("attack_chains", [])),
+            "verifier_summary": verifier_results.get("summary", ""),
+            "recommended_weights": {
+                "dns": dns_w,
+                "ftp": ftp_w,
+                "weight_reasoning": reasoning,
+            },
+            "model_used": model_used,
+            "pipeline": {
+                "pass1_vulns": len(raw_vulns),
+                "pass2_verified": len(verified_vulns),
+                "pass2_rejected": len(rejected_vulns),
+            },
+        }
+
+        analysis_state["results"] = results
+        analysis_state["status"] = "done"
+        return jsonify({"status": "done", "results": results})
+
+    except Exception as e:
+        analysis_state["status"] = "error"
+        analysis_state["error"] = str(e)
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/ai/results", methods=["GET"])
+def ai_results():
+    return jsonify({
+        "status": analysis_state["status"],
+        "results": analysis_state["results"],
+        "error": analysis_state["error"],
+    })
+
+
+@app.route("/api/ai/weights", methods=["GET"])
+def ai_get_weights():
+    """Return current weights (AI or default) plus defaults for comparison."""
+    dns_default = dict(zip(DNS_STRATEGY_NAMES, DNS_DEFAULT_WEIGHTS))
+    ftp_default = dict(zip(FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS))
+    return jsonify({
+        "source": ai_weights.get("source", "default"),
+        "dns": ai_weights.get("dns", dns_default),
+        "ftp": ai_weights.get("ftp", ftp_default),
+        "reasoning": ai_weights.get("reasoning", ""),
+        "dns_default": dns_default,
+        "ftp_default": ftp_default,
+    })
+
+
+@app.route("/api/ai/apply_weights", methods=["POST"])
+def ai_apply_weights():
+    """Apply AI-recommended weights from the latest analysis to the fuzzer."""
+    results = analysis_state.get("results")
+    if not results:
+        return jsonify({"error": "No analysis results available"}), 400
+
+    rec = results.get("recommended_weights")
+    if not rec or not isinstance(rec, dict):
+        return jsonify({"error": "No weight recommendations in analysis results"}), 400
+
+    dns_raw = rec.get("dns", {})
+    ftp_raw = rec.get("ftp", {})
+
+    # Normalize DNS weights
+    dns_total = sum(dns_raw.get(s, 0) for s in DNS_STRATEGY_NAMES)
+    if dns_total > 0:
+        ai_weights["dns"] = {s: round(dns_raw.get(s, 0) / dns_total, 4) for s in DNS_STRATEGY_NAMES}
+    
+    # Normalize FTP weights
+    ftp_total = sum(ftp_raw.get(s, 0) for s in FTP_STRATEGY_NAMES)
+    if ftp_total > 0:
+        ai_weights["ftp"] = {s: round(ftp_raw.get(s, 0) / ftp_total * 100, 1) for s in FTP_STRATEGY_NAMES}
+
+    ai_weights["source"] = "ai"
+    ai_weights["reasoning"] = rec.get("weight_reasoning", "")
+
+    log_event("INFO", f"AI weights applied — source: {results.get('model_used', 'unknown')}")
+    print(f"[AI] Weights applied: DNS={ai_weights['dns']}")
+    print(f"[AI] Weights applied: FTP={ai_weights['ftp']}")
+
+    return jsonify({"status": "applied", "dns": ai_weights["dns"], "ftp": ai_weights["ftp"]})
+
+
+@app.route("/api/ai/reset_weights", methods=["POST"])
+def ai_reset_weights():
+    """Reset weights back to defaults."""
+    ai_weights["dns"] = dict(zip(DNS_STRATEGY_NAMES, DNS_DEFAULT_WEIGHTS))
+    ai_weights["ftp"] = dict(zip(FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS))
+    ai_weights["source"] = "default"
+    ai_weights["reasoning"] = ""
+    log_event("INFO", "Strategy weights reset to defaults")
+    return jsonify({"status": "reset"})
+
+
+@app.route("/api/ai/_test_inject", methods=["POST"])
+def ai_test_inject():
+    """DEBUG: Inject fake analysis results to test weight pipeline without Gemini."""
+    data = request.json
+    analysis_state["results"] = data
+    analysis_state["status"] = "done" if data else "idle"
+    return jsonify({"status": "injected" if data else "cleared"})
+
+
+@app.route("/api/ai/clear", methods=["POST"])
+def ai_clear():
+    analysis_state["files"].clear()
+    analysis_state["results"] = None
+    analysis_state["status"] = "idle"
+    analysis_state["error"] = None
+    return jsonify({"status": "cleared"})
+
+
 if __name__ == "__main__":
+    if not GEMINI_API_KEY:
+        print("[!] WARNING: GOOGLE_API_KEY not set in .env")
     app.run(debug=False, host="0.0.0.0", port=5000, threaded=True)
 
