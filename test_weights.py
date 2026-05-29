@@ -67,13 +67,10 @@ FAKE_RESULTS = {
     "model_used": "test-model"
 }
 
-# ── Step 1: Reset to defaults + clear analysis state ──────────
+# ── Step 1: Reset to defaults ──────────────────────────────────
 print("\n[Step 1] Resetting weights to defaults...")
 r = requests.post(f"{BASE}/api/ai/reset_weights")
 assert r.status_code == 200, f"Reset failed: {r.text}"
-# Clear any leftover analysis results from previous runs
-requests.post(f"{BASE}/api/ai/_test_inject", json=None,
-              headers={"Content-Type": "application/json"})
 print("  OK — reset done")
 
 # ── Step 2: Read default weights ───────────────────────────────

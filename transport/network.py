@@ -242,7 +242,7 @@ class LiveNetworkTransport:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                s.settimeout(2.0)
+                s.settimeout(0.05)
                 self._bind_iface(s)
                 s.connect((self.server_ip, port or self.server_port))
                 s.sendall(tcp_dns_payload)
@@ -266,12 +266,14 @@ class LiveNetworkTransport:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                s.settimeout(2.0)
+                # Extremely short timeout
+                s.settimeout(0.05)
                 self._bind_iface(s)
                 s.connect((self.server_ip, self.server_port))
                 split_at = max(1, min(split_at, len(tcp_dns_payload) - 1))
                 s.send(tcp_dns_payload[:split_at])
-                time.sleep(0.001)
+                # Minimal sleep to force fragmentation without killing throughput
+                time.sleep(0.0001)
                 s.send(tcp_dns_payload[split_at:])
                 s.shutdown(socket.SHUT_WR)
                 try:

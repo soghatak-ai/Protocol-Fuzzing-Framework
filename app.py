@@ -8,7 +8,8 @@ from flask import Flask, render_template, jsonify, Response, send_file, request
 import google.generativeai as genai
 from main import (fuzzer_state, event_log, reset_state, run_fuzzer, run_fuzzer_live,
                   log_event, ai_weights, DNS_STRATEGY_NAMES, DNS_DEFAULT_WEIGHTS,
-                  FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS)
+                  FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS,
+                  dns_bandit, ftp_bandit)
 from protocol.ftp import FTP_STRATEGY_LABELS
 
 load_dotenv()
@@ -309,6 +310,8 @@ def api_state():
         "strategy_labels": labels,
         "runtime": f"{hours:02d}:{mins:02d}:{secs:02d}",
         "trigger_detail": fuzzer_state.get("trigger_detail"),
+        "bandit_stats": (ftp_bandit if protocol == "ftp" else dns_bandit).get_stats(
+            base_weights=ai_weights.get("ftp" if protocol == "ftp" else "dns", {})),
     }
     return jsonify(data)
 
@@ -354,6 +357,8 @@ def api_stream():
                 "strategy_labels": labels,
                 "runtime": f"{hours:02d}:{mins:02d}:{secs:02d}",
                 "trigger_detail": fuzzer_state.get("trigger_detail"),
+                "bandit_stats": (ftp_bandit if protocol == "ftp" else dns_bandit).get_stats(
+                    base_weights=ai_weights.get("ftp" if protocol == "ftp" else "dns", {})),
                 "events": event_log[-20:],
             }
             yield f"data: {json.dumps(data)}\n\n"
@@ -702,7 +707,11 @@ def ai_apply_weights():
     ai_weights["source"] = "ai"
     ai_weights["reasoning"] = rec.get("weight_reasoning", "")
 
-    log_event("INFO", f"AI weights applied — source: {results.get('model_used', 'unknown')}")
+    # Reset RL bandits so they start fresh with new AI base weights
+    dns_bandit.reset()
+    ftp_bandit.reset()
+
+    log_event("INFO", f"AI weights applied — source: {results.get('model_used', 'unknown')}, RL bandits reset")
     print(f"[AI] Weights applied: DNS={ai_weights['dns']}")
     print(f"[AI] Weights applied: FTP={ai_weights['ftp']}")
 
@@ -716,7 +725,12 @@ def ai_reset_weights():
     ai_weights["ftp"] = dict(zip(FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS))
     ai_weights["source"] = "default"
     ai_weights["reasoning"] = ""
-    log_event("INFO", "Strategy weights reset to defaults")
+
+    # Reset RL bandits
+    dns_bandit.reset()
+    ftp_bandit.reset()
+
+    log_event("INFO", "Strategy weights reset to defaults, RL bandits reset")
     return jsonify({"status": "reset"})
 
 

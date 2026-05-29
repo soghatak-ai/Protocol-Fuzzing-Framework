@@ -319,9 +319,10 @@ def build_ftp_payload(strategy: str) -> bytes:
 
 
 class FtpMutator:
-    def __init__(self, external_weights: dict = None):
+    def __init__(self, external_weights: dict = None, bandit=None):
         self.strategies = FTP_STRATEGIES
         self._external_weights = external_weights
+        self._bandit = bandit
 
     @property
     def weights(self):
@@ -331,6 +332,9 @@ class FtpMutator:
 
     def mutate(self) -> tuple:
         """Returns (payload_bytes, strategy_name)."""
-        strategy = random.choices(self.strategies, weights=self.weights, k=1)[0]
+        if self._bandit:
+            strategy = self._bandit.select_with_weights(self._external_weights or {})
+        else:
+            strategy = random.choices(self.strategies, weights=self.weights, k=1)[0]
         payload = build_ftp_payload(strategy)
         return payload, strategy

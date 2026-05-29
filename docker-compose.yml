@@ -1,0 +1,74 @@
+version: '3.8'
+
+networks:
+  attacker_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+  target_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/24
+
+services:
+  kali:
+    image: ubuntu:22.04
+    container_name: kali_attacker
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - "5000:5000"  # Expose Flask UI to your Mac host
+    networks:
+      attacker_net:
+        ipv4_address: 172.20.0.2
+    volumes:
+      - ./:/fuzzer  # Mount your fuzzer code into Kali
+    command: >
+      bash -c "
+      apt-get update && 
+      apt-get install -y python3 python3-pip python3-venv iproute2 iputils-ping tcpdump &&
+      ip route del default &&
+      ip route add default via 172.20.0.254 &&
+      sleep infinity
+      "
+
+  firewall:
+    build: 
+      context: .
+      dockerfile: Dockerfile.firewall
+    container_name: snort_firewall
+    cap_add:
+      - NET_ADMIN
+      - SYS_NICE
+    ports:
+      - "7681:7681"  # Web terminal for Firewall
+    sysctls:
+      - net.ipv4.ip_forward=1  # Enable IP forwarding (Routing)
+    networks:
+      attacker_net:
+        ipv4_address: 172.20.0.254
+      target_net:
+        ipv4_address: 172.21.0.254
+
+  target:
+    image: ubuntu:22.04
+    container_name: target_server
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - "7682:7682"  # Web terminal for Target
+    networks:
+      target_net:
+        ipv4_address: 172.21.0.2
+    command: >
+      bash -c "
+      apt-get update --fix-missing && 
+      apt-get install -y iproute2 vsftpd dnsmasq tcpdump ttyd &&
+      ip route del default &&
+      ip route add default via 172.21.0.254 &&
+      service vsftpd start &&
+      dnsmasq &&
+      ttyd -p 7682 bash
+      "

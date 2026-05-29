@@ -1,0 +1,42 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install networking tools and Snort 3 build dependencies
+RUN apt-get update --fix-missing && \
+    apt-get install -y \
+    build-essential autoconf libtool pkg-config \
+    libhwloc-dev libluajit-5.1-dev libssl-dev libpcap-dev libpcre2-dev \
+    zlib1g-dev liblzma-dev flex bison cmake libdumbnet-dev \
+    iproute2 iptables tcpdump ethtool ttyd iputils-ping \
+    git wget uuid-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Compile and install libDAQ (Data Acquisition library for Snort)
+RUN git clone https://github.com/snort3/libdaq.git /tmp/libdaq && \
+    cd /tmp/libdaq && \
+    ./bootstrap && \
+    ./configure && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig
+
+# Compile and install Snort 3
+RUN git clone https://github.com/snort3/snort3.git /tmp/snort3 && \
+    cd /tmp/snort3 && \
+    ./configure_cmake.sh --prefix=/usr/local && \
+    cd build && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig
+
+# Set up Snort 3 configuration directory
+RUN mkdir -p /usr/local/etc/snort && \
+    cp -r /tmp/snort3/lua/* /usr/local/etc/snort/ && \
+    rm -rf /tmp/libdaq /tmp/snort3
+
+# Expose web terminal
+EXPOSE 7681
+
+# On startup, route traffic and start the web terminal
+CMD bash -c "iptables -A FORWARD -j ACCEPT && ttyd -p 7681 bash"

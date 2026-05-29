@@ -1,6 +1,6 @@
 # Protocol Fuzzing Framework
 
-A high-performance protocol fuzzer with an **AI-driven agentic pipeline** designed to uncover memory corruption, logical vulnerabilities, algorithmic complexity bugs, and state exhaustion in deep packet inspection engines like Snort 3.
+A high-performance protocol fuzzer with an **AI-driven agentic pipeline** and **reinforcement learning (UCB1 bandit)** designed to uncover memory corruption, logical vulnerabilities, algorithmic complexity bugs, and state exhaustion in deep packet inspection engines like Snort 3.
 
 ## Key Features
 
@@ -11,7 +11,12 @@ A high-performance protocol fuzzer with an **AI-driven agentic pipeline** design
 - **15 DNS Mutation Strategies** — Smart DNS, Response Fuzz, Compression Loop, Label Complexity, EDNS Exploit, TCP DNS Segment, TXT RDATA Bomb, TCP Two-Message, IP Defrag, Back Orifice, DCE/SMB, Inspector Stress, DNSSEC Exploit, DNS Dynamic Update, Multi-Query Storm
 - **12 FTP Mutation Strategies** — CMD Overflow, PORT Bomb, Pipelined Auth, CWD Depth, EPSV/EPRT Mix, Stray Commands, Boundary PORT, Oversized SITE, Encoding Attack, REST Overflow, Data Channel Confusion, FEAT Negotiate
 - **Dynamic Weight Adjustment** — AI analysis maps vulnerabilities to mutation strategies and applies severity-based multipliers (critical=5x, high=3x, medium=2x, low=1.5x) scaled by confidence
-- **Real-Time Web Dashboard** — Live strategy distribution visualization with original, applied, and actual weight columns; green-to-red gradient bars based on rank
+- **Reinforcement Learning (UCB1 Bandit)** — RL layer adjusts AI/default weights in real-time based on observed crashes:
+  - Crash-producing strategies get a boost (configurable `crash_boost`, default +50% per crash)
+  - Non-productive strategies fade very slowly (`decay_rate=0.1`)
+  - Multipliers are clamped between 0.5x–3.0x to prevent starvation or total dominance
+  - Works on top of base weights: `final_weight = base_weight × rl_multiplier` (then normalized)
+- **Real-Time Web Dashboard** — Live strategy distribution with Original, Applied, RL, and Actual weight columns; hover RL values to see multiplier, pulls, and crash count
 - **Intelligent Watchdog** — Monitors target process RSS memory and processing latency; detects silent hangs and RAM bloat (>4096MB over baseline)
 - **Automated Crash Reporting** — Extracts ASan stack traces, dumps diagnostic logs with exact iteration and strategy that caused the failure
 - **Dual Delivery Modes:**
@@ -27,6 +32,7 @@ protocol-fuzzer/
 ├── ai_analyzer.py          # Standalone AI analyzer (port 5001)
 ├── engine/
 │   ├── mutator.py          # DNS mutation engine (15 strategies)
+│   ├── bandit.py           # UCB1 multi-armed bandit (RL weight adjuster)
 │   └── seed.py             # Seed generation
 ├── protocol/
 │   ├── ftp.py              # FTP mutation engine (12 strategies)
@@ -58,7 +64,7 @@ git clone https://github.com/soghatak-ai/Protocol-Fuzzing-Framework.git
 cd Protocol-Fuzzing-Framework
 python -m venv venv
 source venv/bin/activate
-pip install flask google-generativeai python-dotenv
+pip install -r requirements.txt
 ```
 
 ### Configuration
@@ -88,7 +94,30 @@ Open `http://localhost:5000` in your browser.
 3. **Analyze** — Click "Analyze" to run the 3-pass agentic pipeline
 4. **Apply Weights** — Review verified vulnerabilities, then apply AI-tuned weights
 5. **Fuzz** — Go to Dashboard tab, start the fuzzer with optimized mutation weights
-6. **Monitor** — Watch real-time strategy distribution, packet counts, crash detection
+6. **Monitor** — Watch real-time strategy distribution, RL weight adjustments, packet counts, crash detection
+
+### Reinforcement Learning (RL) Layer
+
+The RL layer sits **on top of** the AI/default weights and adjusts them during fuzzing based on actual results:
+
+```
+final_weight = base_weight × rl_multiplier    (normalized to 100%)
+```
+
+| Event | Effect on Multiplier |
+|-------|---------------------|
+| Crash detected | +0.5 per crash (e.g., 1 crash → 1.5x, 3 crashes → 2.5x) |
+| No crash, many pulls | Slow fade toward 0.5x minimum |
+| Never tried | Stays at 1.0x (no change) |
+
+The RL column in the dashboard updates in real-time. Hover any value to see the raw multiplier, pull count, and crash count.
+
+**Example:** If AI assigns 14% to Response Fuzz and that strategy causes 2 crashes:
+- Multiplier: `1.0 + 2 × 0.5 = 2.0x`
+- Adjusted weight: `14% × 2.0 = 28%` (before normalization)
+- Other strategies shrink proportionally
+
+The RL bandits reset automatically when AI weights are applied or reset.
 
 ### AI Analysis Pipeline
 
@@ -116,6 +145,15 @@ Temperature is set to `0.0` for deterministic LLM output. Weights are computed i
 | `/api/ai/apply_weights` | POST | Apply AI-tuned weights to fuzzer |
 | `/api/ai/reset_weights` | POST | Reset to default weights |
 | `/api/crashes` | GET | List crash reports |
+
+### Strategy Weight Columns (Dashboard)
+
+| Column | Meaning | Source |
+|--------|---------|--------|
+| **Original** | Default hardcoded weights | `main.py` |
+| **Applied** | AI-tuned weights (or defaults if no analysis) | AI pipeline / defaults |
+| **RL** | Applied × RL multiplier (normalized) | `engine/bandit.py` |
+| **Actual** | Observed distribution (count / total) | Runtime statistics |
 
 ## Testing
 

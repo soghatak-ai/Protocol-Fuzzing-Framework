@@ -383,8 +383,8 @@
 
         .strat-header {
             display: grid;
-            grid-template-columns: 140px 1fr 56px 56px 56px;
-            gap: 8px;
+            grid-template-columns: 140px 1fr 50px 50px 50px 50px;
+            gap: 6px;
             padding: 0 0 8px 0;
             border-bottom: 1px solid var(--border);
             margin-bottom: 4px;
@@ -402,8 +402,8 @@
 
         .strat-row {
             display: grid;
-            grid-template-columns: 140px 1fr 56px 56px 56px;
-            gap: 8px;
+            grid-template-columns: 140px 1fr 50px 50px 50px 50px;
+            gap: 6px;
             align-items: center;
             padding: 3px 0;
         }
@@ -445,6 +445,8 @@
         }
 
         .strat-pct.match { color: rgba(255,255,255,0.25); }
+
+        .strat-pct.rl { color: var(--accent-purple, #a78bfa); font-weight: 600; }
 
         /* Bar colors are set dynamically via JS: green (high) → red (low) */
 
@@ -1378,19 +1380,21 @@
             const wApplied = cachedWeights ? (proto === 'ftp' ? cachedWeights.ftp : cachedWeights.dns) : {};
             const wSource = cachedWeights ? cachedWeights.source : 'default';
 
+            const bandit = data.bandit_stats || {};
+            const banditStrats = bandit.strategies || {};
+
             let html = `<div class="strat-header">
                 <span>Strategy</span><span></span>
-                <span>Original</span><span>Applied</span><span>Actual</span>
+                <span>Original</span><span>Applied</span><span style="color:var(--accent-purple)">RL</span><span>Actual</span>
             </div>`;
 
             const entries = Object.entries(stats).sort((a, b) => b[1] - a[1]);
-            const maxPct = entries.length > 0 && total > 0 ? (entries[0][1] / total * 100) : 1;
             const n = entries.length;
 
             for (let i = 0; i < n; i++) {
                 const [key, count] = entries[i];
                 const actualPct = total > 0 ? (count / total * 100) : 0;
-                const barW = maxPct > 0 ? (actualPct / maxPct * 100) : 0;
+                const barW = actualPct;
 
                 // Green (top) → Red (bottom) based on rank
                 const t = n > 1 ? i / (n - 1) : 0;
@@ -1415,11 +1419,18 @@
                 const isSame = Math.abs(origPct - applPct) < 0.1;
                 const applCls = isSame ? 'strat-pct match' : 'strat-pct highlight';
 
+                // RL bandit weight
+                const bs = banditStrats[key];
+                const rlPct = bs ? (bs.rl_weight * 100) : 0;
+                const rlRewards = bs ? bs.rewards : 0;
+                const rlTitle = bs ? `Pulls: ${bs.pulls} | Rewards: ${bs.rewards} | Avg: ${bs.avg_reward}` : '';
+
                 html += `<div class="strat-row">
                     <span class="strat-name">${stratLabels[key] || key}</span>
                     <div class="strat-bar-track"><div class="strat-bar-fill" style="width:${barW}%;background:${barColor}"></div></div>
                     <span class="strat-pct">${origPct.toFixed(1)}%</span>
                     <span class="${applCls}">${applPct.toFixed(1)}%</span>
+                    <span class="strat-pct rl" title="${rlTitle}">${rlPct.toFixed(1)}%</span>
                     <span class="strat-pct" style="color:var(--text-primary)">${actualPct.toFixed(1)}%</span>
                 </div>`;
             }
