@@ -11,7 +11,9 @@ from main import (fuzzer_state, event_log, reset_state, run_fuzzer, run_fuzzer_l
                   FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS,
                   dns_bandit, ftp_bandit)
 from protocol.ftp import FTP_STRATEGY_LABELS
-from engine.code_collector import collect_to_dict, collect_to_single_text, VALID_EXTENSIONS
+from engine.code_collector import (collect_to_dict, collect_to_single_text, VALID_EXTENSIONS,
+                                    minify_code, hotspot_filter, extract_repo_map,
+                                    build_optimized_context, estimate_tokens)
 
 load_dotenv()
 
@@ -150,7 +152,40 @@ If no exploitable vulnerabilities are found:
 
 
 # ---------------------------------------------------------------------------
-# PASS 3: DETERMINISTIC PYTHON WEIGHER — no LLM involved
+# TRIAGE: MAP PROMPT — picks riskiest files from repo map
+# ---------------------------------------------------------------------------
+MAP_PROMPT = """You are an expert security researcher triaging a large C/C++ codebase for vulnerability analysis.
+
+You will receive a REPO MAP: a list of source files with their function signatures and struct declarations.
+
+Your task: Select the TOP 20 files most likely to contain exploitable vulnerabilities.
+
+Prioritize files that have:
+1. Functions handling raw network input (recv, read, packet parsing)
+2. Memory operations without obvious bounds checking (memcpy, strcpy, sprintf with pointer params)
+3. Buffer manipulation, pointer arithmetic, or manual memory management
+4. Protocol parsers, decoders, or inspectors
+5. Functions with size/length parameters that could overflow
+
+DO NOT select:
+- Test files, build scripts, or configuration files
+- Files with only simple getters/setters or logging
+- Files that are clearly auto-generated
+
+Respond in valid JSON:
+{
+  "selected_files": [
+    {
+      "path": "relative/path/to/file.c",
+      "risk_reason": "Brief reason why this file is risky"
+    }
+  ],
+  "summary": "Brief overview of the codebase and its attack surface"
+}
+"""
+
+# ---------------------------------------------------------------------------
+# DETERMINISTIC PYTHON WEIGHER — no LLM involved
 # ---------------------------------------------------------------------------
 SEVERITY_MULTIPLIERS = {
     "critical": 5.0,
@@ -571,22 +606,84 @@ def ai_analyze():
     analysis_state["error"] = None
 
     try:
-        # Build code context
-        code_blocks = []
-        for filename, content in analysis_state["files"].items():
-            code_blocks.append(f"=== FILE: {filename} ===\n{content}\n=== END: {filename} ===")
-        code_context = "\n\n".join(code_blocks)
+        all_files = dict(analysis_state["files"])
+        total_raw = sum(len(v) for v in all_files.values())
+        print(f"[AI] ── Input: {len(all_files)} files, {total_raw/1024:.1f} KB, ~{estimate_tokens(total_raw)} tokens (raw)")
 
-        # Save consolidated file to home directory before sending to LLM
+        # ── STAGE 1: MINIFY (local, instant) ──────────────────────
+        print("[AI] ══ STAGE 1: Minifying code (strip comments/blanks) ══")
+        analysis_state["status"] = "analyzing (stage 1/4: minifying)"
+        minified_files = {}
+        for path, content in all_files.items():
+            minified_files[path] = minify_code(content)
+        total_minified = sum(len(v) for v in minified_files.values())
+        reduction_1 = (1 - total_minified / max(total_raw, 1)) * 100
+        print(f"[AI]   Minified: {total_minified/1024:.1f} KB, ~{estimate_tokens(total_minified)} tokens ({reduction_1:.0f}% reduction)")
+
+        # ── STAGE 2: HOTSPOT FILTER (local, instant) ──────────────
+        print("[AI] ══ STAGE 2: Hotspot filtering (dangerous patterns) ══")
+        analysis_state["status"] = "analyzing (stage 2/4: hotspot filtering)"
+        hotspot_files = hotspot_filter(minified_files)
+        total_hotspot = sum(len(v) for v in hotspot_files.values())
+        print(f"[AI]   Hotspots: {len(hotspot_files)}/{len(minified_files)} files, {total_hotspot/1024:.1f} KB, ~{estimate_tokens(total_hotspot)} tokens")
+
+        # If small enough (<=20 files or <=100K tokens), skip triage and analyze directly
+        DIRECT_THRESHOLD_FILES = 20
+        DIRECT_THRESHOLD_TOKENS = 100_000
+        hotspot_tokens = estimate_tokens(total_hotspot)
+
+        if len(hotspot_files) <= DIRECT_THRESHOLD_FILES or hotspot_tokens <= DIRECT_THRESHOLD_TOKENS:
+            print(f"[AI]   Small enough for direct analysis — skipping repo map triage")
+            selected_paths = list(hotspot_files.keys())
+            map_summary = "Direct analysis (small codebase)"
+            triage_details = []
+            code_context = build_optimized_context(hotspot_files, selected_paths)
+        else:
+            # ── STAGE 3: REPO MAP TRIAGE (1 API call) ─────────────
+            print("[AI] ══ STAGE 3: Repo map triage (LLM picks top-20 files) ══")
+            analysis_state["status"] = "analyzing (stage 3/4: triage)"
+            repo_map = extract_repo_map(hotspot_files)
+            map_tokens = estimate_tokens(repo_map)
+            print(f"[AI]   Repo map: {map_tokens} tokens ({len(hotspot_files)} files)")
+
+            triage_results, _ = _ai_call(MAP_PROMPT, repo_map)
+
+            selected_entries = triage_results.get("selected_files", [])
+            map_summary = triage_results.get("summary", "")
+            triage_details = selected_entries
+
+            # Extract paths, handling both exact and fuzzy matches
+            selected_paths = []
+            available = set(hotspot_files.keys())
+            for entry in selected_entries:
+                p = entry.get("path", "")
+                if p in available:
+                    selected_paths.append(p)
+                else:
+                    for avail_path in available:
+                        if avail_path.endswith(p) or p.endswith(avail_path):
+                            selected_paths.append(avail_path)
+                            break
+
+            if not selected_paths:
+                print(f"[AI]   WARNING: No path matches — falling back to all hotspot files")
+                selected_paths = list(hotspot_files.keys())
+
+            print(f"[AI]   Selected {len(selected_paths)} files for deep analysis")
+            code_context = build_optimized_context(hotspot_files, selected_paths)
+
+        context_tokens = estimate_tokens(code_context)
+        reduction_total = (1 - len(code_context) / max(total_raw, 1)) * 100
+        print(f"[AI]   Final context: {len(code_context)/1024:.1f} KB, ~{context_tokens} tokens ({reduction_total:.0f}% total reduction)")
+
+        # Save consolidated context to disk
         context_path = os.path.join(os.path.expanduser("~"), "ai_context.txt")
         with open(context_path, "w", encoding="utf-8") as ctx_file:
             ctx_file.write(code_context)
-        size_mb = len(code_context) / (1024 * 1024)
-        print(f"[AI] Saved consolidated context to {context_path} ({size_mb:.2f} MB, {len(analysis_state['files'])} files)")
 
-        # ── PASS 1: HUNTER ────────────────────────────────────────
-        print("[AI] ══ PASS 1: finding vulnerabilities ══")
-        analysis_state["status"] = "analyzing (pass 1/2: hunting)"
+        # ── STAGE 4: DEEP ANALYSIS (1 API call) ──────────────────
+        print("[AI] ══ STAGE 4: Deep vulnerability analysis ══")
+        analysis_state["status"] = "analyzing (stage 4/4: deep analysis)"
         hunter_prompt = f"""Analyze the following source code file(s) for security vulnerabilities.
 For each vulnerability, provide a concrete byte-level payload that would trigger it.
 
@@ -595,7 +692,7 @@ For each vulnerability, provide a concrete byte-level payload that would trigger
         hunter_results, model_used = _ai_call(HUNTER_PROMPT, hunter_prompt)
         raw_vulns = hunter_results.get("vulnerabilities", [])
 
-        # Deep search: model sometimes nests vulns under a different key with multi-file input
+        # Deep search: model sometimes nests vulns under a different key
         if not raw_vulns and isinstance(hunter_results, dict):
             for key, val in hunter_results.items():
                 if isinstance(val, list) and len(val) > 0 and isinstance(val[0], dict):
@@ -608,30 +705,37 @@ For each vulnerability, provide a concrete byte-level payload that would trigger
                     raw_vulns = val["vulnerabilities"]
                     break
 
-        print(f"[AI] Pass 1 found {len(raw_vulns)} potential vulnerabilities")
+        print(f"[AI] Deep analysis found {len(raw_vulns)} potential vulnerabilities")
 
         if not raw_vulns:
-            # Save raw response for debugging
             debug_path = os.path.join(os.path.expanduser("~"), "ai_hunter_debug.json")
             with open(debug_path, "w") as f:
                 json.dump(hunter_results, f, indent=2)
             print(f"[AI] 0 vulns found — raw response saved to {debug_path}")
             hunter_results["model_used"] = model_used
-            hunter_results["pipeline"] = {"pass1_vulns": 0}
+            hunter_results["pipeline"] = {
+                "total_files": len(all_files),
+                "hotspot_files": len(hotspot_files),
+                "analyzed_files": len(selected_paths),
+                "raw_tokens": estimate_tokens(total_raw),
+                "final_tokens": context_tokens,
+                "reduction_pct": round(reduction_total, 1),
+                "vulns_found": 0,
+            }
             hunter_results["recommended_weights"] = None
             analysis_state["results"] = hunter_results
             analysis_state["status"] = "done"
             return jsonify({"status": "done", "results": hunter_results})
 
-        # ── PASS 2: DETERMINISTIC PYTHON WEIGHER ──────────────────
-        print("[AI] ══ PASS 2: Computing weights (Python) ══")
-        analysis_state["status"] = "analyzing (pass 2/2: computing weights)"
+        # ── WEIGHER: DETERMINISTIC PYTHON ─────────────────────────
+        print("[AI] ══ Computing weights (Python) ══")
         dns_w, ftp_w, reasoning = compute_weights_from_vulns(raw_vulns)
-        print(f"[AI] Pass 2 complete. Weights computed deterministically.")
+        print(f"[AI] Weights computed deterministically.")
 
         # Assemble final results
         results = {
             "file_summary": hunter_results.get("file_summary", ""),
+            "map_summary": map_summary,
             "vulnerabilities": raw_vulns,
             "attack_chains": hunter_results.get("attack_chains", []),
             "recommended_weights": {
@@ -641,7 +745,13 @@ For each vulnerability, provide a concrete byte-level payload that would trigger
             },
             "model_used": model_used,
             "pipeline": {
-                "pass1_vulns": len(raw_vulns),
+                "total_files": len(all_files),
+                "hotspot_files": len(hotspot_files),
+                "analyzed_files": len(selected_paths),
+                "raw_tokens": estimate_tokens(total_raw),
+                "final_tokens": context_tokens,
+                "reduction_pct": round(reduction_total, 1),
+                "vulns_found": len(raw_vulns),
             },
         }
 
