@@ -5,12 +5,13 @@ import traceback
 import threading
 from dotenv import load_dotenv
 from flask import Flask, render_template, jsonify, Response, send_file, request
-import google.generativeai as genai
+from openai import AzureOpenAI
 from main import (fuzzer_state, event_log, reset_state, run_fuzzer, run_fuzzer_live,
                   log_event, ai_weights, DNS_STRATEGY_NAMES, DNS_DEFAULT_WEIGHTS,
                   FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS,
                   dns_bandit, ftp_bandit)
 from protocol.ftp import FTP_STRATEGY_LABELS
+from engine.code_collector import collect_to_dict, collect_to_single_text, VALID_EXTENSIONS
 
 load_dotenv()
 
@@ -39,10 +40,12 @@ CRASHES_DIR = os.path.join(os.path.dirname(__file__), "crashes")
 fuzzer_thread = None
 
 # ---------------------------------------------------------------------------
-# Gemini configuration
+# Azure OpenAI configuration
 # ---------------------------------------------------------------------------
-GEMINI_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
-GEMINI_MODELS = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite"]
+AZURE_OPENAI_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
+AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY", "")
+AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
+AZURE_OPENAI_MODEL = os.environ.get("AZURE_OPENAI_MODEL", "gpt-5")
 
 STRATEGY_DESCRIPTIONS = """
 The fuzzer has these MUTATION STRATEGIES available. Each generates a specific type of malformed packet:
@@ -144,63 +147,6 @@ If no exploitable vulnerabilities are found:
 }
 """
 
-# ---------------------------------------------------------------------------
-# PASS 2: VERIFIER — critiques and filters hunter's findings
-# ---------------------------------------------------------------------------
-VERIFIER_PROMPT = """You are a senior security auditor reviewing vulnerability findings from a junior researcher.
-
-You will receive:
-1. The original source code
-2. A list of claimed vulnerabilities with reasoning and payloads
-
-For EACH claimed vulnerability, you must:
-1. RE-READ the relevant source code lines
-2. Check: Does a bounds check, guard, or sanitization BEFORE the vulnerable line prevent this?
-3. Check: Does the payload actually reach the vulnerable code path?
-4. Check: Is the bug class correctly identified?
-5. Check: Is the matched_strategy the BEST choice from the available strategies?
-6. Assign a confidence: verified (90-100%) | likely (60-89%) | uncertain (30-59%) | rejected (0-29%)
-
-AVAILABLE MUTATION STRATEGIES:
-""" + STRATEGY_DESCRIPTIONS + """
-
-Return ONLY the verified/likely vulnerabilities (confidence >= 60%). Drop rejected and uncertain ones.
-
-Respond in valid JSON:
-{
-  "verified_vulnerabilities": [
-    {
-      "original_id": 1,
-      "function": "function_name",
-      "line_range": "100-120",
-      "bug_class": "heap-overflow",
-      "severity": "critical",
-      "confidence": 95,
-      "verification_notes": "Confirmed: the check at line 98 uses signed comparison, attacker can bypass with negative value",
-      "matched_strategy": "back_orifice",
-      "strategy_reasoning": "Revised reasoning if needed",
-      "payload_hex": "deadbeef...",
-      "payload_description": "Human-readable description",
-      "protocol": "UDP",
-      "port": 31337,
-      "reasoning": "Original or improved reasoning"
-    }
-  ],
-  "rejected_vulnerabilities": [
-    {
-      "original_id": 2,
-      "reason": "Guard at line 45 prevents this — memcpy length is capped by MIN(len, sizeof(buf))"
-    }
-  ],
-  "attack_chains": [
-    {
-      "description": "Multi-step attack (only if verified vulns support it)",
-      "steps": ["Step 1", "Step 2"]
-    }
-  ],
-  "summary": "X of Y findings verified, Z rejected. Overall assessment."
-}
-"""
 
 
 # ---------------------------------------------------------------------------
@@ -508,6 +454,39 @@ def ai_upload():
     })
 
 
+@app.route("/api/ai/upload-directory", methods=["POST"])
+def ai_upload_directory():
+    """Accept a local directory path, collect all source files, and load them."""
+    body = request.json or {}
+    dir_path = body.get("path", "").strip()
+    if not dir_path:
+        return jsonify({"error": "No directory path provided"}), 400
+    dir_path = os.path.expanduser(dir_path)
+    if not os.path.isdir(dir_path):
+        return jsonify({"error": f"Directory not found: {dir_path}"}), 400
+
+    try:
+        collected = collect_to_dict(dir_path)
+        if not collected:
+            return jsonify({"error": "No source files found in directory"}), 400
+
+        analysis_state["files"].update(collected)
+        total_lines = sum(c.count("\n") + 1 for c in collected.values())
+        total_size_mb = sum(len(c) for c in collected.values()) / (1024 * 1024)
+        print(f"[AI] Directory loaded: {len(collected)} files from {dir_path} ({total_size_mb:.2f} MB)")
+
+        return jsonify({
+            "status": "ok",
+            "new_files": len(collected),
+            "total_files": len(analysis_state["files"]),
+            "total_lines": total_lines,
+            "size_mb": round(total_size_mb, 2),
+            "files": list(analysis_state["files"].keys()),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/ai/files", methods=["GET"])
 def ai_files():
     files = []
@@ -524,50 +503,68 @@ def ai_delete_file(filename):
     return jsonify({"error": "File not found"}), 404
 
 
-def _gemini_call(prompt_text, user_text):
-    """Call Gemini with model fallback. Returns (parsed_json, model_name)."""
-    genai.configure(api_key=GEMINI_API_KEY)
-    last_error = None
-    for model_name in GEMINI_MODELS:
+def _ai_call(prompt_text, user_text):
+    """Call Azure OpenAI. Returns (parsed_json, model_name)."""
+    client = AzureOpenAI(
+        azure_endpoint=AZURE_OPENAI_ENDPOINT,
+        api_key=AZURE_OPENAI_API_KEY,
+        api_version=AZURE_OPENAI_API_VERSION,
+    )
+    model_name = AZURE_OPENAI_MODEL
+    print(f"[AI] Calling Azure OpenAI model: {model_name}")
+    try:
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": prompt_text},
+                {"role": "user", "content": user_text},
+            ],
+            max_completion_tokens=65536,
+            response_format={"type": "json_object"},
+            timeout=600,
+        )
+        # Log rate limit headers to show quota details
+        http_resp = getattr(response, '_response', None)
+        if http_resp:
+            headers = http_resp.headers
+            print(f"[AI] ── Rate Limit Info ──")
+            for h in ['x-ratelimit-limit-requests', 'x-ratelimit-remaining-requests',
+                       'x-ratelimit-limit-tokens', 'x-ratelimit-remaining-tokens',
+                       'x-ratelimit-reset-requests', 'x-ratelimit-reset-tokens']:
+                val = headers.get(h)
+                if val:
+                    print(f"[AI]   {h}: {val}")
+
+        raw_text = response.choices[0].message.content.strip()
+        print(f"[AI] Success with model: {model_name}")
+        print(f"[AI] Response length: {len(raw_text)} chars")
+        print(f"[AI] Tokens used — prompt: {response.usage.prompt_tokens}, completion: {response.usage.completion_tokens}, total: {response.usage.total_tokens}")
+
         try:
-            print(f"[AI] Trying model: {model_name}")
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(
-                [{"role": "user", "parts": [prompt_text + "\n\n" + user_text]}],
-                generation_config=genai.GenerationConfig(
-                    temperature=0.0,
-                    response_mime_type="application/json",
-                ),
-            )
-            raw_text = response.text.strip()
-            print(f"[AI] Success with model: {model_name}")
+            parsed = json.loads(raw_text)
+        except json.JSONDecodeError:
+            if "```json" in raw_text:
+                json_str = raw_text.split("```json")[1].split("```")[0].strip()
+                parsed = json.loads(json_str)
+            elif "```" in raw_text:
+                json_str = raw_text.split("```")[1].split("```")[0].strip()
+                parsed = json.loads(json_str)
+            else:
+                parsed = {"raw_response": raw_text, "parse_error": True}
 
-            try:
-                parsed = json.loads(raw_text)
-            except json.JSONDecodeError:
-                if "```json" in raw_text:
-                    json_str = raw_text.split("```json")[1].split("```")[0].strip()
-                    parsed = json.loads(json_str)
-                elif "```" in raw_text:
-                    json_str = raw_text.split("```")[1].split("```")[0].strip()
-                    parsed = json.loads(json_str)
-                else:
-                    parsed = {"raw_response": raw_text, "parse_error": True}
-
-            return parsed, model_name
-        except Exception as model_err:
-            last_error = model_err
-            print(f"[AI] {model_name} failed: {model_err}")
-            continue
-    raise last_error or Exception("All models failed")
+        print(f"[AI] Parsed JSON keys: {list(parsed.keys()) if isinstance(parsed, dict) else type(parsed).__name__}")
+        return parsed, model_name
+    except Exception as err:
+        print(f"[AI] {model_name} failed: {err}")
+        raise
 
 
 @app.route("/api/ai/analyze", methods=["POST"])
 def ai_analyze():
     if not analysis_state["files"]:
         return jsonify({"error": "No files uploaded"}), 400
-    if not GEMINI_API_KEY:
-        return jsonify({"error": "GOOGLE_API_KEY not set in .env"}), 500
+    if not AZURE_OPENAI_API_KEY:
+        return jsonify({"error": "AZURE_OPENAI_API_KEY not set in .env"}), 500
 
     analysis_state["status"] = "analyzing"
     analysis_state["results"] = None
@@ -580,58 +577,63 @@ def ai_analyze():
             code_blocks.append(f"=== FILE: {filename} ===\n{content}\n=== END: {filename} ===")
         code_context = "\n\n".join(code_blocks)
 
+        # Save consolidated file to home directory before sending to LLM
+        context_path = os.path.join(os.path.expanduser("~"), "ai_context.txt")
+        with open(context_path, "w", encoding="utf-8") as ctx_file:
+            ctx_file.write(code_context)
+        size_mb = len(code_context) / (1024 * 1024)
+        print(f"[AI] Saved consolidated context to {context_path} ({size_mb:.2f} MB, {len(analysis_state['files'])} files)")
+
         # ── PASS 1: HUNTER ────────────────────────────────────────
         print("[AI] ══ PASS 1: finding vulnerabilities ══")
-        analysis_state["status"] = "analyzing (pass 1/3: hunting)"
+        analysis_state["status"] = "analyzing (pass 1/2: hunting)"
         hunter_prompt = f"""Analyze the following source code file(s) for security vulnerabilities.
 For each vulnerability, provide a concrete byte-level payload that would trigger it.
 
 {code_context}"""
 
-        hunter_results, model_used = _gemini_call(HUNTER_PROMPT, hunter_prompt)
+        hunter_results, model_used = _ai_call(HUNTER_PROMPT, hunter_prompt)
         raw_vulns = hunter_results.get("vulnerabilities", [])
+
+        # Deep search: model sometimes nests vulns under a different key with multi-file input
+        if not raw_vulns and isinstance(hunter_results, dict):
+            for key, val in hunter_results.items():
+                if isinstance(val, list) and len(val) > 0 and isinstance(val[0], dict):
+                    if any(k in val[0] for k in ["bug_class", "severity", "function", "matched_strategy"]):
+                        print(f"[AI] Found vulnerabilities under key '{key}' instead of 'vulnerabilities'")
+                        raw_vulns = val
+                        break
+                elif isinstance(val, dict) and "vulnerabilities" in val:
+                    print(f"[AI] Found nested vulnerabilities under '{key}.vulnerabilities'")
+                    raw_vulns = val["vulnerabilities"]
+                    break
+
         print(f"[AI] Pass 1 found {len(raw_vulns)} potential vulnerabilities")
 
         if not raw_vulns:
-            # No vulns found — skip verification
+            # Save raw response for debugging
+            debug_path = os.path.join(os.path.expanduser("~"), "ai_hunter_debug.json")
+            with open(debug_path, "w") as f:
+                json.dump(hunter_results, f, indent=2)
+            print(f"[AI] 0 vulns found — raw response saved to {debug_path}")
             hunter_results["model_used"] = model_used
-            hunter_results["pipeline"] = {"pass1_vulns": 0, "pass2_verified": 0, "pass2_rejected": 0}
+            hunter_results["pipeline"] = {"pass1_vulns": 0}
             hunter_results["recommended_weights"] = None
             analysis_state["results"] = hunter_results
             analysis_state["status"] = "done"
             return jsonify({"status": "done", "results": hunter_results})
 
-        # ── PASS 2: VERIFIER ──────────────────────────────────────
-        print("[AI] ══ PASS 2: Validating findings ══")
-        analysis_state["status"] = "analyzing (pass 2/3: verifying)"
-        verifier_input = f"""Here is the source code:
-
-{code_context}
-
-Here are the vulnerability findings from the initial analysis:
-
-{json.dumps(raw_vulns, indent=2)}
-
-Review each finding against the actual source code. Verify or reject each one."""
-
-        verifier_results, _ = _gemini_call(VERIFIER_PROMPT, verifier_input)
-        verified_vulns = verifier_results.get("verified_vulnerabilities", [])
-        rejected_vulns = verifier_results.get("rejected_vulnerabilities", [])
-        print(f"[AI] Pass 2: {len(verified_vulns)} verified, {len(rejected_vulns)} rejected")
-
-        # ── PASS 3: DETERMINISTIC PYTHON WEIGHER ──────────────────
-        print("[AI] ══ PASS 3: Computing weights (Python) ══")
-        analysis_state["status"] = "analyzing (pass 3/3: computing weights)"
-        dns_w, ftp_w, reasoning = compute_weights_from_vulns(verified_vulns)
-        print(f"[AI] Pass 3 complete. Weights computed deterministically.")
+        # ── PASS 2: DETERMINISTIC PYTHON WEIGHER ──────────────────
+        print("[AI] ══ PASS 2: Computing weights (Python) ══")
+        analysis_state["status"] = "analyzing (pass 2/2: computing weights)"
+        dns_w, ftp_w, reasoning = compute_weights_from_vulns(raw_vulns)
+        print(f"[AI] Pass 2 complete. Weights computed deterministically.")
 
         # Assemble final results
         results = {
             "file_summary": hunter_results.get("file_summary", ""),
-            "vulnerabilities": verified_vulns,
-            "rejected_vulnerabilities": rejected_vulns,
-            "attack_chains": verifier_results.get("attack_chains", hunter_results.get("attack_chains", [])),
-            "verifier_summary": verifier_results.get("summary", ""),
+            "vulnerabilities": raw_vulns,
+            "attack_chains": hunter_results.get("attack_chains", []),
             "recommended_weights": {
                 "dns": dns_w,
                 "ftp": ftp_w,
@@ -640,8 +642,6 @@ Review each finding against the actual source code. Verify or reject each one.""
             "model_used": model_used,
             "pipeline": {
                 "pass1_vulns": len(raw_vulns),
-                "pass2_verified": len(verified_vulns),
-                "pass2_rejected": len(rejected_vulns),
             },
         }
 
@@ -736,7 +736,7 @@ def ai_reset_weights():
 
 @app.route("/api/ai/_test_inject", methods=["POST"])
 def ai_test_inject():
-    """DEBUG: Inject fake analysis results to test weight pipeline without Gemini."""
+    """DEBUG: Inject fake analysis results to test weight pipeline without OpenAI."""
     data = request.json
     analysis_state["results"] = data
     analysis_state["status"] = "done" if data else "idle"
@@ -753,7 +753,7 @@ def ai_clear():
 
 
 if __name__ == "__main__":
-    if not GEMINI_API_KEY:
-        print("[!] WARNING: GOOGLE_API_KEY not set in .env")
+    if not AZURE_OPENAI_API_KEY:
+        print("[!] WARNING: AZURE_OPENAI_API_KEY not set in .env")
     app.run(debug=False, host="0.0.0.0", port=5000, threaded=True)
 

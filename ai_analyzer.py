@@ -13,7 +13,7 @@ app = Flask(__name__, template_folder="templates")
 # Gemini configuration
 # ---------------------------------------------------------------------------
 GEMINI_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
-GEMINI_MODELS = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite"]
+GEMINI_MODELS = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro"]
 
 DNS_STRATEGIES = [
     "smart_dns", "response_fuzz", "compression_loop",

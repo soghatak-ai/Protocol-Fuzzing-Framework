@@ -810,6 +810,29 @@
         .ai-drop-zone-text { font-size: 13px; color: var(--text-secondary); }
         .ai-drop-zone-hint { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
 
+        .ai-dir-input-row {
+            display: flex; gap: 8px; margin-top: 12px;
+        }
+        .ai-dir-input {
+            flex: 1; padding: 8px 10px; font-size: 12px; font-family: var(--font-mono);
+            background: var(--bg-secondary); border: 1px solid var(--border);
+            border-radius: 6px; color: var(--text-primary); outline: none;
+        }
+        .ai-dir-input:focus { border-color: var(--accent-blue); }
+        .ai-dir-input::placeholder { color: var(--text-muted); }
+        .ai-dir-btn {
+            padding: 8px 14px; font-size: 11px; font-weight: 600;
+            background: var(--accent-blue); color: #fff; border: none;
+            border-radius: 6px; cursor: pointer; white-space: nowrap;
+            width: 100%;
+        }
+        .ai-dir-btn:hover { filter: brightness(1.15); }
+        .ai-dir-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .ai-or-divider {
+            text-align: center; font-size: 11px; color: var(--text-muted);
+            margin: 10px 0; text-transform: uppercase; letter-spacing: 1px;
+        }
+
         .ai-file-list { max-height: 200px; overflow-y: auto; }
         .ai-file-item {
             display: flex; align-items: center; justify-content: space-between;
@@ -1138,10 +1161,15 @@
                     <div class="ai-panel-body">
                         <div class="ai-drop-zone" id="ai-drop-zone">
                             <div class="ai-drop-zone-icon">+</div>
-                            <div class="ai-drop-zone-text">Drop C/C++ source files</div>
-                            <div class="ai-drop-zone-hint">or click to browse</div>
-                            <input type="file" id="ai-file-input" multiple accept=".c,.cc,.cpp,.h,.hpp" style="display:none">
+                            <div class="ai-drop-zone-text">Drop source files here</div>
+                            <div class="ai-drop-zone-hint">C/C++, Python, Java, Go, Rust, JS/TS, etc.</div>
+                            <input type="file" id="ai-file-input" multiple accept=".c,.cc,.cpp,.cxx,.h,.hpp,.hxx,.py,.java,.kt,.go,.rs,.js,.jsx,.ts,.tsx,.sh,.rb,.pl,.php,.swift,.zig,.lua" style="display:none">
                         </div>
+                        <div class="ai-or-divider">or browse a folder</div>
+                        <div class="ai-dir-input-row">
+                            <button class="ai-dir-btn" id="ai-btn-browse-dir" onclick="document.getElementById('ai-folder-input').click()">Browse Folder</button>
+                        </div>
+                        <input type="file" id="ai-folder-input" webkitdirectory directory multiple style="display:none">
                         <div class="ai-file-list" id="ai-file-list"></div>
                         <div class="ai-btn-group">
                             <button class="ai-btn primary" id="ai-btn-analyze" onclick="aiAnalyze()" disabled>Analyze</button>
@@ -1179,16 +1207,12 @@
                             <span style="width:18px; height:18px; border-radius:50%; background:rgba(251,191,36,0.15); color:var(--accent-yellow); display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:700; flex-shrink:0;">2</span>
                             <b>Hunter</b>&nbsp;&mdash; find all vulnerabilities
                         </div>
-                        <div id="pipe-step-verifier" style="display:flex; align-items:center; gap:6px; margin-bottom:4px;">
-                            <span style="width:18px; height:18px; border-radius:50%; background:rgba(251,146,60,0.15); color:var(--accent-orange); display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:700; flex-shrink:0;">3</span>
-                            <b>Verifier</b>&nbsp;&mdash; validate &amp; reject false positives
-                        </div>
                         <div id="pipe-step-weigher" style="display:flex; align-items:center; gap:6px; margin-bottom:4px;">
-                            <span style="width:18px; height:18px; border-radius:50%; background:rgba(34,211,238,0.15); color:var(--accent-cyan); display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:700; flex-shrink:0;">4</span>
+                            <span style="width:18px; height:18px; border-radius:50%; background:rgba(34,211,238,0.15); color:var(--accent-cyan); display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:700; flex-shrink:0;">3</span>
                             <b>Weigher</b>&nbsp;&mdash; deterministic Python formula
                         </div>
                         <div style="display:flex; align-items:center; gap:6px; margin-bottom:4px;">
-                            <span style="width:18px; height:18px; border-radius:50%; background:rgba(74,222,128,0.15); color:var(--accent-green); display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:700; flex-shrink:0;">5</span>
+                            <span style="width:18px; height:18px; border-radius:50%; background:rgba(74,222,128,0.15); color:var(--accent-green); display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:700; flex-shrink:0;">4</span>
                             Apply weights &rarr; go to Dashboard
                         </div>
                         <div id="pipe-stats" style="margin-top:8px; padding-top:8px; border-top:1px solid var(--border); display:none;">
@@ -1576,8 +1600,57 @@
         function closeModal(e) { if (e.target === document.getElementById('modal-overlay')) document.getElementById('modal-overlay').classList.remove('open'); }
 
         /* ======== AI ANALYSIS FUNCTIONS ======== */
+        async function aiLoadDirectory() {
+            const dirInput = document.getElementById('ai-dir-path');
+            const btn = document.getElementById('ai-btn-load-dir');
+            const dirPath = dirInput.value.trim();
+            if (!dirPath) { alert('Enter a directory path'); return; }
+            btn.disabled = true; btn.textContent = 'Loading...';
+            try {
+                const res = await fetch('/api/ai/upload-directory', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: dirPath }),
+                });
+                const data = await res.json();
+                if (data.error) { alert(data.error); return; }
+                aiSetStatus('idle', `Loaded ${data.new_files} files (${data.size_mb} MB)`);
+                aiRefreshFiles();
+            } catch (e) { alert('Load failed: ' + e); }
+            finally { btn.disabled = false; btn.textContent = 'Load Dir'; }
+        }
+        document.getElementById('ai-dir-path').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') aiLoadDirectory();
+        });
+
+        const VALID_EXTENSIONS = new Set([
+            '.c','.cc','.cpp','.cxx','.h','.hpp','.hxx',
+            '.py','.pyx','.java','.kt','.scala','.groovy',
+            '.js','.jsx','.ts','.tsx',
+            '.go','.rs','.swift','.zig',
+            '.sh','.bash','.rb','.pl','.php',
+            '.yaml','.yml','.toml','.xml','.lua'
+        ]);
+        const IGNORE_DIRS = new Set([
+            '.git','.svn','node_modules','venv','.venv','__pycache__',
+            'build','dist','out','target','bin','obj',
+            'vendor','third_party','external','deps','.idea','.vscode'
+        ]);
+        const MAX_FILE_BYTES = 512 * 1024;
+
+        function shouldIncludeFile(file) {
+            const ext = '.' + file.name.split('.').pop().toLowerCase();
+            if (!VALID_EXTENSIONS.has(ext)) return false;
+            if (file.size > MAX_FILE_BYTES) return false;
+            const path = file.webkitRelativePath || file.name;
+            const parts = path.split('/');
+            for (const p of parts) { if (IGNORE_DIRS.has(p)) return false; }
+            return true;
+        }
+
         const dropZone = document.getElementById('ai-drop-zone');
         const fileInput = document.getElementById('ai-file-input');
+        const folderInput = document.getElementById('ai-folder-input');
 
         dropZone.addEventListener('click', () => fileInput.click());
         dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
@@ -1588,6 +1661,14 @@
         });
         fileInput.addEventListener('change', () => { if (fileInput.files.length) aiUploadFiles(fileInput.files); });
 
+        folderInput.addEventListener('change', () => {
+            if (folderInput.files.length) {
+                const filtered = Array.from(folderInput.files).filter(shouldIncludeFile);
+                if (filtered.length === 0) { alert('No valid source files found in this folder.'); return; }
+                aiUploadFilesFiltered(filtered);
+            }
+        });
+
         async function aiUploadFiles(files) {
             const fd = new FormData();
             for (const f of files) fd.append('files', f);
@@ -1597,6 +1678,24 @@
                 if (data.error) { alert(data.error); return; }
                 aiRefreshFiles();
             } catch (e) { alert('Upload failed: ' + e); }
+        }
+
+        async function aiUploadFilesFiltered(files) {
+            const btn = document.getElementById('ai-btn-browse-dir');
+            btn.disabled = true; btn.textContent = `Uploading ${files.length} files...`;
+            const fd = new FormData();
+            for (const f of files) {
+                const path = f.webkitRelativePath || f.name;
+                fd.append('files', f, path);
+            }
+            try {
+                const res = await fetch('/api/ai/upload', { method: 'POST', body: fd });
+                const data = await res.json();
+                if (data.error) { alert(data.error); return; }
+                aiSetStatus('idle', `Loaded ${files.length} files from folder`);
+                aiRefreshFiles();
+            } catch (e) { alert('Upload failed: ' + e); }
+            finally { btn.disabled = false; btn.textContent = 'Browse Folder'; }
         }
 
         async function aiRefreshFiles() {
@@ -1637,7 +1736,7 @@
             const btn = document.getElementById('ai-btn-analyze');
             btn.disabled = true;
             aiSetStatus('analyzing', 'Starting agentic pipeline...');
-            document.getElementById('ai-results-area').innerHTML = '<div class="ai-results-placeholder"><div class="ai-spinner"></div><h3 style="margin-top:16px;">Agentic Analysis Running</h3><p id="pipeline-status-msg">Pass 1/3: Hunter is scanning for vulnerabilities...</p></div>';
+            document.getElementById('ai-results-area').innerHTML = '<div class="ai-results-placeholder"><div class="ai-spinner"></div><h3 style="margin-top:16px;">Agentic Analysis Running</h3><p id="pipeline-status-msg">Pass 1/2: Hunter is scanning for vulnerabilities...</p></div>';
 
             // Poll analysis status to update pipeline step display
             pipelinePoller = setInterval(async () => {
@@ -1647,9 +1746,8 @@
                     const s = d.status || '';
                     const msgEl = document.getElementById('pipeline-status-msg');
                     if (!msgEl) return;
-                    if (s.includes('pass 1')) msgEl.textContent = 'Pass 1/3: Scanning for vulnerabilities...';
-                    else if (s.includes('pass 2')) msgEl.textContent = 'Pass 2/3: Validating findings...';
-                    else if (s.includes('pass 3')) msgEl.textContent = 'Pass 3/3: Computing weights...';
+                    if (s.includes('pass 1')) msgEl.textContent = 'Pass 1/2: Scanning for vulnerabilities...';
+                    else if (s.includes('pass 2')) msgEl.textContent = 'Pass 2/2: Computing weights...';
                 } catch(e) {}
             }, 2000);
 
@@ -1686,8 +1784,6 @@
             statsEl.style.display = '';
             contentEl.innerHTML = `
                 <div style="color:var(--accent-yellow)">Hunter found: <b>${pipe.pass1_vulns || 0}</b> vulns</div>
-                <div style="color:var(--accent-green)">Verified: <b>${pipe.pass2_verified || 0}</b></div>
-                <div style="color:var(--accent-red)">Rejected: <b>${pipe.pass2_rejected || 0}</b></div>
                 <div style="color:var(--accent-cyan)">Weights: <b>deterministic</b></div>
             `;
         }
@@ -1698,19 +1794,17 @@
 
             // Summary card with pipeline stats
             const vulns = results.vulnerabilities || [];
-            const rejected = results.rejected_vulnerabilities || [];
+            const rejected = [];
             const pipe = results.pipeline || {};
             const sevCounts = { critical: 0, high: 0, medium: 0, low: 0 };
             vulns.forEach(v => { if (sevCounts[v.severity] !== undefined) sevCounts[v.severity]++; });
             html += `<div class="ai-summary-card">
                 <h3>${results.file_summary || 'Analysis Results'}</h3>
                 ${pipe.pass1_vulns != null ? `<p style="font-size:11px; color:var(--text-muted); margin-bottom:6px;">
-                    Pipeline: <span style="color:var(--accent-yellow)">${pipe.pass1_vulns} hunted</span> &rarr;
-                    <span style="color:var(--accent-green)">${pipe.pass2_verified} verified</span> &rarr;
-                    <span style="color:var(--accent-red)">${pipe.pass2_rejected} rejected</span> &rarr;
+                    Pipeline: <span style="color:var(--accent-yellow)">${pipe.pass1_vulns} found</span> &rarr;
                     <span style="color:var(--accent-cyan)">weights computed</span>
                 </p>` : ''}
-                <p>Found <strong>${vulns.length}</strong> verified vulnerabilities</p>
+                <p>Found <strong>${vulns.length}</strong> vulnerabilities</p>
                 <div class="ai-sev-badges">
                     ${sevCounts.critical ? `<span class="ai-sev-badge critical">${sevCounts.critical} Critical</span>` : ''}
                     ${sevCounts.high ? `<span class="ai-sev-badge high">${sevCounts.high} High</span>` : ''}
@@ -1718,7 +1812,6 @@
                     ${sevCounts.low ? `<span class="ai-sev-badge low">${sevCounts.low} Low</span>` : ''}
                     ${vulns.length === 0 ? '<span class="ai-sev-badge low">No vulnerabilities found</span>' : ''}
                 </div>
-                ${results.verifier_summary ? `<p style="font-size:11px; color:var(--text-muted); margin-top:8px; font-style:italic;">${results.verifier_summary}</p>` : ''}
             </div>`;
 
             // Verified vulnerability cards
