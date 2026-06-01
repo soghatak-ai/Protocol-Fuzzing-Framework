@@ -1,11 +1,21 @@
 import os
+import re
 import json
 import time
+import uuid
+import hashlib
 import traceback
 import threading
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from flask import Flask, render_template, jsonify, Response, send_file, request
 from openai import AzureOpenAI
+
+try:
+    from pymongo import MongoClient, DESCENDING
+    _PYMONGO_AVAILABLE = True
+except ImportError:
+    _PYMONGO_AVAILABLE = False
 from main import (fuzzer_state, event_log, reset_state, run_fuzzer, run_fuzzer_live,
                   log_event, ai_weights, DNS_STRATEGY_NAMES, DNS_DEFAULT_WEIGHTS,
                   FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS,
@@ -48,6 +58,154 @@ AZURE_OPENAI_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
 AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY", "")
 AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
 AZURE_OPENAI_MODEL = os.environ.get("AZURE_OPENAI_MODEL", "gpt-5")
+
+# ---------------------------------------------------------------------------
+# MongoDB — persistent analysis history + chat conversations
+# ---------------------------------------------------------------------------
+MONGODB_URI = os.environ.get("MONGODB_URI", "mongodb://localhost:27017")
+MONGODB_DB = os.environ.get("MONGODB_DB", "protocol_fuzzer")
+MONGODB_COLLECTION = os.environ.get("MONGODB_COLLECTION", "analyses")
+
+_mongo_client = None
+_conversations = None
+
+
+def _init_mongo():
+    """Connect to MongoDB (local or Atlas). Degrades gracefully if unavailable."""
+    global _mongo_client, _conversations
+    if not _PYMONGO_AVAILABLE:
+        print("[DB] pymongo not installed — history disabled")
+        return
+    if not MONGODB_URI:
+        print("[DB] MONGODB_URI not set — history disabled")
+        return
+    # Mask credentials when logging the URI
+    safe_uri = MONGODB_URI
+    if "@" in safe_uri:
+        safe_uri = safe_uri.split("@", 1)[0].split("//", 1)[0] + "//***@" + safe_uri.split("@", 1)[1]
+    is_atlas = MONGODB_URI.startswith("mongodb+srv://")
+    try:
+        print(f"[DB] Connecting to MongoDB{' Atlas' if is_atlas else ''}: {safe_uri}")
+        _mongo_client = MongoClient(
+            MONGODB_URI,
+            serverSelectionTimeoutMS=8000,
+            connectTimeoutMS=8000,
+            appname="protocol-fuzzer",
+        )
+        _mongo_client.admin.command("ping")
+        _conversations = _mongo_client[MONGODB_DB][MONGODB_COLLECTION]
+        _conversations.create_index([("created_at", DESCENDING)])
+        _conversations.create_index("codebase_hash")
+        print(f"[DB] Connected to MongoDB (db={MONGODB_DB}, col={MONGODB_COLLECTION})")
+    except Exception as e:
+        _mongo_client = None
+        _conversations = None
+        print(f"[DB] MongoDB unavailable ({e}) — history disabled")
+
+
+def mongo_ok():
+    return _conversations is not None
+
+
+def compute_codebase_hash(files: dict) -> str:
+    """Deterministic SHA-256 of all file paths + contents."""
+    h = hashlib.sha256()
+    for path in sorted(files.keys()):
+        h.update(path.encode("utf-8", errors="replace"))
+        h.update(b"\x00")
+        h.update(files[path].encode("utf-8", errors="replace"))
+        h.update(b"\x00")
+    return h.hexdigest()
+
+
+def _derive_title(files: dict) -> str:
+    names = list(files.keys())
+    if not names:
+        return "Empty analysis"
+    if len(names) == 1:
+        return os.path.basename(names[0])
+    tops = {n.replace("\\", "/").split("/")[0] for n in names}
+    if len(tops) == 1:
+        return f"{tops.pop()} ({len(names)} files)"
+    return f"{os.path.basename(names[0])} +{len(names) - 1} more"
+
+
+def db_create_conversation(title, codebase_hash, files, code_context, analysis):
+    if not mongo_ok():
+        return None
+    now = datetime.now(timezone.utc)
+    doc = {
+        "_id": uuid.uuid4().hex,
+        "title": title,
+        "codebase_hash": codebase_hash,
+        "files": files,
+        "code_context": code_context,
+        "analysis": analysis,
+        "messages": [],
+        "created_at": now,
+        "updated_at": now,
+    }
+    try:
+        _conversations.insert_one(doc)
+        return doc["_id"]
+    except Exception as e:
+        print(f"[DB] create_conversation failed: {e}")
+        return None
+
+
+def db_list_conversations():
+    if not mongo_ok():
+        return []
+    out = []
+    try:
+        cursor = _conversations.find({}, {"code_context": 0}).sort("created_at", DESCENDING)
+        for d in cursor:
+            analysis = d.get("analysis", {}) or {}
+            out.append({
+                "id": d["_id"],
+                "title": d.get("title", "Untitled"),
+                "created_at": d["created_at"].isoformat() if d.get("created_at") else "",
+                "vulns_found": len(analysis.get("vulnerabilities", [])),
+                "message_count": len(d.get("messages", [])),
+            })
+    except Exception as e:
+        print(f"[DB] list_conversations failed: {e}")
+    return out
+
+
+def db_get_conversation(conv_id):
+    if not mongo_ok():
+        return None
+    try:
+        return _conversations.find_one({"_id": conv_id})
+    except Exception as e:
+        print(f"[DB] get_conversation failed: {e}")
+        return None
+
+
+def db_add_messages(conv_id, messages):
+    if not mongo_ok():
+        return
+    try:
+        _conversations.update_one(
+            {"_id": conv_id},
+            {"$push": {"messages": {"$each": messages}},
+             "$set": {"updated_at": datetime.now(timezone.utc)}},
+        )
+    except Exception as e:
+        print(f"[DB] add_messages failed: {e}")
+
+
+def db_delete_conversation(conv_id):
+    if not mongo_ok():
+        return
+    try:
+        _conversations.delete_one({"_id": conv_id})
+    except Exception as e:
+        print(f"[DB] delete_conversation failed: {e}")
+
+
+_init_mongo()
 
 STRATEGY_DESCRIPTIONS = """
 The fuzzer has these MUTATION STRATEGIES available. Each generates a specific type of malformed packet:
@@ -723,9 +881,18 @@ For each vulnerability, provide a concrete byte-level payload that would trigger
                 "vulns_found": 0,
             }
             hunter_results["recommended_weights"] = None
+
+            conv_id = db_create_conversation(
+                _derive_title(all_files),
+                compute_codebase_hash(all_files),
+                list(all_files.keys()),
+                code_context,
+                hunter_results,
+            )
+            hunter_results["conversation_id"] = conv_id
             analysis_state["results"] = hunter_results
             analysis_state["status"] = "done"
-            return jsonify({"status": "done", "results": hunter_results})
+            return jsonify({"status": "done", "results": hunter_results, "conversation_id": conv_id})
 
         # ── WEIGHER: DETERMINISTIC PYTHON ─────────────────────────
         print("[AI] ══ Computing weights (Python) ══")
@@ -755,9 +922,18 @@ For each vulnerability, provide a concrete byte-level payload that would trigger
             },
         }
 
+        conv_id = db_create_conversation(
+            _derive_title(all_files),
+            compute_codebase_hash(all_files),
+            list(all_files.keys()),
+            code_context,
+            results,
+        )
+        results["conversation_id"] = conv_id
+
         analysis_state["results"] = results
         analysis_state["status"] = "done"
-        return jsonify({"status": "done", "results": results})
+        return jsonify({"status": "done", "results": results, "conversation_id": conv_id})
 
     except Exception as e:
         analysis_state["status"] = "error"
@@ -773,6 +949,215 @@ def ai_results():
         "results": analysis_state["results"],
         "error": analysis_state["error"],
     })
+
+
+# ---------------------------------------------------------------------------
+# Conversational chat over a stored analysis
+# ---------------------------------------------------------------------------
+CHAT_MAX_CONTEXT_CHARS = 120_000  # hard cap on code context sent per chat turn
+CHAT_SNIPPET_MAX_CHARS = 16_000   # cap on vuln-relevant snippets sent per chat turn
+CHAT_SNIPPET_WINDOW = 24          # lines of code captured around each vuln anchor
+CHAT_HISTORY_TURNS = 8            # number of recent user+assistant turns to replay
+
+
+def _parse_context_files(code_context):
+    """Split a build_optimized_context() string into [(path, code), ...]."""
+    files = []
+    if not code_context:
+        return files
+    pattern = re.compile(r"=== FILE: (.*?) ===\n(.*?)\n=== END: \1 ===", re.DOTALL)
+    for m in pattern.finditer(code_context):
+        files.append((m.group(1).strip(), m.group(2)))
+    if not files:
+        files.append(("(code)", code_context))
+    return files
+
+
+def _extract_relevant_snippets(code_context, vulns,
+                               max_chars=CHAT_SNIPPET_MAX_CHARS,
+                               window=CHAT_SNIPPET_WINDOW):
+    """Return only the code regions near reported vulnerabilities.
+
+    Because the stored context is minified, vuln line numbers no longer line up,
+    so we anchor on function names instead and grab a window around each match.
+    Returns "" if nothing useful can be extracted (caller should fall back).
+    """
+    files = _parse_context_files(code_context)
+    if not files:
+        return ""
+
+    func_names = []
+    for v in vulns:
+        fn = (v.get("function") or "").strip()
+        fn = re.sub(r"\(.*$", "", fn).strip()  # drop arg list if present
+        if fn and fn not in func_names:
+            func_names.append(fn)
+    if not func_names:
+        return ""
+
+    out_parts = []
+    total = 0
+    for path, code in files:
+        lines = code.split("\n")
+        ranges = []  # [start, end, label]
+        for fn in func_names:
+            anchor = re.compile(r"\b" + re.escape(fn) + r"\b")
+            for i, line in enumerate(lines):
+                if anchor.search(line):
+                    start = max(0, i - window // 2)
+                    end = min(len(lines), i + window)
+                    ranges.append([start, end, fn])
+                    break  # first occurrence per function per file
+        if not ranges:
+            continue
+
+        ranges.sort()
+        merged = []
+        for r in ranges:
+            if merged and r[0] <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], r[1])
+                merged[-1][2] = merged[-1][2] + ", " + r[2]
+            else:
+                merged.append(r)
+
+        for start, end, label in merged:
+            snippet = "\n".join(lines[start:end])
+            block = f"--- {path} (near {label}) ---\n{snippet}"
+            if total + len(block) > max_chars:
+                out_parts.append("... [further snippets omitted to save tokens] ...")
+                return "\n\n".join(out_parts)
+            out_parts.append(block)
+            total += len(block)
+
+    return "\n\n".join(out_parts)
+
+
+def _ai_chat_call(messages):
+    """Call Azure OpenAI for free-form chat. Returns plain text reply."""
+    client = AzureOpenAI(
+        azure_endpoint=AZURE_OPENAI_ENDPOINT,
+        api_key=AZURE_OPENAI_API_KEY,
+        api_version=AZURE_OPENAI_API_VERSION,
+    )
+    response = client.chat.completions.create(
+        model=AZURE_OPENAI_MODEL,
+        messages=messages,
+        max_completion_tokens=8192,
+        timeout=300,
+    )
+    return response.choices[0].message.content.strip()
+
+
+def _build_chat_system_prompt(conv):
+    """Ground the chat model in the prior analysis + relevant source snippets."""
+    analysis = conv.get("analysis", {}) or {}
+    full_context = conv.get("code_context", "") or ""
+    vulns = analysis.get("vulnerabilities", [])
+
+    # Prefer compact, vuln-relevant snippets; fall back to truncated full context.
+    snippets = _extract_relevant_snippets(full_context, vulns)
+    if snippets:
+        code_label = "RELEVANT SOURCE SNIPPETS (regions around reported vulnerabilities)"
+        code_section = snippets
+    else:
+        code_label = "SOURCE CODE CONTEXT (minified)"
+        code_section = full_context[:CHAT_MAX_CONTEXT_CHARS]
+        if len(full_context) > CHAT_MAX_CONTEXT_CHARS:
+            code_section += "\n\n... [context truncated] ..."
+
+    try:
+        vulns_json = json.dumps(vulns, indent=2)
+    except Exception:
+        vulns_json = "[]"
+
+    return f"""You are a senior security engineer assistant embedded in a protocol fuzzing platform.
+You are discussing ONE specific codebase that has already been analyzed for vulnerabilities.
+
+CODEBASE: {conv.get('title', 'Unknown')}
+FILES: {', '.join(conv.get('files', [])) or 'n/a'}
+
+SUMMARY: {analysis.get('file_summary', 'n/a')}
+
+PRIOR VULNERABILITY ANALYSIS (JSON):
+{vulns_json}
+
+{code_label}:
+{code_section}
+
+INSTRUCTIONS:
+- Answer the user's questions about THIS codebase: its vulnerabilities, exploitability, payloads, fixes, and fuzzing strategy.
+- Reference specific functions, line ranges, and bug classes from the analysis when relevant.
+- Be concise, technical, and accurate. If something is not present in the code/analysis, say so.
+- Use Markdown for formatting (code blocks, lists, bold)."""
+
+
+@app.route("/api/ai/history", methods=["GET"])
+def ai_history():
+    return jsonify({
+        "db_available": mongo_ok(),
+        "conversations": db_list_conversations(),
+    })
+
+
+@app.route("/api/ai/history/<conv_id>", methods=["GET"])
+def ai_history_get(conv_id):
+    conv = db_get_conversation(conv_id)
+    if not conv:
+        return jsonify({"error": "Conversation not found"}), 404
+    return jsonify({
+        "id": conv["_id"],
+        "title": conv.get("title", "Untitled"),
+        "files": conv.get("files", []),
+        "analysis": conv.get("analysis", {}),
+        "messages": conv.get("messages", []),
+        "created_at": conv["created_at"].isoformat() if conv.get("created_at") else "",
+    })
+
+
+@app.route("/api/ai/history/<conv_id>", methods=["DELETE"])
+def ai_history_delete(conv_id):
+    if not mongo_ok():
+        return jsonify({"error": "Database unavailable"}), 503
+    db_delete_conversation(conv_id)
+    return jsonify({"status": "deleted"})
+
+
+@app.route("/api/ai/chat", methods=["POST"])
+def ai_chat():
+    if not mongo_ok():
+        return jsonify({"error": "Database unavailable — history/chat disabled"}), 503
+    body = request.json or {}
+    conv_id = body.get("conversation_id")
+    user_msg = (body.get("message") or "").strip()
+    if not user_msg:
+        return jsonify({"error": "Empty message"}), 400
+    if not AZURE_OPENAI_API_KEY:
+        return jsonify({"error": "AZURE_OPENAI_API_KEY not set in .env"}), 500
+
+    conv = db_get_conversation(conv_id)
+    if not conv:
+        return jsonify({"error": "Conversation not found"}), 404
+
+    messages = [{"role": "system", "content": _build_chat_system_prompt(conv)}]
+    history = [m for m in conv.get("messages", []) if m.get("role") in ("user", "assistant")]
+    # Replay only the most recent N turns (1 turn = user + assistant) to cap token growth
+    recent = history[-(CHAT_HISTORY_TURNS * 2):]
+    for m in recent:
+        messages.append({"role": m["role"], "content": m.get("content", "")})
+    messages.append({"role": "user", "content": user_msg})
+
+    try:
+        reply = _ai_chat_call(messages)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    db_add_messages(conv_id, [
+        {"role": "user", "content": user_msg, "ts": now_iso},
+        {"role": "assistant", "content": reply, "ts": now_iso},
+    ])
+    return jsonify({"reply": reply})
 
 
 @app.route("/api/ai/weights", methods=["GET"])

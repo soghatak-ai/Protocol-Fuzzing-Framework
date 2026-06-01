@@ -945,6 +945,63 @@
         .ai-weight-active.ai-source { background: rgba(74,222,128,0.06); border: 1px solid rgba(74,222,128,0.2); color: var(--accent-green); }
         .ai-weight-active.default-source { background: rgba(255,255,255,0.03); border: 1px solid var(--border); color: var(--text-muted); }
 
+        /* History sidebar (ChatGPT-style) */
+        .ai-history-list { max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+        .ai-history-empty { font-size: 11px; color: var(--text-muted); padding: 10px 4px; text-align: center; }
+        .ai-hist-item {
+            display: flex; align-items: center; justify-content: space-between; gap: 8px;
+            padding: 9px 10px; border-radius: 6px; cursor: pointer; transition: background 0.15s;
+            border: 1px solid transparent;
+        }
+        .ai-hist-item:hover { background: var(--bg-card-hover); }
+        .ai-hist-item.active { background: rgba(96,165,250,0.08); border-color: rgba(96,165,250,0.3); }
+        .ai-hist-main { min-width: 0; flex: 1; }
+        .ai-hist-title { font-size: 12px; color: var(--text-primary); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .ai-hist-meta { font-size: 10px; color: var(--text-muted); margin-top: 2px; font-family: 'JetBrains Mono', monospace; }
+        .ai-hist-del { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 14px; padding: 2px 6px; flex-shrink: 0; border-radius: 4px; }
+        .ai-hist-del:hover { color: var(--accent-red); background: rgba(248,113,113,0.1); }
+
+        /* Chat interface */
+        .ai-chat-panel { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; margin-top: 16px; display: flex; flex-direction: column; overflow: hidden; }
+        .ai-chat-header { padding: 12px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
+        .ai-chat-header-title { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+        .ai-chat-header-sub { font-size: 11px; color: var(--text-muted); }
+        .ai-chat-messages { padding: 16px 18px; display: flex; flex-direction: column; gap: 14px; max-height: 460px; overflow-y: auto; min-height: 80px; }
+        .ai-chat-empty { font-size: 12px; color: var(--text-muted); text-align: center; padding: 24px 12px; line-height: 1.6; }
+        .ai-chat-msg { display: flex; gap: 10px; max-width: 92%; }
+        .ai-chat-msg.user { align-self: flex-end; flex-direction: row-reverse; }
+        .ai-chat-avatar { width: 26px; height: 26px; border-radius: 6px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; }
+        .ai-chat-avatar.user { background: rgba(96,165,250,0.15); color: var(--accent-blue); }
+        .ai-chat-avatar.assistant { background: rgba(168,85,247,0.15); color: var(--accent-purple); }
+        .ai-chat-bubble { padding: 10px 14px; border-radius: 10px; font-size: 13px; line-height: 1.6; color: var(--text-secondary); }
+        .ai-chat-msg.user .ai-chat-bubble { background: rgba(96,165,250,0.1); border: 1px solid rgba(96,165,250,0.2); }
+        .ai-chat-msg.assistant .ai-chat-bubble { background: var(--bg-secondary); border: 1px solid var(--border); }
+        .ai-chat-bubble p { margin: 0 0 8px; } .ai-chat-bubble p:last-child { margin-bottom: 0; }
+        .ai-chat-bubble pre { background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 6px; padding: 10px; overflow-x: auto; margin: 8px 0; }
+        .ai-chat-bubble code { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--accent-green); }
+        .ai-chat-bubble pre code { color: var(--text-secondary); }
+        .ai-chat-bubble ul, .ai-chat-bubble ol { margin: 6px 0; padding-left: 20px; }
+        .ai-chat-bubble strong { color: var(--text-primary); }
+        .ai-chat-input-row { display: flex; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--border); }
+        .ai-chat-input {
+            flex: 1; padding: 10px 12px; font-size: 13px; font-family: inherit; resize: none;
+            background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 8px;
+            color: var(--text-primary); outline: none; line-height: 1.5; max-height: 120px;
+        }
+        .ai-chat-input:focus { border-color: var(--accent-blue); }
+        .ai-chat-send {
+            padding: 0 18px; border-radius: 8px; border: 1px solid rgba(96,165,250,0.4);
+            background: rgba(96,165,250,0.08); color: var(--accent-blue); font-size: 13px; font-weight: 600;
+            cursor: pointer; font-family: inherit; flex-shrink: 0;
+        }
+        .ai-chat-send:hover { background: rgba(96,165,250,0.16); }
+        .ai-chat-send:disabled { opacity: 0.4; cursor: not-allowed; }
+        .ai-chat-typing { display: flex; gap: 4px; padding: 4px 0; }
+        .ai-chat-typing span { width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted); animation: chatBlink 1.2s infinite both; }
+        .ai-chat-typing span:nth-child(2) { animation-delay: 0.2s; }
+        .ai-chat-typing span:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes chatBlink { 0%, 80%, 100% { opacity: 0.3; } 40% { opacity: 1; } }
+
         @media (max-width: 1200px) {
             .stats-grid { grid-template-columns: repeat(3, 1fr); }
             .panels-row { grid-template-columns: 1fr; }
@@ -1153,6 +1210,18 @@
         <div class="ai-layout">
             <!-- LEFT: Upload & Controls -->
             <div class="ai-left">
+                <div class="ai-panel">
+                    <div class="ai-panel-header">
+                        <span class="ai-panel-title">History</span>
+                        <button class="ai-hist-del" style="font-size:11px; font-weight:600; color:var(--accent-blue);" onclick="aiNewAnalysis()" title="Start a new analysis">+ New</button>
+                    </div>
+                    <div class="ai-panel-body">
+                        <div class="ai-history-list" id="ai-history-list">
+                            <div class="ai-history-empty">No past analyses yet.</div>
+                        </div>
+                    </div>
+                </div>
+
                 <div class="ai-panel">
                     <div class="ai-panel-header">
                         <span class="ai-panel-title">Source Files</span>
@@ -1754,11 +1823,14 @@
                 }
                 aiLastResults = data.results;
                 const pipe = data.results.pipeline || {};
-                const modelName = data.results.model_used || 'Gemini';
-                aiSetStatus('done', `Done: ${pipe.pass2_verified || 0} verified vulns (${modelName})`);
+                const modelName = data.results.model_used || 'AI';
+                aiSetStatus('done', `Done: ${pipe.vulns_found || 0} vulns found (${modelName})`);
+                aiCurrentConversationId = data.conversation_id || data.results.conversation_id || null;
                 aiRenderResults(data.results);
+                aiRenderChatPanel([]);
                 aiUpdatePipelineStats(data.results);
                 document.getElementById('ai-btn-apply').disabled = !data.results.recommended_weights;
+                aiLoadHistory();
             } catch (e) {
                 clearInterval(pipelinePoller);
                 aiSetStatus('error', 'Request failed');
@@ -1972,9 +2044,209 @@
             } catch (e) {}
         }
 
+        /* ======== HISTORY + CHAT ======== */
+        let aiCurrentConversationId = null;
+
+        function aiEscapeHtml(s) {
+            return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        // Minimal Markdown → HTML (code blocks, inline code, bold, lists, paragraphs)
+        function aiMarkdown(text) {
+            if (!text) return '';
+            const blocks = [];
+            let t = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (m, lang, code) => {
+                blocks.push(`<pre><code>${aiEscapeHtml(code.replace(/\n$/, ''))}</code></pre>`);
+                return `\u0000BLOCK${blocks.length - 1}\u0000`;
+            });
+            t = aiEscapeHtml(t);
+            t = t.replace(/`([^`]+)`/g, (m, c) => `<code>${c}</code>`);
+            t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+            // lists
+            const lines = t.split('\n');
+            let html = '', inList = false;
+            for (let line of lines) {
+                if (/^\s*[-*]\s+/.test(line)) {
+                    if (!inList) { html += '<ul>'; inList = true; }
+                    html += '<li>' + line.replace(/^\s*[-*]\s+/, '') + '</li>';
+                } else {
+                    if (inList) { html += '</ul>'; inList = false; }
+                    if (line.trim() === '') html += '';
+                    else html += '<p>' + line + '</p>';
+                }
+            }
+            if (inList) html += '</ul>';
+            html = html.replace(/\u0000BLOCK(\d+)\u0000/g, (m, i) => blocks[+i]);
+            return html;
+        }
+
+        function aiFormatDate(iso) {
+            if (!iso) return '';
+            const d = new Date(iso);
+            return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' +
+                   d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+        }
+
+        async function aiLoadHistory() {
+            try {
+                const res = await fetch('/api/ai/history');
+                const data = await res.json();
+                const list = document.getElementById('ai-history-list');
+                if (!data.db_available) {
+                    list.innerHTML = '<div class="ai-history-empty">Database offline.<br>Start MongoDB to enable history.</div>';
+                    return;
+                }
+                const convs = data.conversations || [];
+                if (convs.length === 0) {
+                    list.innerHTML = '<div class="ai-history-empty">No past analyses yet.</div>';
+                    return;
+                }
+                list.innerHTML = convs.map(c => `
+                    <div class="ai-hist-item ${c.id === aiCurrentConversationId ? 'active' : ''}" onclick="aiOpenConversation('${c.id}')">
+                        <div class="ai-hist-main">
+                            <div class="ai-hist-title" title="${aiEscapeHtml(c.title)}">${aiEscapeHtml(c.title)}</div>
+                            <div class="ai-hist-meta">${c.vulns_found} vulns · ${c.message_count} msgs · ${aiFormatDate(c.created_at)}</div>
+                        </div>
+                        <button class="ai-hist-del" onclick="event.stopPropagation(); aiDeleteConversation('${c.id}')" title="Delete">&times;</button>
+                    </div>`).join('');
+            } catch (e) {}
+        }
+
+        async function aiOpenConversation(id) {
+            try {
+                const res = await fetch('/api/ai/history/' + id);
+                const data = await res.json();
+                if (data.error) { alert(data.error); return; }
+                aiCurrentConversationId = id;
+                aiLastResults = data.analysis;
+                aiSetStatus('done', `Loaded: ${data.title}`);
+                aiRenderResults(data.analysis);
+                aiRenderChatPanel(data.messages || []);
+                aiUpdatePipelineStats(data.analysis);
+                document.getElementById('ai-btn-apply').disabled = !data.analysis.recommended_weights;
+                aiLoadHistory();
+            } catch (e) { alert('Failed to load conversation: ' + e); }
+        }
+
+        async function aiDeleteConversation(id) {
+            if (!confirm('Delete this analysis and its chat history?')) return;
+            try {
+                await fetch('/api/ai/history/' + id, { method: 'DELETE' });
+                if (id === aiCurrentConversationId) { aiNewAnalysis(); }
+                aiLoadHistory();
+            } catch (e) {}
+        }
+
+        function aiNewAnalysis() {
+            aiCurrentConversationId = null;
+            document.getElementById('ai-results-area').innerHTML =
+                '<div class="ai-results-placeholder" id="ai-placeholder"><h3>No Analysis Yet</h3><p>Upload source files and click "Analyze" to identify vulnerabilities and optimize mutation strategy weights.</p></div>';
+            aiSetStatus('idle', 'Ready');
+            aiLoadHistory();
+        }
+
+        // Renders the chat panel below the results area
+        function aiRenderChatPanel(messages) {
+            if (!aiCurrentConversationId) return;
+            const area = document.getElementById('ai-results-area');
+            const panel = document.createElement('div');
+            panel.className = 'ai-chat-panel';
+            panel.id = 'ai-chat-panel';
+            panel.innerHTML = `
+                <div class="ai-chat-header">
+                    <div class="ai-chat-avatar assistant">AI</div>
+                    <div>
+                        <div class="ai-chat-header-title">Chat about this codebase</div>
+                        <div class="ai-chat-header-sub">Ask follow-up questions — the model has the full analysis as context</div>
+                    </div>
+                </div>
+                <div class="ai-chat-messages" id="ai-chat-messages"></div>
+                <div class="ai-chat-input-row">
+                    <textarea class="ai-chat-input" id="ai-chat-input" rows="1" placeholder="Ask about vulnerabilities, exploits, fixes..."></textarea>
+                    <button class="ai-chat-send" id="ai-chat-send" onclick="aiSendChat()">Send</button>
+                </div>`;
+            area.appendChild(panel);
+            aiRenderChatMessages(messages || []);
+
+            const input = document.getElementById('ai-chat-input');
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); aiSendChat(); }
+            });
+            input.addEventListener('input', () => {
+                input.style.height = 'auto';
+                input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+            });
+        }
+
+        function aiRenderChatMessages(messages) {
+            const box = document.getElementById('ai-chat-messages');
+            if (!box) return;
+            if (!messages.length) {
+                box.innerHTML = '<div class="ai-chat-empty">No messages yet.<br>Try: "Which vulnerability is most critical and why?"</div>';
+                return;
+            }
+            box.innerHTML = messages.map(m => `
+                <div class="ai-chat-msg ${m.role}">
+                    <div class="ai-chat-avatar ${m.role}">${m.role === 'user' ? 'U' : 'AI'}</div>
+                    <div class="ai-chat-bubble">${m.role === 'assistant' ? aiMarkdown(m.content) : aiEscapeHtml(m.content)}</div>
+                </div>`).join('');
+            box.scrollTop = box.scrollHeight;
+        }
+
+        function aiAppendChatMessage(role, content, isTyping) {
+            const box = document.getElementById('ai-chat-messages');
+            if (!box) return null;
+            const empty = box.querySelector('.ai-chat-empty');
+            if (empty) empty.remove();
+            const div = document.createElement('div');
+            div.className = 'ai-chat-msg ' + role;
+            div.innerHTML = `
+                <div class="ai-chat-avatar ${role}">${role === 'user' ? 'U' : 'AI'}</div>
+                <div class="ai-chat-bubble">${isTyping ? '<div class="ai-chat-typing"><span></span><span></span><span></span></div>' : (role === 'assistant' ? aiMarkdown(content) : aiEscapeHtml(content))}</div>`;
+            box.appendChild(div);
+            box.scrollTop = box.scrollHeight;
+            return div;
+        }
+
+        async function aiSendChat() {
+            const input = document.getElementById('ai-chat-input');
+            const sendBtn = document.getElementById('ai-chat-send');
+            if (!input || !aiCurrentConversationId) return;
+            const msg = input.value.trim();
+            if (!msg) return;
+
+            input.value = ''; input.style.height = 'auto';
+            sendBtn.disabled = true;
+            aiAppendChatMessage('user', msg, false);
+            const typingEl = aiAppendChatMessage('assistant', '', true);
+
+            try {
+                const res = await fetch('/api/ai/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ conversation_id: aiCurrentConversationId, message: msg }),
+                });
+                const data = await res.json();
+                if (typingEl) typingEl.remove();
+                if (data.error) {
+                    aiAppendChatMessage('assistant', '⚠️ ' + data.error, false);
+                } else {
+                    aiAppendChatMessage('assistant', data.reply, false);
+                    aiLoadHistory();
+                }
+            } catch (e) {
+                if (typingEl) typingEl.remove();
+                aiAppendChatMessage('assistant', '⚠️ Request failed: ' + e, false);
+            } finally {
+                sendBtn.disabled = false;
+                input.focus();
+            }
+        }
+
         connectSSE();
         fetchWeights();
         aiRefreshWeightStatus();
+        aiLoadHistory();
     </script>
 </body>
 </html>
