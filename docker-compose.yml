@@ -72,3 +72,20 @@ services:
       dnsmasq &&
       ttyd -p 7682 bash
       "
+
+  vuln_ids:
+    build:
+      context: ./vuln_target
+      dockerfile: Dockerfile
+    container_name: vuln_ids_target
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - "7683:7683"  # Web terminal for VulnIDS
+      - "15353:53/udp"  # DNS-UDP (may not work on Docker Desktop Mac)
+      - "15353:5353/tcp"  # DNS-TCP (reliable on Docker Desktop Mac)
+      - "2121:21/tcp"  # FTP
+    networks:
+      attacker_net:
+        ipv4_address: 172.20.0.100
+    restart: "no"
