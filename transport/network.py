@@ -99,6 +99,60 @@ class StreamTransport:
                 self._pcap_record(cli_fin) + self._pcap_record(srv_fin) +
                 self._pcap_record(last_ack))
 
+    def wrap_tcp_response_session(self, response: bytes, request: bytes = None,
+                                  src_ip: int = 0x7f000001, src_port: int = None,
+                                  dst_ip: int = 0x7f000001) -> bytes:
+        """
+        Emits a full TCP session carrying a CLIENT REQUEST (C2S) followed by a
+        possibly malformed SERVER RESPONSE (S2C):
+            SYN → SYN-ACK → ACK → PSH-ACK(request) → ACK
+                → PSH-ACK(response) → FIN-ACK(server) → ACK/FIN(client) → ACK
+        The server closes the connection right after the body, which is required
+        for HTTP/0.9-style responses that are delimited only by EOF.
+
+        This drives Snort's http_inspect RESPONSE parser (status line, response
+        headers, Content-/Transfer-Encoding, decompression, body extraction) —
+        the surface targeted by the HTTP Evader semantic-gap evasions.
+        """
+        if src_port is None:
+            src_port = random.randint(1025, 65534)
+        if request is None:
+            request = b"GET / HTTP/1.1\r\nHost: victim.example.com\r\n\r\n"
+        response = response[:60000]
+        dport = self.port
+        seq_c = random.randint(100000, 9000000)
+        seq_s = random.randint(100000, 9000000)
+
+        syn      = self._ETH_C2S + self._tcp_pkt(src_ip, dst_ip, src_port, dport, seq_c, 0, 0x02)
+        syn_ack  = self._ETH_S2C + self._tcp_pkt(dst_ip, src_ip, dport, src_port, seq_s, seq_c + 1, 0x12)
+        ack      = self._ETH_C2S + self._tcp_pkt(src_ip, dst_ip, src_port, dport, seq_c + 1, seq_s + 1, 0x10)
+
+        # Client request (C2S)
+        req      = self._ETH_C2S + self._tcp_pkt(src_ip, dst_ip, src_port, dport,
+                                                 seq_c + 1, seq_s + 1, 0x18, request)
+        seq_c2 = seq_c + 1 + len(request)
+        req_ack  = self._ETH_S2C + self._tcp_pkt(dst_ip, src_ip, dport, src_port,
+                                                 seq_s + 1, seq_c2, 0x10)
+
+        # Server response (S2C)
+        resp     = self._ETH_S2C + self._tcp_pkt(dst_ip, src_ip, dport, src_port,
+                                                 seq_s + 1, seq_c2, 0x18, response)
+        seq_s2 = seq_s + 1 + len(response)
+        srv_fin  = self._ETH_S2C + self._tcp_pkt(dst_ip, src_ip, dport, src_port,
+                                                 seq_s2, seq_c2, 0x11)
+        cli_ack  = self._ETH_C2S + self._tcp_pkt(src_ip, dst_ip, src_port, dport,
+                                                 seq_c2, seq_s2 + 1, 0x10)
+        cli_fin  = self._ETH_C2S + self._tcp_pkt(src_ip, dst_ip, src_port, dport,
+                                                 seq_c2, seq_s2 + 1, 0x11)
+        last_ack = self._ETH_S2C + self._tcp_pkt(dst_ip, src_ip, dport, src_port,
+                                                 seq_s2 + 1, seq_c2 + 1, 0x10)
+
+        return (self._pcap_record(syn) + self._pcap_record(syn_ack) +
+                self._pcap_record(ack) + self._pcap_record(req) +
+                self._pcap_record(req_ack) + self._pcap_record(resp) +
+                self._pcap_record(srv_fin) + self._pcap_record(cli_ack) +
+                self._pcap_record(cli_fin) + self._pcap_record(last_ack))
+
     def _ip_frag_hdr(self, proto: int, src: int, dst: int, payload_len: int,
                      ip_id: int, frag_offset_bytes: int, more_fragments: bool) -> bytes:
         """Build an IP header with fragmentation fields."""

@@ -10,6 +10,10 @@ from datetime import datetime
 import psutil
 from protocol.dns import DNSMessage, DNSHeader, DNSQuestion
 from protocol.ftp import FtpMutator, FTP_STRATEGY_LABELS
+from protocol.http import (HttpMutator, HTTP_STRATEGY_LABELS,
+                           HTTP_STRATEGIES as HTTP_STRATEGY_NAMES,
+                           HTTP_WEIGHTS as HTTP_DEFAULT_WEIGHTS,
+                           is_http_response_strategy)
 from engine.mutator import (SmartDNSMutator, ByteMutator, CompressionLoopMutator,
                             LabelComplexityMutator, ResponseMutator,
                             EDNSExploitMutator, DNSSECRecordMutator, TCPDNSSegmentMutator,
@@ -39,16 +43,29 @@ FTP_STRATEGY_NAMES = [
 
 FTP_DEFAULT_WEIGHTS = [18, 18, 12, 12, 8, 8, 4, 4, 6, 4, 4, 2]
 
+# HTTP_STRATEGY_NAMES / HTTP_DEFAULT_WEIGHTS are imported from protocol.http
+# (single source of truth; includes both request- and response-side strategies).
+
 ai_weights = {
     "source": "default",
     "dns": dict(zip(DNS_STRATEGY_NAMES, DNS_DEFAULT_WEIGHTS)),
     "ftp": dict(zip(FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS)),
+    "http": dict(zip(HTTP_STRATEGY_NAMES, HTTP_DEFAULT_WEIGHTS)),
     "reasoning": "",
 }
 
 # RL bandits — one per protocol, adjusts base weights via multipliers
 dns_bandit = UCB1Bandit(DNS_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 ftp_bandit = UCB1Bandit(FTP_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
+http_bandit = UCB1Bandit(HTTP_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
+
+
+def _bandit_for(protocol):
+    if protocol == "ftp":
+        return ftp_bandit
+    if protocol == "http":
+        return http_bandit
+    return dns_bandit
 
 fuzzer_state = {
     "iteration": 0,
@@ -352,10 +369,17 @@ def run_fuzzer(build_dir: str):
     if protocol == "ftp":
         transport = StreamTransport(target_port=21)
         ftp_mutator = FtpMutator(external_weights=ai_weights.get("ftp"), bandit=ftp_bandit)
+        http_mutator = None
+        seed_message = None
+    elif protocol == "http":
+        transport = StreamTransport(target_port=80)
+        ftp_mutator = None
+        http_mutator = HttpMutator(external_weights=ai_weights.get("http"), bandit=http_bandit)
         seed_message = None
     else:
         transport = StreamTransport(target_port=53)
         ftp_mutator = None
+        http_mutator = None
         seed_question = DNSQuestion(qname="example.com")
         seed_message = DNSMessage(header=DNSHeader(), questions=[seed_question])
     
@@ -406,6 +430,19 @@ def run_fuzzer(build_dir: str):
                     src_port = random.randint(1025, 65534)
                     pipe.write(transport.wrap_tcp_session(payload, src_port=src_port))
                     fuzzer_state["iteration"] += 4  # 5 PCAP records per TCP session (includes FIN-ACK)
+                elif protocol == "http":
+                    if iteration == 1 or (iteration - 1) % 50 == 0:
+                        _http_payload, _http_strategy = http_mutator.mutate()
+                    payload, strategy = _http_payload, _http_strategy
+                    fuzzer_state["current_strategy"] = strategy
+                    fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                    src_port = random.randint(1025, 65534)
+                    if is_http_response_strategy(strategy):
+                        # server->client: drives the http_inspect RESPONSE parser
+                        pipe.write(transport.wrap_tcp_response_session(payload, src_port=src_port))
+                    else:
+                        pipe.write(transport.wrap_tcp_session(payload, src_port=src_port))
+                    fuzzer_state["iteration"] += 4  # full TCP session per HTTP message
                 else:
                     dns_w = ai_weights.get("dns", {})
                     strategy = dns_bandit.select_with_weights(dns_w)
@@ -440,10 +477,10 @@ def run_fuzzer(build_dir: str):
                 fuzzer_state["last_packet_time"] = time.time()
 
                 # RL bandit: record no-crash outcome for this strategy
-                active_bandit = ftp_bandit if protocol == "ftp" else dns_bandit
+                active_bandit = _bandit_for(protocol)
                 active_bandit.update(strategy, 0.0)
 
-                stat_interval = 500 if protocol == "ftp" else 10000
+                stat_interval = 500 if protocol in ("ftp", "http") else 10000
                 if fuzzer_state["iteration"] % stat_interval == 0:
                     elapsed = time.time() - fuzzer_state["start_time"] if fuzzer_state["start_time"] else 1
                     fuzzer_state["packets_per_sec"] = int(fuzzer_state["iteration"] / max(elapsed, 0.001))
@@ -451,7 +488,7 @@ def run_fuzzer(build_dir: str):
 
     except BrokenPipeError:
         # RL bandit: reward the strategy that caused the crash
-        active_bandit = ftp_bandit if protocol == "ftp" else dns_bandit
+        active_bandit = _bandit_for(protocol)
         active_bandit.update(fuzzer_state.get("current_strategy", ""), 1.0)
         log_event("ERROR", "Pipe severed — Snort collapsed unexpectedly")
         print("\n[-] Pipe severed! Snort process collapsed unexpectedly.")
@@ -477,7 +514,7 @@ def run_fuzzer(build_dir: str):
             
             if fuzzer_state["anomaly_detected"]:
                 # RL bandit: reward the crashing strategy
-                ab = ftp_bandit if protocol == "ftp" else dns_bandit
+                ab = _bandit_for(protocol)
                 ab.update(fuzzer_state.get("current_strategy", ""), 1.0)
                 save_crash_log(fuzzer_state["iteration"], stderr, anomaly_type=fuzzer_state["anomaly_detected"], return_code=target_process.returncode)
             elif target_process.returncode not in (0, None, -2, -9, -15):
@@ -527,9 +564,15 @@ def run_fuzzer_live(config: dict):
 
     if protocol == "ftp":
         ftp_mutator_inst = FtpMutator(external_weights=ai_weights.get("ftp"), bandit=ftp_bandit)
+        http_mutator_inst = None
+        seed_message = None
+    elif protocol == "http":
+        ftp_mutator_inst = None
+        http_mutator_inst = HttpMutator(external_weights=ai_weights.get("http"), bandit=http_bandit)
         seed_message = None
     else:
         ftp_mutator_inst = None
+        http_mutator_inst = None
         seed_question = DNSQuestion(qname="example.com")
         seed_message = DNSMessage(header=DNSHeader(), questions=[seed_question])
 
@@ -557,6 +600,7 @@ def run_fuzzer_live(config: dict):
         log_event("WARNING", "No FTD IP / Snort PID provided — fire-and-forget mode (no health tracking)")
 
     _ftp_payload, _ftp_strategy = None, None
+    _http_payload, _http_strategy = None, None
 
     try:
         while fuzzer_state["running"] and not fuzzer_state["anomaly_detected"]:
@@ -570,6 +614,18 @@ def run_fuzzer_live(config: dict):
                 fuzzer_state["current_strategy"] = strategy
                 fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
                 live_transport.send_tcp(_ftp_payload)
+                fuzzer_state["iteration"] += 1
+            elif protocol == "http":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _http_payload, _http_strategy = http_mutator_inst.mutate()
+                strategy = _http_strategy
+                fuzzer_state["current_strategy"] = strategy
+                fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                # NOTE: in live mode the fuzzer is the CLIENT, so it can only send
+                # client->server bytes. Request-side strategies test the on-path
+                # http_inspect request parser; response-side (resp_*) evasions are
+                # best exercised in pipe mode via wrap_tcp_response_session.
+                live_transport.send_tcp(_http_payload, port=80)
                 fuzzer_state["iteration"] += 1
             else:
                 dns_w = ai_weights.get("dns", {})
@@ -598,10 +654,10 @@ def run_fuzzer_live(config: dict):
             fuzzer_state["last_packet_time"] = time.time()
 
             # RL bandit: record no-crash outcome
-            active_bandit = ftp_bandit if protocol == "ftp" else dns_bandit
+            active_bandit = _bandit_for(protocol)
             active_bandit.update(strategy, 0.0)
 
-            stat_interval = 500 if protocol == "ftp" else 10000
+            stat_interval = 500 if protocol in ("ftp", "http") else 10000
             if fuzzer_state["iteration"] % stat_interval == 0:
                 elapsed = time.time() - fuzzer_state["start_time"] if fuzzer_state["start_time"] else 1
                 fuzzer_state["packets_per_sec"] = int(fuzzer_state["iteration"] / max(elapsed, 0.001))
@@ -621,7 +677,7 @@ def run_fuzzer_live(config: dict):
         fuzzer_state["status"] = "stopped" if not fuzzer_state["anomaly_detected"] else "crash_detected"
         if fuzzer_state.get("anomaly_detected"):
             # RL bandit: reward the crashing strategy
-            ab = ftp_bandit if protocol == "ftp" else dns_bandit
+            ab = _bandit_for(protocol)
             ab.update(fuzzer_state.get("current_strategy", ""), 1.0)
             save_crash_log(
                 fuzzer_state["iteration"],

@@ -288,6 +288,49 @@ def build_response_packet(anomaly: str = "rdlength_mismatch") -> bytes:
         header = struct.pack("!HHHHHH", tid, flags, 1, 500, 0, 0)
         return (header + body)[:8191]  # clamp to MAX_UDP_PAYLOAD
 
+    elif anomaly == "standard_rr_rdata":
+        # RFC 1035 §3.3 RDATA-format-specific mutations for the standard RRs that
+        # otherwise only get a generic 4-byte payload via obsolete_rr_flood. One
+        # sub-variant per call; across many packets every format is exercised.
+        # These drive Snort's name-decompression and <character-string> parsers
+        # along the per-type RDATA paths rather than just the type-switch.
+        variant = random.choice([
+            "md_oob_name", "mf_ptr_to_header", "mb_trunc_name", "mg_inline_name",
+            "mr_oob_name", "minfo_dual_name", "hinfo_charstr_overflow",
+            "hinfo_missing_os", "ptr_oob_name", "ptr_to_question", "null_rdlength_lie",
+        ])
+        oob_ptr = b'\xff\xff'           # compression ptr to offset 16383 — OOB read
+        trunc_name = b'\x3f' + b'A' * 4  # label len=63 but only 4 bytes follow
+
+        if variant == "md_oob_name":           # MD=3, RDATA=MADNAME (domain-name)
+            rdata, rtype = oob_ptr, 3
+        elif variant == "mf_ptr_to_header":     # MF=4, ptr to offset 0 = DNS header
+            rdata, rtype = b'\xc0\x00', 4        # header integers misread as labels
+        elif variant == "mb_trunc_name":        # MB=7, MADNAME truncated mid-label
+            rdata, rtype = trunc_name, 7
+        elif variant == "mg_inline_name":       # MG=8, MGMNAME inline domain-name
+            rdata, rtype = _encode_name("mbox.example.com"), 8
+        elif variant == "mr_oob_name":          # MR=9, NEWNAME OOB pointer
+            rdata, rtype = oob_ptr, 9
+        elif variant == "minfo_dual_name":      # MINFO=14, RMAILBX + EMAILBX names
+            rdata, rtype = _encode_name("admin.example.com") + oob_ptr, 14
+        elif variant == "hinfo_charstr_overflow":  # HINFO=13, CPU len=255, few bytes
+            rdata, rtype = b'\xff' + b'CPU', 13
+        elif variant == "hinfo_missing_os":     # HINFO=13, only CPU string; OS absent
+            rdata, rtype = b'\x04i386', 13
+        elif variant == "ptr_oob_name":         # PTR=12, PTRDNAME OOB pointer
+            rdata, rtype = oob_ptr, 12
+        elif variant == "ptr_to_question":      # PTR=12, PTRDNAME ptr back to qname
+            rdata, rtype = b'\xc0\x0c', 12
+        else:                                    # null_rdlength_lie: NULL=10 arbitrary
+            answer = b'\xc0\x0c' + struct.pack("!HHIH", 10, 1, 300, 0xFFFF) + b'\xde\xad\xbe\xef'
+            header = struct.pack("!HHHHHH", tid, flags, 1, 1, 0, 0)
+            return header + question + answer
+
+        answer = b'\xc0\x0c' + struct.pack("!HHIH", rtype, 1, 300, len(rdata)) + rdata
+        header = struct.pack("!HHHHHH", tid, flags, 1, 1, 0, 0)
+        return header + question + answer
+
     else:
         answer = b'\xc0\x0c' + struct.pack("!HHIH", 1, 1, 300, 4) + b'\x7f\x00\x00\x01'
         header = struct.pack("!HHHHHH", tid, flags, 1, 1, 0, 0)

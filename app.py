@@ -19,8 +19,10 @@ except ImportError:
 from main import (fuzzer_state, event_log, reset_state, run_fuzzer, run_fuzzer_live,
                   log_event, ai_weights, DNS_STRATEGY_NAMES, DNS_DEFAULT_WEIGHTS,
                   FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS,
-                  dns_bandit, ftp_bandit)
+                  HTTP_STRATEGY_NAMES, HTTP_DEFAULT_WEIGHTS,
+                  dns_bandit, ftp_bandit, http_bandit)
 from protocol.ftp import FTP_STRATEGY_LABELS
+from protocol.http import HTTP_STRATEGY_LABELS
 from engine.code_collector import (collect_to_dict, collect_to_single_text, VALID_EXTENSIONS,
                                     minify_code, hotspot_filter, extract_repo_map,
                                     build_optimized_context, estimate_tokens)
@@ -44,6 +46,22 @@ DNS_STRATEGY_LABELS = {
     "dns_dynamic_update": "DNS Dynamic Update",
     "multi_query_storm":  "Multi-Query Storm",
 }
+
+def _labels_for(protocol):
+    if protocol == "ftp":
+        return FTP_STRATEGY_LABELS
+    if protocol == "http":
+        return HTTP_STRATEGY_LABELS
+    return DNS_STRATEGY_LABELS
+
+
+def _bandit_for_proto(protocol):
+    if protocol == "ftp":
+        return ftp_bandit
+    if protocol == "http":
+        return http_bandit
+    return dns_bandit
+
 
 app = Flask(__name__)
 
@@ -240,6 +258,35 @@ FTP STRATEGIES (used when fuzzing FTP inspectors):
 - rest_overflow: REST command with boundary integer values (LLONG_MAX, negative, sequential overflow). Targets file position tracking. Triggers: integer-overflow, integer-underflow, oob-write
 - data_channel_confusion: Rapid PASV/PORT mode switching, simultaneous transfers, aborted transfers. Targets data channel state tracking. Triggers: use-after-free, state-corruption, memory-leak
 - feat_negotiate: AUTH TLS cleartext evasion, FEAT floods, OPTS overflow, rapid mode switching. Targets feature negotiation state. Triggers: evasion, state-corruption, buffer-overflow
+
+HTTP STRATEGIES (used when fuzzing HTTP inspectors, e.g. Snort 3 http_inspect):
+- method_overflow: Valid method but colossal URI/query/path-segment counts. Overflows request-line field allocation and URI normalization buffers. Triggers: buffer-overflow, heap-overflow, oob-write
+- header_bomb: Thousands of headers, one giant header value/name, or duplicate headers. Exhausts the header field table. Triggers: memory-exhaustion, heap-overflow, oob-write
+- chunked_confusion: Malformed Transfer-Encoding chunked bodies (oversized/overflowing chunk-size hex, chunk extensions, size/data mismatch, missing terminators, bare-LF). Targets the dechunker. Triggers: integer-overflow, oob-read, buffer-overflow
+- request_smuggling: CL.TE / TE.CL desync and obfuscated Transfer-Encoding/Content-Length (duplicate, space-before-colon, tab, conflicting values). Targets boundary reconciliation. Triggers: state-corruption, request-smuggling, oob-read
+- uri_evasion: URI normalization bypasses (double percent-encoding, overlong UTF-8, dot-segment floods, null-byte, backslash, IIS unicode). Targets the URI normalizer. Triggers: evasion, oob-read, buffer-overflow
+- pipeline_flood: Hundreds of pipelined requests in one TCP session. Stresses per-transaction state tracking and message-boundary detection. Triggers: state-corruption, memory-leak, use-after-free
+- header_folding: Obsolete line folding, bare CR, bare LF, mixed line endings, leading whitespace. Targets header line reassembly. Triggers: state-corruption, oob-read, evasion
+- version_confusion: Malformed HTTP versions (HTTP/0.9, HTTP/9.9, overflowing minor, extra dots, missing version, leading zeros). Targets version parser. Triggers: integer-overflow, null-deref, state-corruption
+- content_length_attack: Content-Length integer torture (huge, negative, plus-sign, hex, leading zeros, whitespace, conflicting). Targets body-length tracking. Triggers: integer-overflow, integer-underflow, oob-write
+- multipart_boundary: multipart/form-data boundary parser stress (missing close, oversized boundary, nested, many parts, invalid boundary chars). Triggers: oob-read, buffer-overflow, state-corruption
+- gzip_bomb: Content-Encoding decompression attacks (compression bomb, malformed gzip, lying encoding, double gzip). Targets the decompressor. Triggers: memory-exhaustion, oob-write, heap-overflow
+- absolute_uri_confusion: Absolute-form/authority-form targets, embedded credentials, multiple/oversized Host headers, junk host ports. Targets URI host reconciliation. Triggers: state-corruption, oob-read, evasion
+- method_fuzz: RFC2616 §9 request methods and their specific rules — OPTIONS * / OPTIONS uri, real CONNECT authority-form (host:port, incl. junk port), TRACE/HEAD with illegal bodies, body-bearing PUT/DELETE, lowercase/mixed-case/unknown/oversized method tokens, tab/multi-space/leading-space method-URI separators, missing URI, extra request-line field. Targets the request-line/method parser and per-method handling. Triggers: state-corruption, oob-read, buffer-overflow, evasion
+- header_field_fuzz: RFC2616 §14 parser-relevant request headers — Range (basic/overlapping/huge/negative/suffix/thousands), If-Range, Content-Range, Expect 100-continue/unknown, TE with q-values, Trailer in a chunked body, Connection+Upgrade negotiation, base64 Authorization (huge/invalid), Accept-Encoding with thousands of q-codings, Cache-Control integer/overflow directives, huge Max-Forwards. Targets range reassembly, header-value parsing, integer fields, base64 decode. Triggers: integer-overflow, oob-read, buffer-overflow, state-corruption
+
+HTTP RESPONSE STRATEGIES (server->client; model the HTTP Evader "semantic gap" evasions — they target how http_inspect parses RESPONSES and extracts the body for inspection, where a mismatch vs the browser lets payload slip through):
+- resp_http09: HTTP/0.9 response — bare body, no status line/headers, ended by TCP close. Targets response classification / EOF body handling. Triggers: evasion, state-corruption, oob-read
+- resp_deflate_ambiguity: Content-Encoding: deflate as raw RFC1951 vs zlib RFC1950 vs gzip-mislabelled vs truncated vs x-deflate. Targets the inflate path. Triggers: oob-read, decompression-bypass, integer-overflow
+- resp_chunked_evasion: response chunked tricks — TE+Content-Length (incl. double CL), HTTP/1.0+chunked, duplicate/triple Transfer-Encoding, value fuzzing (xchunked / "x chunked" / "chunked foo" / mixed-case chUnked / "chunked;"), CR-based hiding (TE:<CR>chunked, chunked<CR>SP), CRLF-fold inside the value token, chunked declared via Content-Encoding, chunk extensions, chunk-size 0x/negative/leading-ws/caps. Targets the response dechunker and TE header parsing. Triggers: integer-overflow, oob-read, evasion, request-smuggling
+- resp_double_encoding: stacked/odd Content-Encoding — deflate+gzip, deflate+deflate, gzip+gzip, two headers, gzip-header-over-zlib-body, identity stacked/alone, "gzip," trailing comma, declared-double-but-served-single, declared-vs-served wrong order, and bare-LF/CR X-Foo header injected between two CE headers. Targets multi-layer decompression (devices decompress once / trust the headers). Triggers: decompression-bypass, oob-read, resource-exhaustion
+- resp_gzip_quirks: gzip with bad CRC32/ISIZE, truncated trailer (last 4/8 bytes), reserved FLG bits, FNAME/FCOMMENT/FTEXT, bad FHCRC, raw data appended after the gzip stream. Targets gzip header/trailer parsing. Triggers: oob-read, oob-write, decompression-bypass
+- resp_whitespace_evasion: response header white-space — obsolete folding, LF-only folding, bare LF, bare CR separator, leading blank line, space before status line, space before colon. Targets response header line parsing. Triggers: state-corruption, oob-read, evasion
+- resp_lucky_status: unusual/invalid status codes (100, 3xx w/o Location, 401/407 w/o auth, 5xx, 0200, 2, 20x, 2xx, 000, 600). Targets status-line parsing and "only 2xx has a body" assumptions. Triggers: state-corruption, integer-overflow, evasion
+- resp_nul_injection: control-character obfuscation in the response status line / field names / values — NUL, VT (\\x0b), FF (\\x0c), Latin-1 NBSP (\\xa0), DEL (\\x7f), UTF-8 BOM/NBSP — around the colon, inside/around the value, plus junk/control-only lines before the real Transfer-Encoding header. Targets control-char handling in header parsing. Triggers: oob-read, state-corruption, evasion
+- resp_version_confusion: response version robustness (http/1.1 lowercase, HTTP/2.0, HTTP/1.2, HTTP/1.01, HTTP/1.010, junk after version, hTTp, ICY). Targets status-line version parsing and chunked-applicability. Triggers: integer-overflow, state-corruption, evasion
+- resp_header_end: header-terminator variants (\\n\\n, SP/TAB in the empty line, \\n\\r\\r\\n, double colon Transfer-Encoding::chunked). Targets header/body boundary detection. Triggers: oob-read, state-corruption, evasion
+- resp_content_length: response Content-Length parsing tricks — double/half declared length, junk around the value (;/,/quotes/leading-trailing alpha/space/NBSP), decimals, NUL inside, hex (0x), uint32 overflow, >64bit huge, 1GB, 1000-zero padding, empty, invalid. Body has trailing junk past the declared length. Targets body-length tracking and body boundary. Triggers: integer-overflow, integer-underflow, oob-read, evasion
 """
 
 # ---------------------------------------------------------------------------
@@ -354,11 +401,12 @@ SEVERITY_MULTIPLIERS = {
 
 def compute_weights_from_vulns(verified_vulns):
     """Deterministic weight computation from verified vulnerabilities.
-    Returns (dns_weights, ftp_weights, reasoning_str)."""
+    Returns (dns_weights, ftp_weights, http_weights, reasoning_str)."""
 
     # Start with default weights
     dns_w = dict(zip(DNS_STRATEGY_NAMES, DNS_DEFAULT_WEIGHTS))
     ftp_w = dict(zip(FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS))
+    http_w = dict(zip(HTTP_STRATEGY_NAMES, HTTP_DEFAULT_WEIGHTS))
 
     reasoning_lines = ["Weight computation (deterministic formula):"]
     reasoning_lines.append(f"  Starting from default weights. {len(verified_vulns)} verified vulnerabilities.")
@@ -385,6 +433,12 @@ def compute_weights_from_vulns(verified_vulns):
             reasoning_lines.append(
                 f"  FTP/{strat}: {old:.1f} × {effective_mult:.2f} "
                 f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {ftp_w[strat]:.1f}")
+        elif strat in http_w:
+            old = http_w[strat]
+            http_w[strat] = old * effective_mult
+            reasoning_lines.append(
+                f"  HTTP/{strat}: {old:.1f} × {effective_mult:.2f} "
+                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {http_w[strat]:.1f}")
         else:
             reasoning_lines.append(f"  WARNING: strategy '{strat}' not recognized, skipping")
 
@@ -400,7 +454,13 @@ def compute_weights_from_vulns(verified_vulns):
         ftp_w = {s: round(v / ftp_total * 100, 1) for s, v in ftp_w.items()}
     reasoning_lines.append(f"  FTP normalized (sum was {ftp_total:.1f})")
 
-    return dns_w, ftp_w, "\n".join(reasoning_lines)
+    # Normalize HTTP to sum=100
+    http_total = sum(http_w.values())
+    if http_total > 0:
+        http_w = {s: round(v / http_total * 100, 1) for s, v in http_w.items()}
+    reasoning_lines.append(f"  HTTP normalized (sum was {http_total:.1f})")
+
+    return dns_w, ftp_w, http_w, "\n".join(reasoning_lines)
 
 # AI analysis state
 analysis_state = {
@@ -429,7 +489,7 @@ def api_state():
     mins, secs = divmod(rem, 60)
 
     protocol = fuzzer_state.get("protocol", "dns")
-    labels = FTP_STRATEGY_LABELS if protocol == "ftp" else DNS_STRATEGY_LABELS
+    labels = _labels_for(protocol)
     data = {
         "iteration": fuzzer_state["iteration"],
         "status": fuzzer_state["status"],
@@ -449,8 +509,8 @@ def api_state():
         "strategy_labels": labels,
         "runtime": f"{hours:02d}:{mins:02d}:{secs:02d}",
         "trigger_detail": fuzzer_state.get("trigger_detail"),
-        "bandit_stats": (ftp_bandit if protocol == "ftp" else dns_bandit).get_stats(
-            base_weights=ai_weights.get("ftp" if protocol == "ftp" else "dns", {})),
+        "bandit_stats": _bandit_for_proto(protocol).get_stats(
+            base_weights=ai_weights.get(protocol, {})),
     }
     return jsonify(data)
 
@@ -476,7 +536,7 @@ def api_stream():
             mins, secs = divmod(rem, 60)
 
             protocol = fuzzer_state.get("protocol", "dns")
-            labels = FTP_STRATEGY_LABELS if protocol == "ftp" else DNS_STRATEGY_LABELS
+            labels = _labels_for(protocol)
             data = {
                 "iteration": fuzzer_state["iteration"],
                 "status": fuzzer_state["status"],
@@ -496,8 +556,8 @@ def api_stream():
                 "strategy_labels": labels,
                 "runtime": f"{hours:02d}:{mins:02d}:{secs:02d}",
                 "trigger_detail": fuzzer_state.get("trigger_detail"),
-                "bandit_stats": (ftp_bandit if protocol == "ftp" else dns_bandit).get_stats(
-                    base_weights=ai_weights.get("ftp" if protocol == "ftp" else "dns", {})),
+                "bandit_stats": _bandit_for_proto(protocol).get_stats(
+                    base_weights=ai_weights.get(protocol, {})),
                 "events": event_log[-20:],
             }
             yield f"data: {json.dumps(data)}\n\n"
@@ -526,7 +586,7 @@ def api_start():
 
     body = request.json or {}
     protocol = body.get("protocol", "dns").lower()
-    if protocol not in ("dns", "ftp"):
+    if protocol not in ("dns", "ftp", "http"):
         protocol = "dns"
     mode = body.get("mode", "pipe").lower()
     live_config = body.get("live_config", {})
@@ -896,7 +956,7 @@ For each vulnerability, provide a concrete byte-level payload that would trigger
 
         # ── WEIGHER: DETERMINISTIC PYTHON ─────────────────────────
         print("[AI] ══ Computing weights (Python) ══")
-        dns_w, ftp_w, reasoning = compute_weights_from_vulns(raw_vulns)
+        dns_w, ftp_w, http_w, reasoning = compute_weights_from_vulns(raw_vulns)
         print(f"[AI] Weights computed deterministically.")
 
         # Assemble final results
@@ -908,6 +968,7 @@ For each vulnerability, provide a concrete byte-level payload that would trigger
             "recommended_weights": {
                 "dns": dns_w,
                 "ftp": ftp_w,
+                "http": http_w,
                 "weight_reasoning": reasoning,
             },
             "model_used": model_used,
@@ -1165,13 +1226,16 @@ def ai_get_weights():
     """Return current weights (AI or default) plus defaults for comparison."""
     dns_default = dict(zip(DNS_STRATEGY_NAMES, DNS_DEFAULT_WEIGHTS))
     ftp_default = dict(zip(FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS))
+    http_default = dict(zip(HTTP_STRATEGY_NAMES, HTTP_DEFAULT_WEIGHTS))
     return jsonify({
         "source": ai_weights.get("source", "default"),
         "dns": ai_weights.get("dns", dns_default),
         "ftp": ai_weights.get("ftp", ftp_default),
+        "http": ai_weights.get("http", http_default),
         "reasoning": ai_weights.get("reasoning", ""),
         "dns_default": dns_default,
         "ftp_default": ftp_default,
+        "http_default": http_default,
     })
 
 
@@ -1188,6 +1252,7 @@ def ai_apply_weights():
 
     dns_raw = rec.get("dns", {})
     ftp_raw = rec.get("ftp", {})
+    http_raw = rec.get("http", {})
 
     # Normalize DNS weights
     dns_total = sum(dns_raw.get(s, 0) for s in DNS_STRATEGY_NAMES)
@@ -1199,18 +1264,25 @@ def ai_apply_weights():
     if ftp_total > 0:
         ai_weights["ftp"] = {s: round(ftp_raw.get(s, 0) / ftp_total * 100, 1) for s in FTP_STRATEGY_NAMES}
 
+    # Normalize HTTP weights
+    http_total = sum(http_raw.get(s, 0) for s in HTTP_STRATEGY_NAMES)
+    if http_total > 0:
+        ai_weights["http"] = {s: round(http_raw.get(s, 0) / http_total * 100, 1) for s in HTTP_STRATEGY_NAMES}
+
     ai_weights["source"] = "ai"
     ai_weights["reasoning"] = rec.get("weight_reasoning", "")
 
     # Reset RL bandits so they start fresh with new AI base weights
     dns_bandit.reset()
     ftp_bandit.reset()
+    http_bandit.reset()
 
     log_event("INFO", f"AI weights applied — source: {results.get('model_used', 'unknown')}, RL bandits reset")
     print(f"[AI] Weights applied: DNS={ai_weights['dns']}")
     print(f"[AI] Weights applied: FTP={ai_weights['ftp']}")
+    print(f"[AI] Weights applied: HTTP={ai_weights['http']}")
 
-    return jsonify({"status": "applied", "dns": ai_weights["dns"], "ftp": ai_weights["ftp"]})
+    return jsonify({"status": "applied", "dns": ai_weights["dns"], "ftp": ai_weights["ftp"], "http": ai_weights["http"]})
 
 
 @app.route("/api/ai/reset_weights", methods=["POST"])
@@ -1218,12 +1290,14 @@ def ai_reset_weights():
     """Reset weights back to defaults."""
     ai_weights["dns"] = dict(zip(DNS_STRATEGY_NAMES, DNS_DEFAULT_WEIGHTS))
     ai_weights["ftp"] = dict(zip(FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS))
+    ai_weights["http"] = dict(zip(HTTP_STRATEGY_NAMES, HTTP_DEFAULT_WEIGHTS))
     ai_weights["source"] = "default"
     ai_weights["reasoning"] = ""
 
     # Reset RL bandits
     dns_bandit.reset()
     ftp_bandit.reset()
+    http_bandit.reset()
 
     log_event("INFO", "Strategy weights reset to defaults, RL bandits reset")
     return jsonify({"status": "reset"})

@@ -7,3 +7,5 @@ target.pipe
 *.pptx
 generate_ppt.py
 .env
+evasion_backend.py
+evasion_test.py

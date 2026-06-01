@@ -94,7 +94,7 @@ class ResponseMutator:
         "rdlength_mismatch", "cname_bad_pointer", "count_mismatch",
         "mx_bad_pointer", "txt_overflow", "nested_cname_chain", "answer_bomb",
         "obsolete_rr_flood", "authority_additional_bomb", "section_counter_confusion",
-        "soa_name_bomb", "ns_name_bomb",
+        "soa_name_bomb", "ns_name_bomb", "standard_rr_rdata",
     ]
 
     @staticmethod

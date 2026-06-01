@@ -931,6 +931,27 @@
         .ai-w-legend-item { display: flex; align-items: center; gap: 5px; font-size: 10px; color: var(--text-muted); }
         .ai-w-legend-dot { width: 8px; height: 8px; border-radius: 2px; }
 
+        /* Highest-weight mutation highlight */
+        .ai-w-row.ai-w-top .ai-w-name { color: var(--accent-green); font-weight: 700; }
+        .ai-w-row.ai-w-top::before { content: '★'; color: var(--accent-green); font-size: 10px; margin-right: -4px; }
+
+        /* Strategy distribution: clickable + "show all" footer */
+        .strat-panel-clickable { cursor: pointer; }
+        .strat-panel-clickable:hover .panel-title { color: var(--accent-cyan); }
+        .strat-more {
+            margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border);
+            text-align: center; font-size: 11px; color: var(--accent-cyan);
+            font-family: 'JetBrains Mono', monospace; letter-spacing: 0.3px;
+            cursor: pointer;
+        }
+        .strat-more:hover { color: var(--text-primary); }
+        .panel-hint { font-size: 10px; color: var(--text-muted); font-style: italic; }
+        .modal.modal-wide { max-width: 720px; }
+        .strat-modal-list { display: flex; flex-direction: column; gap: 6px; }
+
+        /* AI weight protocol selector */
+        .ai-proto-tabs { display: flex; gap: 8px; margin: 16px 0 4px; }
+
         .ai-summary-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; margin-bottom: 16px; }
         .ai-summary-card h3 { font-size: 13px; color: var(--text-primary); margin-bottom: 8px; }
         .ai-summary-card p { font-size: 12px; color: var(--text-secondary); line-height: 1.6; }
@@ -1058,6 +1079,7 @@
                 <select id="proto-select" class="proto-select" title="Target protocol">
                     <option value="dns">DNS</option>
                     <option value="ftp">FTP</option>
+                    <option value="http">HTTP</option>
                 </select>
             </div>
             <div class="target-info">
@@ -1180,9 +1202,9 @@
                     </div>
                 </div>
             </div>
-            <div class="panel">
+            <div class="panel strat-panel-clickable" onclick="openStratModal()" title="Click to see all strategy weights">
                 <div class="panel-header">
-                    <span class="panel-title">Strategy Distribution</span>
+                    <span class="panel-title">Strategy Distribution <span class="panel-hint">— top 5, click for all</span></span>
                     <span class="panel-badge" id="strat-total">0 total</span>
                 </div>
                 <div class="panel-body">
@@ -1340,6 +1362,32 @@
         </div>
     </div>
 
+    <!-- STRATEGY WEIGHTS MODAL (all strategies) -->
+    <div class="modal-overlay" id="strat-modal-overlay" onclick="closeStratModal(event)">
+        <div class="modal modal-wide">
+            <div class="modal-header">
+                <h3>All Strategy Weights <span id="strat-modal-count" style="color:var(--text-muted);font-weight:400;"></span></h3>
+                <button class="modal-close" onclick="document.getElementById('strat-modal-overlay').classList.remove('open')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="strat-modal-body">Loading...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- AI WEIGHT MODAL (all AI-recommended strategy weights) -->
+    <div class="modal-overlay" id="ai-w-modal-overlay" onclick="closeAiWeightModal(event)">
+        <div class="modal modal-wide">
+            <div class="modal-header">
+                <h3 id="ai-w-modal-title">Strategy Weights</h3>
+                <button class="modal-close" onclick="document.getElementById('ai-w-modal-overlay').classList.remove('open')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="ai-w-modal-body"></div>
+            </div>
+        </div>
+    </div>
+
     <!-- CRASH DETAIL MODAL -->
     <div class="modal-overlay" id="modal-overlay" onclick="closeModal(event)">
         <div class="modal">
@@ -1481,20 +1529,21 @@
             document.getElementById('strat-total').textContent = formatNum(total) + ' total';
             const stratEl = document.getElementById('strat-list');
             const proto = data.protocol || 'dns';
-            const wDefault = cachedWeights ? (proto === 'ftp' ? cachedWeights.ftp_default : cachedWeights.dns_default) : {};
-            const wApplied = cachedWeights ? (proto === 'ftp' ? cachedWeights.ftp : cachedWeights.dns) : {};
+            const wDefault = cachedWeights ? (cachedWeights[proto + '_default'] || {}) : {};
+            const wApplied = cachedWeights ? (cachedWeights[proto] || {}) : {};
             const wSource = cachedWeights ? cachedWeights.source : 'default';
 
             const bandit = data.bandit_stats || {};
             const banditStrats = bandit.strategies || {};
 
-            let html = `<div class="strat-header">
+            const headerHtml = `<div class="strat-header">
                 <span>Strategy</span><span></span>
                 <span>Original</span><span>Applied</span><span style="color:var(--accent-purple)">RL</span><span>Actual</span>
             </div>`;
 
             const entries = Object.entries(stats).sort((a, b) => b[1] - a[1]);
             const n = entries.length;
+            const rowsHtml = [];
 
             for (let i = 0; i < n; i++) {
                 const [key, count] = entries[i];
@@ -1527,19 +1576,37 @@
                 // RL bandit weight
                 const bs = banditStrats[key];
                 const rlPct = bs ? (bs.rl_weight * 100) : 0;
-                const rlRewards = bs ? bs.rewards : 0;
                 const rlTitle = bs ? `Pulls: ${bs.pulls} | Rewards: ${bs.rewards} | Avg: ${bs.avg_reward}` : '';
 
-                html += `<div class="strat-row">
+                rowsHtml.push(`<div class="strat-row">
                     <span class="strat-name">${stratLabels[key] || key}</span>
                     <div class="strat-bar-track"><div class="strat-bar-fill" style="width:${barW}%;background:${barColor}"></div></div>
                     <span class="strat-pct">${origPct.toFixed(1)}%</span>
                     <span class="${applCls}">${applPct.toFixed(1)}%</span>
                     <span class="strat-pct rl" title="${rlTitle}">${rlPct.toFixed(1)}%</span>
                     <span class="strat-pct" style="color:var(--text-primary)">${actualPct.toFixed(1)}%</span>
-                </div>`;
+                </div>`);
             }
-            stratEl.innerHTML = html;
+
+            // Panel shows only the top 5; full list lives in the click-to-open modal.
+            const TOP_N = 5;
+            let panelHtml = headerHtml + rowsHtml.slice(0, TOP_N).join('');
+            if (n > TOP_N) {
+                panelHtml += `<div class="strat-more">+ ${n - TOP_N} more — click to view all ${n} strategies</div>`;
+            } else if (n === 0) {
+                panelHtml = headerHtml + `<div class="strat-more" style="color:var(--text-muted);border:none;">No strategy data yet</div>`;
+            }
+            stratEl.innerHTML = panelHtml;
+
+            // Stash the complete table for the modal.
+            window._stratModalHtml = (n > 0)
+                ? `<div class="strat-modal-list">${headerHtml}${rowsHtml.join('')}</div>`
+                : '';
+            window._stratModalCount = n;
+            const modalBody = document.getElementById('strat-modal-body');
+            if (modalBody && document.getElementById('strat-modal-overlay').classList.contains('open')) {
+                modalBody.innerHTML = window._stratModalHtml;  // live-refresh while open
+            }
 
             if (data.events && data.events.length > 0) {
                 const logEl = document.getElementById('event-log');
@@ -1679,6 +1746,15 @@
             document.getElementById('confirm-overlay').classList.remove('open');
         }
         function closeModal(e) { if (e.target === document.getElementById('modal-overlay')) document.getElementById('modal-overlay').classList.remove('open'); }
+
+        function openStratModal() {
+            const body = document.getElementById('strat-modal-body');
+            body.innerHTML = window._stratModalHtml || '<div style="color:var(--text-muted);font-size:12px;">No strategy data yet — start the fuzzer.</div>';
+            const cnt = window._stratModalCount || 0;
+            document.getElementById('strat-modal-count').textContent = cnt ? `(${cnt} total)` : '';
+            document.getElementById('strat-modal-overlay').classList.add('open');
+        }
+        function closeStratModal(e) { if (!e || e.target === document.getElementById('strat-modal-overlay')) document.getElementById('strat-modal-overlay').classList.remove('open'); }
 
         /* ======== AI ANALYSIS FUNCTIONS ======== */
         const VALID_EXTENSIONS = new Set([
@@ -1962,48 +2038,109 @@
             let html = '';
             const sections = [
                 { key: 'dns', title: 'DNS Strategy Weights', defKey: 'dns_default' },
-                { key: 'ftp', title: 'FTP Strategy Weights', defKey: 'ftp_default' }
+                { key: 'ftp', title: 'FTP Strategy Weights', defKey: 'ftp_default' },
+                { key: 'http', title: 'HTTP Strategy Weights', defKey: 'http_default' }
             ];
+
+            const legend = `<div class="ai-w-legend">
+                <div class="ai-w-legend-item"><div class="ai-w-legend-dot" style="background:var(--accent-green)"></div> Boosted</div>
+                <div class="ai-w-legend-item"><div class="ai-w-legend-dot" style="background:var(--accent-red); opacity:0.6"></div> Reduced</div>
+                <div class="ai-w-legend-item"><div class="ai-w-legend-dot" style="background:var(--accent-blue); opacity:0.5"></div> Unchanged</div>
+            </div>`;
+
+            window._aiWeightFull = {};
+            window._aiWeightSections = {};
+            const AI_TOP_N = 5;
+            const available = [];
 
             for (const sec of sections) {
                 const aiW = rec[sec.key] || {};
-                const names = Object.keys(aiW);
+                let names = Object.keys(aiW);
                 if (names.length === 0) continue;
+                available.push(sec);
 
                 const total = Object.values(aiW).reduce((a, b) => a + b, 0);
                 const maxVal = Math.max(...Object.values(aiW), 0.01);
 
-                html += `<div class="ai-weight-section">
-                    <h4>${sec.title} — AI Recommended</h4>
-                    <div class="ai-weight-reasoning">${rec.weight_reasoning || ''}</div>
-                    <div class="ai-w-legend">
-                        <div class="ai-w-legend-item"><div class="ai-w-legend-dot" style="background:var(--accent-green)"></div> Boosted</div>
-                        <div class="ai-w-legend-item"><div class="ai-w-legend-dot" style="background:var(--accent-red); opacity:0.6"></div> Reduced</div>
-                        <div class="ai-w-legend-item"><div class="ai-w-legend-dot" style="background:var(--accent-blue); opacity:0.5"></div> Unchanged</div>
-                    </div>`;
+                // Sort by weight descending so the highest-weighted mutation leads.
+                names = names.sort((a, b) => (aiW[b] || 0) - (aiW[a] || 0));
+                const topName = names[0];
 
-                for (const name of names) {
+                const rowHtmlArr = names.map(name => {
                     const val = aiW[name] || 0;
                     const pct = total > 0 ? (val / total * 100) : 0;
                     const barW = (val / maxVal * 100);
 
                     let cls = 'same', delta = '';
-                    // Simple heuristic: if pct > 100/names.length * 1.5 it's boosted
                     const avg = 100 / names.length;
                     if (pct > avg * 1.3) { cls = 'up'; delta = '+' + (pct - avg).toFixed(0) + '%'; }
                     else if (pct < avg * 0.7) { cls = 'down'; delta = (pct - avg).toFixed(0) + '%'; }
 
-                    html += `<div class="ai-w-row">
-                        <span class="ai-w-name">${stratLabels[name] || name}</span>
+                    const topCls = (name === topName) ? ' ai-w-top' : '';
+                    const label = stratLabels[name] || name;
+                    return `<div class="ai-w-row${topCls}">
+                        <span class="ai-w-name">${label}</span>
                         <div style="flex:1;"><div class="ai-w-bar ${cls}" style="width:${barW}%"></div></div>
                         <span class="ai-w-pct">${pct.toFixed(1)}%</span>
                         <span class="ai-w-delta ${cls}">${delta || '='}</span>
                     </div>`;
+                });
+
+                const n = names.length;
+                // Per-protocol panel: legend + top 5 + "view all" footer.
+                let sectionHtml = `<div class="ai-weight-section">
+                    <h4>${sec.title} — AI Recommended</h4>
+                    <div class="ai-weight-reasoning">${rec.weight_reasoning || ''}</div>
+                    ${legend}
+                    ${rowHtmlArr.slice(0, AI_TOP_N).join('')}`;
+                if (n > AI_TOP_N) {
+                    sectionHtml += `<div class="strat-more" onclick="openAiWeightModal('${sec.key}')">+ ${n - AI_TOP_N} more — click to view all ${n} strategies</div>`;
                 }
-                html += '</div>';
+                sectionHtml += '</div>';
+                window._aiWeightSections[sec.key] = sectionHtml;
+
+                // Stash the complete list for the modal.
+                window._aiWeightFull[sec.key] = {
+                    title: `${sec.title} — AI Recommended (${n})`,
+                    html: `${legend}<div class="strat-modal-list">${rowHtmlArr.join('')}</div>`
+                };
             }
+
+            if (available.length === 0) return '';
+
+            // Default to DNS when present, else the first available protocol.
+            const defaultKey = (available.find(s => s.key === 'dns') || available[0]).key;
+            window._aiWeightDefaultKey = defaultKey;
+
+            let opts = '';
+            for (const s of available) {
+                const lbl = s.title.replace(' Strategy Weights', '');
+                opts += `<option value="${s.key}"${s.key === defaultKey ? ' selected' : ''}>${lbl}</option>`;
+            }
+            const selector = `<div class="ai-proto-tabs">
+                <select class="proto-select" id="ai-proto-select" onchange="aiSelectProto(this.value)" title="Protocol">${opts}</select>
+            </div>`;
+
+            html += selector + `<div id="ai-w-proto-container">${window._aiWeightSections[defaultKey]}</div>`;
             return html;
         }
+
+        // Switch which protocol's weight chart is shown (dropdown selector).
+        function aiSelectProto(key) {
+            const c = document.getElementById('ai-w-proto-container');
+            if (c && window._aiWeightSections) c.innerHTML = window._aiWeightSections[key] || '';
+            const sel = document.getElementById('ai-proto-select');
+            if (sel && sel.value !== key) sel.value = key;
+        }
+
+        function openAiWeightModal(key) {
+            const d = (window._aiWeightFull || {})[key];
+            if (!d) return;
+            document.getElementById('ai-w-modal-title').textContent = d.title;
+            document.getElementById('ai-w-modal-body').innerHTML = d.html;
+            document.getElementById('ai-w-modal-overlay').classList.add('open');
+        }
+        function closeAiWeightModal(e) { if (!e || e.target === document.getElementById('ai-w-modal-overlay')) document.getElementById('ai-w-modal-overlay').classList.remove('open'); }
 
         async function aiApplyWeights() {
             try {
