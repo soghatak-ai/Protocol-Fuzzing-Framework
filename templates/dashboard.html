@@ -818,6 +818,45 @@
         .fs-file-item .fs-rm { margin-left: auto; cursor: pointer; color: var(--text-muted); }
         .fs-file-item .fs-rm:hover { color: var(--accent-red); }
 
+        /* FILE SEND — LIVE PACKET VIEWER */
+        .fs-pkt-file { margin-bottom: 14px; }
+        .fs-pkt-file-head {
+            display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+            background: var(--bg-secondary); border: 1px solid var(--border);
+            border-radius: 8px 8px 0 0; font-size: 12px; font-weight: 600; color: var(--text-primary);
+        }
+        .fs-pkt-file-head .fs-pkt-target { margin-left: auto; color: var(--text-muted); font-weight: 400; font-size: 11px; }
+        .fs-pkt-list {
+            border: 1px solid var(--border); border-top: none; border-radius: 0 0 8px 8px;
+            max-height: 460px; overflow-y: auto; background: var(--bg-card);
+        }
+        .fs-pkt {
+            border-bottom: 1px solid rgba(255,255,255,0.04);
+            animation: fsPktIn 0.18s ease-out;
+        }
+        @keyframes fsPktIn { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+        .fs-pkt-head {
+            display: flex; align-items: center; gap: 10px; padding: 7px 12px;
+            font-size: 11px; cursor: pointer; user-select: none;
+        }
+        .fs-pkt-head:hover { background: rgba(255,255,255,0.02); }
+        .fs-pkt-badge {
+            font-weight: 700; font-size: 10px; padding: 2px 7px; border-radius: 4px;
+            letter-spacing: 0.5px; flex-shrink: 0;
+        }
+        .fs-pkt-badge.tx { background: rgba(56,139,253,0.16); color: var(--accent-blue); }
+        .fs-pkt-badge.rx { background: rgba(63,185,80,0.16); color: var(--accent-green); }
+        .fs-pkt-label { color: var(--text-primary); font-weight: 600; }
+        .fs-pkt-seq { color: var(--text-muted); }
+        .fs-pkt-len { margin-left: auto; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }
+        .fs-pkt-dump {
+            display: none; padding: 10px 12px; margin: 0; background: var(--bg-secondary);
+            font-family: 'JetBrains Mono', monospace; font-size: 11px; line-height: 1.55;
+            color: var(--text-secondary); white-space: pre; overflow-x: auto;
+        }
+        .fs-pkt.open .fs-pkt-dump { display: block; }
+        .fs-pkt-trunc { color: var(--accent-amber, #d29922); font-size: 10px; margin-left: 6px; }
+
         /* AI ANALYSIS PAGE */
         .ai-layout { display: grid; grid-template-columns: 340px 1fr; gap: 24px; }
         .ai-left { display: flex; flex-direction: column; gap: 16px; }
@@ -1112,6 +1151,7 @@
                     <option value="dns">DNS</option>
                     <option value="ftp">FTP</option>
                     <option value="http">HTTP</option>
+                    <option value="smtp">SMTP</option>
                 </select>
             </div>
             <div class="target-info">
@@ -1383,6 +1423,7 @@
                             <select class="config-input" id="fs-proto-select" onchange="fsSetProto(this.value)">
                                 <option value="http">HTTP</option>
                                 <option value="ftp">FTP</option>
+                                <option value="smtp">SMTP</option>
                             </select>
                         </div>
                         <div class="config-grid" style="grid-template-columns:1fr 1fr;">
@@ -1427,6 +1468,33 @@
                                 </div>
                             </div>
                         </div>
+
+                        <!-- SMTP-only options -->
+                        <div id="fs-smtp-opts" style="display:none;">
+                            <div class="config-grid" style="grid-template-columns:1fr 1fr; margin-top:12px;">
+                                <div class="config-field">
+                                    <label class="config-label" for="fs-smtp-from">MAIL FROM</label>
+                                    <input class="config-input" id="fs-smtp-from" type="text" value="sender@example.com">
+                                </div>
+                                <div class="config-field">
+                                    <label class="config-label" for="fs-smtp-to">RCPT TO</label>
+                                    <input class="config-input" id="fs-smtp-to" type="text" value="recipient@example.com">
+                                </div>
+                                <div class="config-field" style="grid-column:1 / -1;">
+                                    <label class="config-label" for="fs-smtp-subject">Subject (optional)</label>
+                                    <input class="config-input" id="fs-smtp-subject" type="text" placeholder="File transfer">
+                                </div>
+                                <div class="config-field">
+                                    <label class="config-label" for="fs-smtp-user">Auth User (optional)</label>
+                                    <input class="config-input" id="fs-smtp-user" type="text" placeholder="leave blank for none">
+                                </div>
+                                <div class="config-field">
+                                    <label class="config-label" for="fs-smtp-pass">Auth Password (optional)</label>
+                                    <input class="config-input" id="fs-smtp-pass" type="text" placeholder="leave blank for none">
+                                </div>
+                            </div>
+                            <div class="ai-drop-zone-hint" style="margin-top:8px;">File is sent as a base64 MIME attachment in cleartext (no STARTTLS) so the IDS can inspect it.</div>
+                        </div>
                     </div>
                 </div>
 
@@ -1453,12 +1521,12 @@
             <!-- RIGHT: results -->
             <div class="ai-panel" style="align-self:start;">
                 <div class="ai-panel-header">
-                    <span class="ai-panel-title">Send Results</span>
+                    <span class="ai-panel-title">Live Wire Packets</span>
                     <span class="ai-panel-title" id="fs-summary" style="color:var(--text-muted);">&mdash;</span>
                 </div>
                 <div class="ai-panel-body">
                     <div class="fs-results" id="fs-results">
-                        <div class="empty-state">Upload files and click &ldquo;Send as packets&rdquo;.</div>
+                        <div class="empty-state">Upload files and click &ldquo;Send as packets&rdquo; to watch the bytes stream in real time. Click any packet to expand its hex dump.</div>
                     </div>
                 </div>
             </div>
@@ -2168,7 +2236,8 @@
             const sections = [
                 { key: 'dns', title: 'DNS Strategy Weights', defKey: 'dns_default' },
                 { key: 'ftp', title: 'FTP Strategy Weights', defKey: 'ftp_default' },
-                { key: 'http', title: 'HTTP Strategy Weights', defKey: 'http_default' }
+                { key: 'http', title: 'HTTP Strategy Weights', defKey: 'http_default' },
+                { key: 'smtp', title: 'SMTP Strategy Weights', defKey: 'smtp_default' }
             ];
 
             const legend = `<div class="ai-w-legend">
@@ -2519,7 +2588,8 @@
             if (sel && sel.value !== proto) sel.value = proto;
             document.getElementById('fs-http-opts').style.display = proto === 'http' ? '' : 'none';
             document.getElementById('fs-ftp-opts').style.display = proto === 'ftp' ? '' : 'none';
-            document.getElementById('fs-port').value = proto === 'http' ? 80 : 21;
+            document.getElementById('fs-smtp-opts').style.display = proto === 'smtp' ? '' : 'none';
+            document.getElementById('fs-port').value = { http: 80, ftp: 21, smtp: 25 }[proto] || 80;
         }
 
         function fsRenderFiles() {
@@ -2573,10 +2643,16 @@
             const fd = new FormData();
             fd.append('protocol', fsProto);
             fd.append('host', host);
-            fd.append('port', document.getElementById('fs-port').value || (fsProto === 'http' ? 80 : 21));
+            fd.append('port', document.getElementById('fs-port').value || ({ http: 80, ftp: 21, smtp: 25 }[fsProto] || 80));
             if (fsProto === 'http') {
                 fd.append('http_method', document.getElementById('fs-http-method').value || 'POST');
                 fd.append('http_path', document.getElementById('fs-http-path').value || '');
+            } else if (fsProto === 'smtp') {
+                fd.append('smtp_from', document.getElementById('fs-smtp-from').value || 'sender@example.com');
+                fd.append('smtp_to', document.getElementById('fs-smtp-to').value || 'recipient@example.com');
+                fd.append('smtp_subject', document.getElementById('fs-smtp-subject').value || '');
+                fd.append('smtp_user', document.getElementById('fs-smtp-user').value || '');
+                fd.append('smtp_pass', document.getElementById('fs-smtp-pass').value || '');
             } else {
                 fd.append('ftp_user', document.getElementById('fs-ftp-user').value || 'anonymous');
                 fd.append('ftp_pass', document.getElementById('fs-ftp-pass').value || 'anonymous@');
@@ -2585,29 +2661,95 @@
             for (const f of fsFiles) fd.append('files', f, f.name);
 
             const results = document.getElementById('fs-results');
-            results.innerHTML = '<div class="empty-state">Sending...</div>';
+            results.innerHTML = '';
+            document.getElementById('fs-summary').textContent = 'Sending\u2026';
+            const lists = {};   // file name -> packet <div> container
+            let okCount = 0, total = 0;
+
             try {
-                const res = await fetch('/api/filesend/send', { method: 'POST', body: fd });
-                const data = await res.json();
-                if (data.error) {
-                    results.innerHTML = `<div class="empty-state" style="color:var(--accent-red);">${fsEsc(data.error)}</div>`;
+                const res = await fetch('/api/filesend/stream', { method: 'POST', body: fd });
+                if (!res.ok || !res.body) {
+                    let msg = 'Request failed';
+                    try { msg = (await res.json()).error || msg; } catch (_) {}
+                    results.innerHTML = `<div class="empty-state" style="color:var(--accent-red);">${fsEsc(msg)}</div>`;
                     return;
                 }
-                document.getElementById('fs-summary').textContent =
-                    `${data.sent_ok}/${data.total} ok → ${data.target}`;
-                results.innerHTML = data.results.map(r =>
-                    `<div class="fs-result-row ${r.ok ? 'ok' : 'err'}">` +
-                    `<span class="fs-dot"></span>` +
-                    `<span class="fs-result-name">${fsEsc(r.file)}</span>` +
-                    `<span style="color:var(--text-muted);font-size:11px;">${r.sent_bytes}B · ${r.protocol.toUpperCase()}</span>` +
-                    `<span class="fs-result-detail">${fsEsc(r.detail || r.response || '')}</span>` +
-                    `</div>`
-                ).join('');
+                const reader = res.body.getReader();
+                const dec = new TextDecoder();
+                let buf = '';
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    buf += dec.decode(value, { stream: true });
+                    let nl;
+                    while ((nl = buf.indexOf('\n')) >= 0) {
+                        const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+                        if (line.trim()) fsHandleEvent(JSON.parse(line), results, lists);
+                    }
+                }
             } catch (e) {
-                results.innerHTML = `<div class="empty-state" style="color:var(--accent-red);">Request failed: ${fsEsc(String(e))}</div>`;
+                results.insertAdjacentHTML('beforeend',
+                    `<div class="empty-state" style="color:var(--accent-red);">Stream error: ${fsEsc(String(e))}</div>`);
             } finally {
                 btn.disabled = false; btn.textContent = 'Send as packets';
             }
+        }
+
+        function fsHandleEvent(ev, results, lists) {
+            if (ev.event === 'file_start') {
+                const wrap = document.createElement('div');
+                wrap.className = 'fs-pkt-file';
+                wrap.innerHTML =
+                    `<div class="fs-pkt-file-head">` +
+                    `<span>${fsEsc(ev.file)}</span>` +
+                    `<span class="fs-pkt-target">${ev.size}B · ${ev.protocol.toUpperCase()} \u2192 ${fsEsc(ev.target)}</span>` +
+                    `</div><div class="fs-pkt-list"></div>`;
+                results.appendChild(wrap);
+                lists[ev.file] = wrap.querySelector('.fs-pkt-list');
+            } else if (ev.event === 'packet') {
+                const list = lists[ev.file];
+                if (!list) return;
+                const pkt = document.createElement('div');
+                pkt.className = 'fs-pkt';
+                const trunc = ev.truncated ? `<span class="fs-pkt-trunc">(showing first 2048B)</span>` : '';
+                pkt.innerHTML =
+                    `<div class="fs-pkt-head" onclick="this.parentNode.classList.toggle('open')">` +
+                    `<span class="fs-pkt-badge ${ev.dir}">${ev.dir.toUpperCase()}</span>` +
+                    `<span class="fs-pkt-seq">#${ev.seq}</span>` +
+                    `<span class="fs-pkt-label">${fsEsc(ev.label)}</span>${trunc}` +
+                    `<span class="fs-pkt-len">${ev.len} B</span>` +
+                    `</div><pre class="fs-pkt-dump">${fsHexDump(ev.hex)}</pre>`;
+                list.appendChild(pkt);
+                list.scrollTop = list.scrollHeight;
+            } else if (ev.event === 'file_done') {
+                const list = lists[ev.file];
+                if (list) list.previousElementSibling.insertAdjacentHTML('beforeend',
+                    `<span class="fs-pkt-badge ${ev.ok ? 'rx' : ''}" style="${ev.ok ? '' : 'background:rgba(248,81,73,0.16);color:var(--accent-red);'}">` +
+                    `${ev.ok ? 'OK' : 'FAIL'}</span>`);
+            } else if (ev.event === 'done') {
+                document.getElementById('fs-summary').textContent =
+                    `${ev.sent_ok}/${ev.total} ok \u2192 ${fsEsc(ev.target)}`;
+            } else if (ev.event === 'error') {
+                results.insertAdjacentHTML('beforeend',
+                    `<div class="empty-state" style="color:var(--accent-red);">${fsEsc(ev.detail)}</div>`);
+            }
+        }
+
+        // Render a hex string as an offset | hex | ASCII dump (16 bytes/row).
+        function fsHexDump(hex) {
+            if (!hex) return '<span style="color:var(--text-muted);">(empty)</span>';
+            const bytes = [];
+            for (let i = 0; i < hex.length; i += 2) bytes.push(parseInt(hex.substr(i, 2), 16));
+            const rows = [];
+            for (let off = 0; off < bytes.length; off += 16) {
+                const slice = bytes.slice(off, off + 16);
+                const hexPart = slice.map(b => b.toString(16).padStart(2, '0')).join(' ');
+                const ascii = slice.map(b => (b >= 0x20 && b < 0x7f)
+                    ? fsEsc(String.fromCharCode(b)) : '.').join('');
+                rows.push(off.toString(16).padStart(8, '0') + '  ' +
+                    hexPart.padEnd(47, ' ') + '  ' + ascii);
+            }
+            return rows.join('\n');
         }
 
         connectSSE();

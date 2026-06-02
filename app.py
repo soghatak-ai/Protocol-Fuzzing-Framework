@@ -3,6 +3,7 @@ import re
 import json
 import time
 import uuid
+import queue
 import hashlib
 import traceback
 import threading
@@ -20,13 +21,15 @@ from main import (fuzzer_state, event_log, reset_state, run_fuzzer, run_fuzzer_l
                   log_event, ai_weights, DNS_STRATEGY_NAMES, DNS_DEFAULT_WEIGHTS,
                   FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS,
                   HTTP_STRATEGY_NAMES, HTTP_DEFAULT_WEIGHTS,
-                  dns_bandit, ftp_bandit, http_bandit)
+                  SMTP_STRATEGY_NAMES, SMTP_DEFAULT_WEIGHTS,
+                  dns_bandit, ftp_bandit, http_bandit, smtp_bandit)
 from protocol.ftp import FTP_STRATEGY_LABELS
 from protocol.http import HTTP_STRATEGY_LABELS
+from protocol.smtp import SMTP_STRATEGY_LABELS
 from engine.code_collector import (collect_to_dict, collect_to_single_text, VALID_EXTENSIONS,
                                     minify_code, hotspot_filter, extract_repo_map,
                                     build_optimized_context, estimate_tokens)
-from transport.file_sender import send_file_http, send_file_ftp
+from transport.file_sender import send_file_http, send_file_ftp, send_file_smtp
 
 load_dotenv()
 
@@ -53,6 +56,8 @@ def _labels_for(protocol):
         return FTP_STRATEGY_LABELS
     if protocol == "http":
         return HTTP_STRATEGY_LABELS
+    if protocol == "smtp":
+        return SMTP_STRATEGY_LABELS
     return DNS_STRATEGY_LABELS
 
 
@@ -61,6 +66,8 @@ def _bandit_for_proto(protocol):
         return ftp_bandit
     if protocol == "http":
         return http_bandit
+    if protocol == "smtp":
+        return smtp_bandit
     return dns_bandit
 
 
@@ -402,12 +409,13 @@ SEVERITY_MULTIPLIERS = {
 
 def compute_weights_from_vulns(verified_vulns):
     """Deterministic weight computation from verified vulnerabilities.
-    Returns (dns_weights, ftp_weights, http_weights, reasoning_str)."""
+    Returns (dns_weights, ftp_weights, http_weights, smtp_weights, reasoning_str)."""
 
     # Start with default weights
     dns_w = dict(zip(DNS_STRATEGY_NAMES, DNS_DEFAULT_WEIGHTS))
     ftp_w = dict(zip(FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS))
     http_w = dict(zip(HTTP_STRATEGY_NAMES, HTTP_DEFAULT_WEIGHTS))
+    smtp_w = dict(zip(SMTP_STRATEGY_NAMES, SMTP_DEFAULT_WEIGHTS))
 
     reasoning_lines = ["Weight computation (deterministic formula):"]
     reasoning_lines.append(f"  Starting from default weights. {len(verified_vulns)} verified vulnerabilities.")
@@ -440,6 +448,12 @@ def compute_weights_from_vulns(verified_vulns):
             reasoning_lines.append(
                 f"  HTTP/{strat}: {old:.1f} × {effective_mult:.2f} "
                 f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {http_w[strat]:.1f}")
+        elif strat in smtp_w:
+            old = smtp_w[strat]
+            smtp_w[strat] = old * effective_mult
+            reasoning_lines.append(
+                f"  SMTP/{strat}: {old:.1f} × {effective_mult:.2f} "
+                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {smtp_w[strat]:.1f}")
         else:
             reasoning_lines.append(f"  WARNING: strategy '{strat}' not recognized, skipping")
 
@@ -461,7 +475,13 @@ def compute_weights_from_vulns(verified_vulns):
         http_w = {s: round(v / http_total * 100, 1) for s, v in http_w.items()}
     reasoning_lines.append(f"  HTTP normalized (sum was {http_total:.1f})")
 
-    return dns_w, ftp_w, http_w, "\n".join(reasoning_lines)
+    # Normalize SMTP to sum=100
+    smtp_total = sum(smtp_w.values())
+    if smtp_total > 0:
+        smtp_w = {s: round(v / smtp_total * 100, 1) for s, v in smtp_w.items()}
+    reasoning_lines.append(f"  SMTP normalized (sum was {smtp_total:.1f})")
+
+    return dns_w, ftp_w, http_w, smtp_w, "\n".join(reasoning_lines)
 
 # AI analysis state
 analysis_state = {
@@ -587,7 +607,7 @@ def api_start():
 
     body = request.json or {}
     protocol = body.get("protocol", "dns").lower()
-    if protocol not in ("dns", "ftp", "http"):
+    if protocol not in ("dns", "ftp", "http", "smtp"):
         protocol = "dns"
     mode = body.get("mode", "pipe").lower()
     live_config = body.get("live_config", {})
@@ -702,14 +722,14 @@ def api_filesend_send():
         return jsonify({"error": "No files provided"}), 400
 
     protocol = (request.form.get("protocol") or "http").lower().strip()
-    if protocol not in ("http", "ftp"):
-        return jsonify({"error": "protocol must be 'http' or 'ftp'"}), 400
+    if protocol not in ("http", "ftp", "smtp"):
+        return jsonify({"error": "protocol must be 'http', 'ftp', or 'smtp'"}), 400
 
     host = (request.form.get("host") or "").strip()
     if not host:
         return jsonify({"error": "Target host is required"}), 400
 
-    default_port = 80 if protocol == "http" else 21
+    default_port = {"http": 80, "ftp": 21, "smtp": 25}[protocol]
     try:
         port = int(request.form.get("port") or default_port)
     except ValueError:
@@ -724,6 +744,15 @@ def api_filesend_send():
                 method=request.form.get("http_method") or "POST",
                 path=request.form.get("http_path") or None,
                 host_header=request.form.get("http_host_header") or None,
+            )
+        elif protocol == "smtp":
+            res = send_file_smtp(
+                host, port, f.filename, data,
+                mail_from=request.form.get("smtp_from") or "sender@example.com",
+                rcpt_to=request.form.get("smtp_to") or "recipient@example.com",
+                subject=request.form.get("smtp_subject") or None,
+                user=request.form.get("smtp_user") or None,
+                password=request.form.get("smtp_pass") or None,
             )
         else:
             res = send_file_ftp(
@@ -749,6 +778,119 @@ def api_filesend_send():
         "total": len(results),
         "results": results,
     })
+
+
+# Max bytes of each wire packet streamed to the UI as a hex preview. The true
+# length is always reported; only the displayed hex is capped to keep the
+# stream light for multi-megabyte attachments.
+_FILESEND_PKT_PREVIEW = 2048
+
+
+@app.route("/api/filesend/stream", methods=["POST"])
+def api_filesend_stream():
+    """Same as /api/filesend/send, but streams every wire packet (TX/RX) to the
+    client as newline-delimited JSON in real time, so the UI can render a live
+    hex view of the bytes as they cross the wire."""
+    if "files" not in request.files:
+        return jsonify({"error": "No files provided"}), 400
+    uploaded = [f for f in request.files.getlist("files") if f.filename]
+    if not uploaded:
+        return jsonify({"error": "No files provided"}), 400
+
+    protocol = (request.form.get("protocol") or "http").lower().strip()
+    if protocol not in ("http", "ftp", "smtp"):
+        return jsonify({"error": "protocol must be 'http', 'ftp', or 'smtp'"}), 400
+
+    host = (request.form.get("host") or "").strip()
+    if not host:
+        return jsonify({"error": "Target host is required"}), 400
+
+    default_port = {"http": 80, "ftp": 21, "smtp": 25}[protocol]
+    try:
+        port = int(request.form.get("port") or default_port)
+    except ValueError:
+        return jsonify({"error": "Invalid port"}), 400
+
+    # Read all uploads + form fields NOW — the worker thread has no request ctx.
+    files = [(f.filename, f.read()) for f in uploaded]
+    opts = {
+        "http_method": request.form.get("http_method") or "POST",
+        "http_path": request.form.get("http_path") or None,
+        "http_host_header": request.form.get("http_host_header") or None,
+        "ftp_user": request.form.get("ftp_user") or "anonymous",
+        "ftp_pass": request.form.get("ftp_pass") or "anonymous@",
+        "ftp_dir": request.form.get("ftp_dir") or None,
+        "smtp_from": request.form.get("smtp_from") or "sender@example.com",
+        "smtp_to": request.form.get("smtp_to") or "recipient@example.com",
+        "smtp_subject": request.form.get("smtp_subject") or None,
+        "smtp_user": request.form.get("smtp_user") or None,
+        "smtp_pass": request.form.get("smtp_pass") or None,
+    }
+
+    q = queue.Queue()
+    _SENTINEL = object()
+
+    def worker():
+        results = []
+        try:
+            for idx, (fname, data) in enumerate(files):
+                seq = {"n": 0}
+
+                def on_packet(direction, label, pkt, _fname=fname, _seq=seq):
+                    _seq["n"] += 1
+                    q.put({
+                        "event": "packet",
+                        "file": _fname,
+                        "seq": _seq["n"],
+                        "dir": direction,
+                        "label": label,
+                        "len": len(pkt),
+                        "hex": pkt[:_FILESEND_PKT_PREVIEW].hex(),
+                        "truncated": len(pkt) > _FILESEND_PKT_PREVIEW,
+                    })
+
+                q.put({"event": "file_start", "file": fname, "index": idx,
+                       "size": len(data), "protocol": protocol,
+                       "target": f"{host}:{port}"})
+
+                if protocol == "http":
+                    res = send_file_http(host, port, fname, data,
+                                         method=opts["http_method"], path=opts["http_path"],
+                                         host_header=opts["http_host_header"], on_packet=on_packet)
+                elif protocol == "smtp":
+                    res = send_file_smtp(host, port, fname, data,
+                                         mail_from=opts["smtp_from"], rcpt_to=opts["smtp_to"],
+                                         subject=opts["smtp_subject"], user=opts["smtp_user"],
+                                         password=opts["smtp_pass"], on_packet=on_packet)
+                else:
+                    res = send_file_ftp(host, port, fname, data,
+                                        user=opts["ftp_user"], password=opts["ftp_pass"],
+                                        remote_dir=opts["ftp_dir"], on_packet=on_packet)
+
+                results.append(res)
+                status = "ok" if res["ok"] else "error"
+                log_event("INFO" if res["ok"] else "WARN",
+                          f"File-send [{protocol.upper()}] {res['file']} -> {host}:{port} "
+                          f"({status}: {res['detail']})")
+                q.put({"event": "file_done", **res})
+        except Exception as e:
+            q.put({"event": "error", "detail": f"{type(e).__name__}: {e}"})
+        finally:
+            sent_ok = sum(1 for r in results if r.get("ok"))
+            q.put({"event": "done", "protocol": protocol, "target": f"{host}:{port}",
+                   "sent_ok": sent_ok, "total": len(files)})
+            q.put(_SENTINEL)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def generate():
+        while True:
+            item = q.get()
+            if item is _SENTINEL:
+                break
+            yield json.dumps(item) + "\n"
+
+    return Response(generate(), mimetype="application/x-ndjson")
 
 
 # ---------------------------------------------------------------------------
@@ -1019,7 +1161,7 @@ For each vulnerability, provide a concrete byte-level payload that would trigger
 
         # ── WEIGHER: DETERMINISTIC PYTHON ─────────────────────────
         print("[AI] ══ Computing weights (Python) ══")
-        dns_w, ftp_w, http_w, reasoning = compute_weights_from_vulns(raw_vulns)
+        dns_w, ftp_w, http_w, smtp_w, reasoning = compute_weights_from_vulns(raw_vulns)
         print(f"[AI] Weights computed deterministically.")
 
         # Assemble final results
@@ -1032,6 +1174,7 @@ For each vulnerability, provide a concrete byte-level payload that would trigger
                 "dns": dns_w,
                 "ftp": ftp_w,
                 "http": http_w,
+                "smtp": smtp_w,
                 "weight_reasoning": reasoning,
             },
             "model_used": model_used,
@@ -1290,15 +1433,18 @@ def ai_get_weights():
     dns_default = dict(zip(DNS_STRATEGY_NAMES, DNS_DEFAULT_WEIGHTS))
     ftp_default = dict(zip(FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS))
     http_default = dict(zip(HTTP_STRATEGY_NAMES, HTTP_DEFAULT_WEIGHTS))
+    smtp_default = dict(zip(SMTP_STRATEGY_NAMES, SMTP_DEFAULT_WEIGHTS))
     return jsonify({
         "source": ai_weights.get("source", "default"),
         "dns": ai_weights.get("dns", dns_default),
         "ftp": ai_weights.get("ftp", ftp_default),
         "http": ai_weights.get("http", http_default),
+        "smtp": ai_weights.get("smtp", smtp_default),
         "reasoning": ai_weights.get("reasoning", ""),
         "dns_default": dns_default,
         "ftp_default": ftp_default,
         "http_default": http_default,
+        "smtp_default": smtp_default,
     })
 
 
@@ -1316,6 +1462,7 @@ def ai_apply_weights():
     dns_raw = rec.get("dns", {})
     ftp_raw = rec.get("ftp", {})
     http_raw = rec.get("http", {})
+    smtp_raw = rec.get("smtp", {})
 
     # Normalize DNS weights
     dns_total = sum(dns_raw.get(s, 0) for s in DNS_STRATEGY_NAMES)
@@ -1332,6 +1479,11 @@ def ai_apply_weights():
     if http_total > 0:
         ai_weights["http"] = {s: round(http_raw.get(s, 0) / http_total * 100, 1) for s in HTTP_STRATEGY_NAMES}
 
+    # Normalize SMTP weights
+    smtp_total = sum(smtp_raw.get(s, 0) for s in SMTP_STRATEGY_NAMES)
+    if smtp_total > 0:
+        ai_weights["smtp"] = {s: round(smtp_raw.get(s, 0) / smtp_total * 100, 1) for s in SMTP_STRATEGY_NAMES}
+
     ai_weights["source"] = "ai"
     ai_weights["reasoning"] = rec.get("weight_reasoning", "")
 
@@ -1339,13 +1491,15 @@ def ai_apply_weights():
     dns_bandit.reset()
     ftp_bandit.reset()
     http_bandit.reset()
+    smtp_bandit.reset()
 
     log_event("INFO", f"AI weights applied — source: {results.get('model_used', 'unknown')}, RL bandits reset")
     print(f"[AI] Weights applied: DNS={ai_weights['dns']}")
     print(f"[AI] Weights applied: FTP={ai_weights['ftp']}")
     print(f"[AI] Weights applied: HTTP={ai_weights['http']}")
+    print(f"[AI] Weights applied: SMTP={ai_weights['smtp']}")
 
-    return jsonify({"status": "applied", "dns": ai_weights["dns"], "ftp": ai_weights["ftp"], "http": ai_weights["http"]})
+    return jsonify({"status": "applied", "dns": ai_weights["dns"], "ftp": ai_weights["ftp"], "http": ai_weights["http"], "smtp": ai_weights["smtp"]})
 
 
 @app.route("/api/ai/reset_weights", methods=["POST"])
@@ -1354,6 +1508,7 @@ def ai_reset_weights():
     ai_weights["dns"] = dict(zip(DNS_STRATEGY_NAMES, DNS_DEFAULT_WEIGHTS))
     ai_weights["ftp"] = dict(zip(FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS))
     ai_weights["http"] = dict(zip(HTTP_STRATEGY_NAMES, HTTP_DEFAULT_WEIGHTS))
+    ai_weights["smtp"] = dict(zip(SMTP_STRATEGY_NAMES, SMTP_DEFAULT_WEIGHTS))
     ai_weights["source"] = "default"
     ai_weights["reasoning"] = ""
 
@@ -1361,6 +1516,7 @@ def ai_reset_weights():
     dns_bandit.reset()
     ftp_bandit.reset()
     http_bandit.reset()
+    smtp_bandit.reset()
 
     log_event("INFO", "Strategy weights reset to defaults, RL bandits reset")
     return jsonify({"status": "reset"})
