@@ -26,6 +26,7 @@ from protocol.http import HTTP_STRATEGY_LABELS
 from engine.code_collector import (collect_to_dict, collect_to_single_text, VALID_EXTENSIONS,
                                     minify_code, hotspot_filter, extract_repo_map,
                                     build_optimized_context, estimate_tokens)
+from transport.file_sender import send_file_http, send_file_ftp
 
 load_dotenv()
 
@@ -686,6 +687,68 @@ def api_crash_delete(filename):
     os.remove(fpath)
     log_event("INFO", f"Crash report deleted: {filename}")
     return jsonify({"status": "deleted"})
+
+
+# ---------------------------------------------------------------------------
+# File-as-packet sender: upload files and ship them verbatim as legit
+# HTTP / FTP traffic (no mutation — the payload lives inside the file).
+# ---------------------------------------------------------------------------
+@app.route("/api/filesend/send", methods=["POST"])
+def api_filesend_send():
+    if "files" not in request.files:
+        return jsonify({"error": "No files provided"}), 400
+    uploaded = [f for f in request.files.getlist("files") if f.filename]
+    if not uploaded:
+        return jsonify({"error": "No files provided"}), 400
+
+    protocol = (request.form.get("protocol") or "http").lower().strip()
+    if protocol not in ("http", "ftp"):
+        return jsonify({"error": "protocol must be 'http' or 'ftp'"}), 400
+
+    host = (request.form.get("host") or "").strip()
+    if not host:
+        return jsonify({"error": "Target host is required"}), 400
+
+    default_port = 80 if protocol == "http" else 21
+    try:
+        port = int(request.form.get("port") or default_port)
+    except ValueError:
+        return jsonify({"error": "Invalid port"}), 400
+
+    results = []
+    for f in uploaded:
+        data = f.read()
+        if protocol == "http":
+            res = send_file_http(
+                host, port, f.filename, data,
+                method=request.form.get("http_method") or "POST",
+                path=request.form.get("http_path") or None,
+                host_header=request.form.get("http_host_header") or None,
+            )
+        else:
+            res = send_file_ftp(
+                host, port, f.filename, data,
+                user=request.form.get("ftp_user") or "anonymous",
+                password=request.form.get("ftp_pass") or "anonymous@",
+                remote_dir=request.form.get("ftp_dir") or None,
+            )
+        results.append(res)
+        status = "ok" if res["ok"] else "error"
+        log_event(
+            "INFO" if res["ok"] else "WARN",
+            f"File-send [{protocol.upper()}] {res['file']} -> {host}:{port} "
+            f"({status}: {res['detail']})",
+        )
+
+    sent_ok = sum(1 for r in results if r["ok"])
+    return jsonify({
+        "status": "done",
+        "protocol": protocol,
+        "target": f"{host}:{port}",
+        "sent_ok": sent_ok,
+        "total": len(results),
+        "results": results,
+    })
 
 
 # ---------------------------------------------------------------------------

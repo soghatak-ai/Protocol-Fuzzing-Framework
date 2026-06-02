@@ -782,10 +782,41 @@
         }
 
         /* PAGE TABS */
-        .page-dashboard, .page-reports, .page-ai { display: none; }
+        .page-dashboard, .page-reports, .page-ai, .page-filesend { display: none; }
         body.show-dashboard .page-dashboard { display: block; }
         body.show-reports .page-reports { display: block; }
         body.show-ai .page-ai { display: block; }
+        body.show-filesend .page-filesend { display: block; }
+
+        /* FILE SEND PAGE */
+        select.config-input { cursor: pointer; }
+        select.config-input option { background: #1a1d23; }
+        .fs-grid { display: grid; grid-template-columns: 360px 1fr; gap: 24px; }
+        @media (max-width: 1100px) { .fs-grid { grid-template-columns: 1fr; } }
+        .fs-proto-tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+        .fs-proto-btn {
+            flex: 1; padding: 10px; border-radius: 8px; border: 1px solid var(--border);
+            background: var(--bg-card); color: var(--text-secondary); cursor: pointer;
+            font-family: inherit; font-size: 13px; font-weight: 600;
+        }
+        .fs-proto-btn.active { background: var(--accent-blue); color: #fff; border-color: var(--accent-blue); }
+        .fs-results { display: flex; flex-direction: column; gap: 8px; }
+        .fs-result-row {
+            display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+            border: 1px solid var(--border); border-radius: 8px; font-size: 13px;
+            background: var(--bg-card);
+        }
+        .fs-result-row .fs-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+        .fs-result-row.ok .fs-dot { background: var(--accent-green); }
+        .fs-result-row.err .fs-dot { background: var(--accent-red); }
+        .fs-result-name { font-weight: 600; color: var(--text-primary); }
+        .fs-result-detail { color: var(--text-muted); font-size: 11px; margin-left: auto; }
+        .fs-file-item {
+            display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+            font-size: 12px; color: var(--text-secondary); border-bottom: 1px solid rgba(255,255,255,0.03);
+        }
+        .fs-file-item .fs-rm { margin-left: auto; cursor: pointer; color: var(--text-muted); }
+        .fs-file-item .fs-rm:hover { color: var(--accent-red); }
 
         /* AI ANALYSIS PAGE */
         .ai-layout { display: grid; grid-template-columns: 340px 1fr; gap: 24px; }
@@ -1048,6 +1079,7 @@
             <div class="header-nav">
                 <button class="nav-btn active" onclick="showPage('dashboard')">Dashboard</button>
                 <button class="nav-btn" onclick="showPage('ai')">AI Analysis</button>
+                <button class="nav-btn" onclick="showPage('filesend')">File Send</button>
                 <button class="nav-btn" onclick="showPage('reports')">Crash Reports</button>
             </div>
         </div>
@@ -1336,6 +1368,103 @@
         </div>
     </div>
 
+    <!-- FILE SEND PAGE -->
+    <div class="main-container page-filesend">
+        <div class="fs-grid">
+            <!-- LEFT: target config + upload -->
+            <div>
+                <div class="ai-panel" style="margin-bottom:16px;">
+                    <div class="ai-panel-header">
+                        <span class="ai-panel-title">Transport</span>
+                    </div>
+                    <div class="ai-panel-body">
+                        <div class="config-field" style="margin-bottom:14px;">
+                            <label class="config-label" for="fs-proto-select">Protocol</label>
+                            <select class="config-input" id="fs-proto-select" onchange="fsSetProto(this.value)">
+                                <option value="http">HTTP</option>
+                                <option value="ftp">FTP</option>
+                            </select>
+                        </div>
+                        <div class="config-grid" style="grid-template-columns:1fr 1fr;">
+                            <div class="config-field">
+                                <label class="config-label" for="fs-host">Target Host *</label>
+                                <input class="config-input" id="fs-host" type="text" placeholder="172.21.0.2">
+                            </div>
+                            <div class="config-field">
+                                <label class="config-label" for="fs-port">Port</label>
+                                <input class="config-input" id="fs-port" type="number" value="80">
+                            </div>
+                        </div>
+
+                        <!-- HTTP-only options -->
+                        <div id="fs-http-opts">
+                            <div class="config-grid" style="grid-template-columns:1fr 2fr; margin-top:12px;">
+                                <div class="config-field">
+                                    <label class="config-label" for="fs-http-method">Method</label>
+                                    <input class="config-input" id="fs-http-method" type="text" value="POST">
+                                </div>
+                                <div class="config-field">
+                                    <label class="config-label" for="fs-http-path">Path (blank = /&lt;filename&gt;)</label>
+                                    <input class="config-input" id="fs-http-path" type="text" placeholder="/upload">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- FTP-only options -->
+                        <div id="fs-ftp-opts" style="display:none;">
+                            <div class="config-grid" style="grid-template-columns:1fr 1fr; margin-top:12px;">
+                                <div class="config-field">
+                                    <label class="config-label" for="fs-ftp-user">FTP User</label>
+                                    <input class="config-input" id="fs-ftp-user" type="text" value="anonymous">
+                                </div>
+                                <div class="config-field">
+                                    <label class="config-label" for="fs-ftp-pass">FTP Password</label>
+                                    <input class="config-input" id="fs-ftp-pass" type="text" value="anonymous@">
+                                </div>
+                                <div class="config-field">
+                                    <label class="config-label" for="fs-ftp-dir">Remote Dir (optional)</label>
+                                    <input class="config-input" id="fs-ftp-dir" type="text" placeholder="/upload">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="ai-panel">
+                    <div class="ai-panel-header">
+                        <span class="ai-panel-title">Files</span>
+                        <span class="ai-panel-title" id="fs-file-count" style="color:var(--text-muted);">0 files</span>
+                    </div>
+                    <div class="ai-panel-body">
+                        <div class="ai-drop-zone" id="fs-drop-zone">
+                            <div class="ai-drop-zone-icon">+</div>
+                            <div class="ai-drop-zone-text">Drop files to send</div>
+                            <div class="ai-drop-zone-hint">Sent verbatim — bytes are NOT mutated</div>
+                            <input type="file" id="fs-file-input" multiple style="display:none">
+                        </div>
+                        <div class="ai-file-list" id="fs-file-list"></div>
+                        <div class="ai-btn-group">
+                            <button class="ai-btn primary" id="fs-btn-send" onclick="fsSend()" disabled>Send as packets</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- RIGHT: results -->
+            <div class="ai-panel" style="align-self:start;">
+                <div class="ai-panel-header">
+                    <span class="ai-panel-title">Send Results</span>
+                    <span class="ai-panel-title" id="fs-summary" style="color:var(--text-muted);">&mdash;</span>
+                </div>
+                <div class="ai-panel-body">
+                    <div class="fs-results" id="fs-results">
+                        <div class="empty-state">Upload files and click &ldquo;Send as packets&rdquo;.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- REPORTS PAGE -->
     <div class="main-container page-reports">
         <div class="panel crash-reports-panel">
@@ -1467,7 +1596,7 @@
         function showPage(page) {
             document.body.className = 'show-' + page;
             document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-            const pages = ['dashboard', 'ai', 'reports'];
+            const pages = ['dashboard', 'ai', 'filesend', 'reports'];
             const idx = pages.indexOf(page);
             if (idx >= 0) document.querySelectorAll('.nav-btn')[idx].classList.add('active');
             if (page === 'reports') loadCrashes();
@@ -2377,6 +2506,107 @@
             } finally {
                 sendBtn.disabled = false;
                 input.focus();
+            }
+        }
+
+        // ============================ FILE SEND ============================
+        let fsProto = 'http';
+        let fsFiles = [];
+
+        function fsSetProto(proto) {
+            fsProto = proto;
+            const sel = document.getElementById('fs-proto-select');
+            if (sel && sel.value !== proto) sel.value = proto;
+            document.getElementById('fs-http-opts').style.display = proto === 'http' ? '' : 'none';
+            document.getElementById('fs-ftp-opts').style.display = proto === 'ftp' ? '' : 'none';
+            document.getElementById('fs-port').value = proto === 'http' ? 80 : 21;
+        }
+
+        function fsRenderFiles() {
+            const list = document.getElementById('fs-file-list');
+            const count = document.getElementById('fs-file-count');
+            count.textContent = fsFiles.length + (fsFiles.length === 1 ? ' file' : ' files');
+            document.getElementById('fs-btn-send').disabled = fsFiles.length === 0;
+            if (!fsFiles.length) { list.innerHTML = ''; return; }
+            list.innerHTML = fsFiles.map((f, i) =>
+                `<div class="fs-file-item"><span>${fsEsc(f.name)}</span>` +
+                `<span style="color:var(--text-muted);">${f.size}B</span>` +
+                `<span class="fs-rm" onclick="fsRemove(${i})">&times;</span></div>`
+            ).join('');
+        }
+
+        function fsRemove(i) { fsFiles.splice(i, 1); fsRenderFiles(); }
+
+        function fsAddFiles(fileList) {
+            for (const f of fileList) fsFiles.push(f);
+            fsRenderFiles();
+        }
+
+        function fsEsc(s) {
+            return String(s).replace(/[&<>"]/g, c =>
+                ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+        }
+
+        (function fsInitDropZone() {
+            const dz = document.getElementById('fs-drop-zone');
+            const input = document.getElementById('fs-file-input');
+            if (!dz) return;
+            dz.addEventListener('click', () => input.click());
+            input.addEventListener('change', e => { fsAddFiles(e.target.files); input.value = ''; });
+            ['dragover', 'dragenter'].forEach(ev => dz.addEventListener(ev, e => {
+                e.preventDefault(); dz.classList.add('dragover');
+            }));
+            ['dragleave', 'drop'].forEach(ev => dz.addEventListener(ev, e => {
+                e.preventDefault(); dz.classList.remove('dragover');
+            }));
+            dz.addEventListener('drop', e => { if (e.dataTransfer.files) fsAddFiles(e.dataTransfer.files); });
+        })();
+
+        async function fsSend() {
+            const host = document.getElementById('fs-host').value.trim();
+            if (!host) { alert('Target host is required'); return; }
+            if (!fsFiles.length) { alert('Add at least one file'); return; }
+
+            const btn = document.getElementById('fs-btn-send');
+            btn.disabled = true; btn.textContent = 'Sending...';
+
+            const fd = new FormData();
+            fd.append('protocol', fsProto);
+            fd.append('host', host);
+            fd.append('port', document.getElementById('fs-port').value || (fsProto === 'http' ? 80 : 21));
+            if (fsProto === 'http') {
+                fd.append('http_method', document.getElementById('fs-http-method').value || 'POST');
+                fd.append('http_path', document.getElementById('fs-http-path').value || '');
+            } else {
+                fd.append('ftp_user', document.getElementById('fs-ftp-user').value || 'anonymous');
+                fd.append('ftp_pass', document.getElementById('fs-ftp-pass').value || 'anonymous@');
+                fd.append('ftp_dir', document.getElementById('fs-ftp-dir').value || '');
+            }
+            for (const f of fsFiles) fd.append('files', f, f.name);
+
+            const results = document.getElementById('fs-results');
+            results.innerHTML = '<div class="empty-state">Sending...</div>';
+            try {
+                const res = await fetch('/api/filesend/send', { method: 'POST', body: fd });
+                const data = await res.json();
+                if (data.error) {
+                    results.innerHTML = `<div class="empty-state" style="color:var(--accent-red);">${fsEsc(data.error)}</div>`;
+                    return;
+                }
+                document.getElementById('fs-summary').textContent =
+                    `${data.sent_ok}/${data.total} ok → ${data.target}`;
+                results.innerHTML = data.results.map(r =>
+                    `<div class="fs-result-row ${r.ok ? 'ok' : 'err'}">` +
+                    `<span class="fs-dot"></span>` +
+                    `<span class="fs-result-name">${fsEsc(r.file)}</span>` +
+                    `<span style="color:var(--text-muted);font-size:11px;">${r.sent_bytes}B · ${r.protocol.toUpperCase()}</span>` +
+                    `<span class="fs-result-detail">${fsEsc(r.detail || r.response || '')}</span>` +
+                    `</div>`
+                ).join('');
+            } catch (e) {
+                results.innerHTML = `<div class="empty-state" style="color:var(--accent-red);">Request failed: ${fsEsc(String(e))}</div>`;
+            } finally {
+                btn.disabled = false; btn.textContent = 'Send as packets';
             }
         }
 
