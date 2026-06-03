@@ -505,6 +505,7 @@ analysis_state = {
 }
 
 
+
 @app.route("/")
 def dashboard():
     return render_template("dashboard.html")
@@ -1463,10 +1464,22 @@ def ai_get_weights():
 
 @app.route("/api/ai/apply_weights", methods=["POST"])
 def ai_apply_weights():
-    """Apply AI-recommended weights from the latest analysis to the fuzzer."""
-    results = analysis_state.get("results")
+    """Apply AI-recommended weights from a specific conversation or the current analysis."""
+    # If a conversation_id is provided, load results from MongoDB
+    body = request.get_json(silent=True) or {}
+    conv_id = body.get("conversation_id")
+
+    if conv_id:
+        conv = db_get_conversation(conv_id)
+        if not conv or not conv.get("analysis"):
+            return jsonify({"error": f"No analysis found for conversation {conv_id}"}), 400
+        results = conv["analysis"]
+        print(f"[AI] Loading weights from conversation: {conv.get('title', conv_id)}")
+    else:
+        results = analysis_state.get("results")
+
     if not results:
-        return jsonify({"error": "No analysis results available"}), 400
+        return jsonify({"error": "No analysis results available. Open a previous analysis or run a new one."}), 400
 
     rec = results.get("recommended_weights")
     if not rec or not isinstance(rec, dict):
@@ -1698,5 +1711,6 @@ def ai_analyze_v2():
 if __name__ == "__main__":
     if not AZURE_OPENAI_API_KEY:
         print("[!] WARNING: AZURE_OPENAI_API_KEY not set in .env")
-    app.run(debug=False, host="0.0.0.0", port=5000, threaded=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(debug=False, host="0.0.0.0", port=port, threaded=True)
 

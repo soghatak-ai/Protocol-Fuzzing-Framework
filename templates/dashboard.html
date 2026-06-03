@@ -2381,7 +2381,15 @@
 
         async function aiApplyWeights() {
             try {
-                const res = await fetch('/api/ai/apply_weights', { method: 'POST' });
+                const payload = {};
+                if (aiCurrentConversationId) {
+                    payload.conversation_id = aiCurrentConversationId;
+                }
+                const res = await fetch('/api/ai/apply_weights', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
                 const data = await res.json();
                 if (data.error) { alert(data.error); return; }
                 const ws = document.getElementById('ai-weight-status');

@@ -860,6 +860,7 @@ def build_multi_query_storm(anomaly: str = "type_confusion") -> bytes:
             if i % 3 == 0:
                 # Point back to the anchor name at offset 12
                 body += struct.pack("!H", 0xC000 | 12) + struct.pack("!HH", random.randint(1, 255), 1)
+
             else:
                 body += _encode_name(f"q{i}.test.com") + struct.pack("!HH", random.choice([1, 28, 16, 5]), 1)
         return (header + body)[:65535]
