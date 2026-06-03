@@ -30,6 +30,10 @@ from engine.code_collector import (collect_to_dict, collect_to_single_text, VALI
                                     minify_code, hotspot_filter, extract_repo_map,
                                     build_optimized_context, estimate_tokens)
 from transport.file_sender import send_file_http, send_file_ftp, send_file_smtp
+from engine.semantic_search import index_codebase, get_all_chunks
+from engine.orchestrator import generate_tasks
+from engine.explorers import run_explorers
+from engine.synthesizer import merge_dossiers, build_dynamic_dictionary
 
 load_dotenv()
 
@@ -158,24 +162,33 @@ def _derive_title(files: dict) -> str:
 
 def db_create_conversation(title, codebase_hash, files, code_context, analysis):
     if not mongo_ok():
+        print("[DB] create_conversation skipped — MongoDB not available")
         return None
     now = datetime.now(timezone.utc)
+    # Sanitize analysis through JSON round-trip to ensure BSON compatibility
+    try:
+        safe_analysis = json.loads(json.dumps(analysis, default=str))
+    except (TypeError, ValueError) as e:
+        print(f"[DB] WARNING: analysis serialization issue: {e}")
+        safe_analysis = {}
     doc = {
         "_id": uuid.uuid4().hex,
         "title": title,
         "codebase_hash": codebase_hash,
         "files": files,
         "code_context": code_context,
-        "analysis": analysis,
+        "analysis": safe_analysis,
         "messages": [],
         "created_at": now,
         "updated_at": now,
     }
     try:
         _conversations.insert_one(doc)
+        print(f"[DB] ✓ Conversation saved: {doc['_id']} ({title})")
         return doc["_id"]
     except Exception as e:
         print(f"[DB] create_conversation failed: {e}")
+        import traceback; traceback.print_exc()
         return None
 
 
@@ -1538,6 +1551,148 @@ def ai_clear():
     analysis_state["status"] = "idle"
     analysis_state["error"] = None
     return jsonify({"status": "cleared"})
+
+
+# ── AGENTIC ANALYSIS PIPELINE (v2) ────────────────────────────────────────
+@app.route("/api/ai/analyze-v2", methods=["POST"])
+def ai_analyze_v2():
+    """Full agentic analysis pipeline:
+       Phase 1 → Semantic Graph (AST parse + embed + ChromaDB)
+       Phase 2 → Orchestrator (generate investigation tasks)
+       Phase 3&4 → Explorers (concurrent per-task LLM analysis)
+       Phase 5 → Synthesizer (merge dossiers → weights + dynamic dictionary)
+    """
+    if not analysis_state["files"]:
+        return jsonify({"error": "No files uploaded"}), 400
+    if not AZURE_OPENAI_API_KEY:
+        return jsonify({"error": "AZURE_OPENAI_API_KEY not set in .env"}), 500
+
+    analysis_state["status"] = "analyzing"
+    analysis_state["results"] = None
+    analysis_state["error"] = None
+
+    try:
+        all_files = dict(analysis_state["files"])
+        total_raw = sum(len(v) for v in all_files.values())
+        print(f"[AI-v2] ── Input: {len(all_files)} files, {total_raw/1024:.1f} KB")
+
+        # ── PHASE 1: SEMANTIC GRAPH ───────────────────────────────
+        print("[AI-v2] ══ PHASE 1: Semantic Graph (AST parse + embed + ChromaDB) ══")
+        analysis_state["status"] = "analyzing (phase 1/5: building semantic graph)"
+        index_result = index_codebase(all_files, fresh=True)
+        total_chunks = index_result["total_chunks"]
+        print(f"[AI-v2]   Indexed {total_chunks} chunks from {index_result['total_files']} files")
+
+        if total_chunks == 0:
+            analysis_state["status"] = "error"
+            analysis_state["error"] = "No code chunks could be extracted from the uploaded files."
+            return jsonify({"error": analysis_state["error"]}), 400
+
+        # ── PHASE 2: ORCHESTRATOR ─────────────────────────────────
+        print("[AI-v2] ══ PHASE 2: Orchestrator (generating investigation tasks) ══")
+        analysis_state["status"] = "analyzing (phase 2/5: orchestrating tasks)"
+
+        # Build metadata-only list for the Orchestrator (no raw code)
+        all_chunk_meta = get_all_chunks()
+        chunk_meta_slim = [{
+            "file": c["file"], "name": c["name"],
+            "node_type": c["node_type"], "language": c["language"],
+            "start_line": c["start_line"], "end_line": c["end_line"],
+        } for c in all_chunk_meta]
+
+        tasks, codebase_summary = generate_tasks(chunk_meta_slim)
+
+        if not tasks:
+            analysis_state["status"] = "error"
+            analysis_state["error"] = "Orchestrator generated 0 tasks."
+            return jsonify({"error": analysis_state["error"]}), 500
+
+        # ── PHASE 3 & 4: EXPLORERS ───────────────────────────────
+        print(f"[AI-v2] ══ PHASES 3&4: Running {len(tasks)} Explorer agents ══")
+
+        explorer_done = [0]
+
+        def on_explorer_progress(completed, total, dossier):
+            explorer_done[0] = completed
+            analysis_state["status"] = (
+                f"analyzing (phase 3-4/5: exploring {completed}/{total} tasks)"
+            )
+
+        analysis_state["status"] = f"analyzing (phase 3-4/5: exploring 0/{len(tasks)} tasks)"
+        dossiers = run_explorers(
+            tasks,
+            max_workers=5,
+            n_chunks_per_task=15,
+            on_progress=on_explorer_progress,
+        )
+
+        # ── PHASE 5: SYNTHESIZER ──────────────────────────────────
+        print("[AI-v2] ══ PHASE 5: Synthesizing results ══")
+        analysis_state["status"] = "analyzing (phase 5/5: synthesizing)"
+
+        merged = merge_dossiers(dossiers)
+        raw_vulns = merged["vulnerabilities"]
+
+        # Build dynamic dictionary
+        dynamic_dict = build_dynamic_dictionary(merged)
+
+        # Compute weights from merged vulns
+        if raw_vulns:
+            dns_w, ftp_w, http_w, smtp_w, reasoning = compute_weights_from_vulns(raw_vulns)
+            recommended_weights = {
+                "dns": dns_w, "ftp": ftp_w, "http": http_w, "smtp": smtp_w,
+                "weight_reasoning": reasoning,
+            }
+        else:
+            recommended_weights = None
+
+        # Assemble final results
+        results = {
+            "file_summary": codebase_summary,
+            "codebase_summary": codebase_summary,
+            "vulnerabilities": raw_vulns,
+            "attack_chains": merged["attack_chains"],
+            "extracted_constants": merged["extracted_constants"],
+            "dynamic_dictionary": dynamic_dict,
+            "recommended_weights": recommended_weights,
+            "model_used": "gpt-5 (agentic pipeline)",
+            "pipeline": {
+                "version": "v2-agentic",
+                "total_files": len(all_files),
+                "total_chunks": total_chunks,
+                "tasks_generated": len(tasks),
+                "dossiers_completed": merged["stats"]["successful_dossiers"],
+                "dossiers_failed": merged["stats"]["failed_dossiers"],
+                "raw_vulns": merged["stats"]["raw_vulns"],
+                "deduped_vulns": merged["stats"]["deduped_vulns"],
+                "constants_extracted": sum(
+                    merged["stats"]["constants"].values()
+                ),
+            },
+            "dossier_errors": merged["errors"],
+            "file_summaries": merged["file_summaries"],
+        }
+
+        conv_id = db_create_conversation(
+            _derive_title(all_files),
+            compute_codebase_hash(all_files),
+            list(all_files.keys()),
+            json.dumps({"chunks": total_chunks, "tasks": len(tasks)}),
+            results,
+        )
+        results["conversation_id"] = conv_id
+
+        analysis_state["results"] = results
+        analysis_state["status"] = "done"
+        print(f"[AI-v2] ✓ Pipeline complete: {len(raw_vulns)} vulns, "
+              f"{results['pipeline']['constants_extracted']} constants extracted")
+        return jsonify({"status": "done", "results": results, "conversation_id": conv_id})
+
+    except Exception as e:
+        analysis_state["status"] = "error"
+        analysis_state["error"] = str(e)
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":

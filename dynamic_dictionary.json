@@ -1,0 +1,33 @@
+{
+  "magic_bytes": [],
+  "buffer_sizes": [],
+  "commands": [],
+  "string_literals": [],
+  "states": [],
+  "thresholds": [
+    -1,
+    0,
+    1
+  ],
+  "detailed": {
+    "magic_bytes": [],
+    "buffer_sizes": [],
+    "commands": [],
+    "string_literals": [],
+    "states": [],
+    "thresholds": [
+      {
+        "value": -1,
+        "context": "l initialized to -1 as a sentinel meaning 'no index selected yet' in solve()"
+      },
+      {
+        "value": 0,
+        "context": "x and m initialized to 0 in solve(); also printed when no improvement is found (cout << 0)"
+      },
+      {
+        "value": 1,
+        "context": "Output uses 1-based index (ans.push_back(l+1)); loop guard uses i != l-1 to avoid accessing arr[i+1] at the boundary"
+      }
+    ]
+  }
+}

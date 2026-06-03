@@ -2,6 +2,7 @@ import gzip
 import zlib
 import struct
 import random
+from protocol.dynamic_data import get_commands, get_string_literals, random_buffer_size, has_dynamic_data
 
 # ---------------------------------------------------------------------------
 # HTTP mutation strategies for Snort 3 http_inspect (NHI) deep-packet testing.
@@ -523,7 +524,10 @@ def build_http_payload(strategy: str) -> bytes:
             # Methods are case-SENSITIVE; "get" is not "GET".
             return (b"get / HTTP/1.1\r\n" + _HOST + b"\r\n")
         if variant == "unknown_method":
-            return (b"FOOBAR / HTTP/1.1\r\n" + _HOST + b"\r\n")
+            # Use dynamically extracted command if available
+            dyn_cmds = get_commands() if has_dynamic_data() else []
+            method = random.choice(dyn_cmds).encode("utf-8") if dyn_cmds else b"FOOBAR"
+            return (method + b" / HTTP/1.1\r\n" + _HOST + b"\r\n")
         if variant == "case_mixed":
             return (b"GeT / HTTP/1.1\r\n" + _HOST + b"\r\n")
         if variant == "tab_separator":

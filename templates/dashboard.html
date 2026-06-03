@@ -2067,7 +2067,7 @@
             const btn = document.getElementById('ai-btn-analyze');
             btn.disabled = true;
             aiSetStatus('analyzing', 'Starting agentic pipeline...');
-            document.getElementById('ai-results-area').innerHTML = '<div class="ai-results-placeholder"><div class="ai-spinner"></div><h3 style="margin-top:16px;">Agentic Analysis Running</h3><p id="pipeline-status-msg">Stage 1/4: Minifying code...</p></div>';
+            document.getElementById('ai-results-area').innerHTML = '<div class="ai-results-placeholder"><div class="ai-spinner"></div><h3 style="margin-top:16px;">Agentic Analysis Running</h3><p id="pipeline-status-msg">Phase 1/5: Building semantic graph (AST parse + embed)...</p></div>';
 
             // Poll analysis status to update pipeline step display
             pipelinePoller = setInterval(async () => {
@@ -2077,7 +2077,11 @@
                     const s = d.status || '';
                     const msgEl = document.getElementById('pipeline-status-msg');
                     if (!msgEl) return;
-                    if (s.includes('stage 1')) msgEl.textContent = 'Stage 1/4: Minifying code (stripping comments)...';
+                    if (s.includes('phase 1')) msgEl.textContent = 'Phase 1/5: Building semantic graph (AST parse + embed)...';
+                    else if (s.includes('phase 2')) msgEl.textContent = 'Phase 2/5: Orchestrator generating investigation tasks...';
+                    else if (s.includes('phase 3')) msgEl.textContent = s.replace('analyzing (', '').replace(')', '');
+                    else if (s.includes('phase 5')) msgEl.textContent = 'Phase 5/5: Synthesizing results + building dynamic dictionary...';
+                    else if (s.includes('stage 1')) msgEl.textContent = 'Stage 1/4: Minifying code (stripping comments)...';
                     else if (s.includes('stage 2')) msgEl.textContent = 'Stage 2/4: Hotspot filtering (dangerous patterns)...';
                     else if (s.includes('stage 3')) msgEl.textContent = 'Stage 3/4: LLM triage (picking riskiest files)...';
                     else if (s.includes('stage 4')) msgEl.textContent = 'Stage 4/4: Deep vulnerability analysis...';
@@ -2085,7 +2089,7 @@
             }, 2000);
 
             try {
-                const res = await fetch('/api/ai/analyze', { method: 'POST' });
+                const res = await fetch('/api/ai/analyze-v2', { method: 'POST' });
                 clearInterval(pipelinePoller);
                 const data = await res.json();
                 if (data.error) {
@@ -2097,7 +2101,9 @@
                 aiLastResults = data.results;
                 const pipe = data.results.pipeline || {};
                 const modelName = data.results.model_used || 'AI';
-                aiSetStatus('done', `Done: ${pipe.vulns_found || 0} vulns found (${modelName})`);
+                const vulnCount = pipe.deduped_vulns || pipe.vulns_found || 0;
+                const constCount = pipe.constants_extracted || 0;
+                aiSetStatus('done', `Done: ${vulnCount} vulns, ${constCount} constants extracted (${modelName})`);
                 aiCurrentConversationId = data.conversation_id || data.results.conversation_id || null;
                 aiRenderResults(data.results);
                 aiRenderChatPanel([]);
@@ -2137,16 +2143,24 @@
             const pipe = results.pipeline || {};
             const sevCounts = { critical: 0, high: 0, medium: 0, low: 0 };
             vulns.forEach(v => { if (sevCounts[v.severity] !== undefined) sevCounts[v.severity]++; });
+            const isV2 = pipe.version === 'v2-agentic';
             html += `<div class="ai-summary-card">
-                <h3>${results.file_summary || 'Analysis Results'}</h3>
-                ${pipe.total_files != null ? `<p style="font-size:11px; color:var(--text-muted); margin-bottom:6px;">
+                <h3>${results.codebase_summary || results.file_summary || 'Analysis Results'}</h3>
+                ${isV2 ? `<p style="font-size:11px; color:var(--text-muted); margin-bottom:6px;">
+                    Agentic Pipeline: <span style="color:var(--accent-purple)">${pipe.total_files} files</span> &rarr;
+                    <span style="color:var(--accent-cyan)">${pipe.total_chunks} AST chunks</span> &rarr;
+                    <span style="color:var(--accent-yellow)">${pipe.tasks_generated} tasks</span> &rarr;
+                    <span style="color:var(--accent-green)">${pipe.dossiers_completed} dossiers</span> &rarr;
+                    <span style="color:var(--accent-red)">${pipe.deduped_vulns} vulns</span> +
+                    <span style="color:var(--accent-orange)">${pipe.constants_extracted} constants</span>
+                </p>` : (pipe.total_files != null ? `<p style="font-size:11px; color:var(--text-muted); margin-bottom:6px;">
                     Pipeline: <span style="color:var(--accent-purple)">${pipe.total_files} files</span> &rarr;
                     <span style="color:var(--accent-orange)">${pipe.hotspot_files} hotspots</span> &rarr;
                     <span style="color:var(--accent-yellow)">${pipe.analyzed_files} analyzed</span> &rarr;
                     <span style="color:var(--accent-red)">${pipe.vulns_found} vulns</span>
                     <span style="color:var(--accent-cyan)">(${pipe.reduction_pct}% token reduction)</span>
-                </p>` : ''}
-                <p>Found <strong>${vulns.length}</strong> vulnerabilities</p>
+                </p>` : '')}
+                <p>Found <strong>${vulns.length}</strong> vulnerabilities${isV2 ? `, <strong>${pipe.constants_extracted || 0}</strong> protocol constants extracted` : ''}</p>
                 <div class="ai-sev-badges">
                     ${sevCounts.critical ? `<span class="ai-sev-badge critical">${sevCounts.critical} Critical</span>` : ''}
                     ${sevCounts.high ? `<span class="ai-sev-badge high">${sevCounts.high} High</span>` : ''}
@@ -2226,6 +2240,31 @@
                     });
                 });
                 html += '</div>';
+            }
+
+            // Extracted Constants (v2 agentic pipeline)
+            const ec = results.extracted_constants;
+            if (ec && typeof ec === 'object') {
+                const cats = ['magic_bytes','buffer_sizes','commands','string_literals','states','thresholds'];
+                const catLabels = {magic_bytes:'Magic Bytes',buffer_sizes:'Buffer Sizes',commands:'Commands',string_literals:'String Literals',states:'States',thresholds:'Thresholds'};
+                const catColors = {magic_bytes:'var(--accent-purple)',buffer_sizes:'var(--accent-cyan)',commands:'var(--accent-green)',string_literals:'var(--accent-yellow)',states:'var(--accent-orange)',thresholds:'var(--accent-red)'};
+                let hasAny = cats.some(c => ec[c] && ec[c].length > 0);
+                if (hasAny) {
+                    html += `<div class="ai-weight-section" style="margin-top:16px"><h4>Extracted Protocol Constants (Dynamic Dictionary)</h4>`;
+                    cats.forEach(cat => {
+                        const items = ec[cat] || [];
+                        if (items.length === 0) return;
+                        html += `<div style="margin:10px 0 4px;font-size:12px;font-weight:600;color:${catColors[cat]}">${catLabels[cat]} (${items.length})</div>`;
+                        html += `<div style="display:flex;flex-wrap:wrap;gap:6px;">`;
+                        items.forEach(item => {
+                            const val = typeof item === 'object' ? (item.value || '') : item;
+                            const ctx = typeof item === 'object' ? (item.context || '') : '';
+                            html += `<span title="${ctx}" style="font-family:monospace;font-size:11px;background:var(--surface-light);border:1px solid var(--border);border-radius:4px;padding:2px 8px;cursor:default;">${val}</span>`;
+                        });
+                        html += `</div>`;
+                    });
+                    html += '</div>';
+                }
             }
 
             area.innerHTML = html;
@@ -2482,7 +2521,6 @@
 
         // Renders the chat panel below the results area
         function aiRenderChatPanel(messages) {
-            if (!aiCurrentConversationId) return;
             const area = document.getElementById('ai-results-area');
             const panel = document.createElement('div');
             panel.className = 'ai-chat-panel';
@@ -2546,9 +2584,13 @@
         async function aiSendChat() {
             const input = document.getElementById('ai-chat-input');
             const sendBtn = document.getElementById('ai-chat-send');
-            if (!input || !aiCurrentConversationId) return;
+            if (!input) return;
             const msg = input.value.trim();
             if (!msg) return;
+            if (!aiCurrentConversationId) {
+                aiAppendChatMessage('assistant', 'Chat requires MongoDB — analysis was not saved to the database. Check your MONGODB_URI in .env and restart the app.', false);
+                return;
+            }
 
             input.value = ''; input.style.height = 'auto';
             sendBtn.disabled = true;

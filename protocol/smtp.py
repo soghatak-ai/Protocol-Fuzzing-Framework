@@ -1,5 +1,6 @@
 import base64
 import random
+from protocol.dynamic_data import get_commands, random_buffer_size, has_dynamic_data
 
 # ---------------------------------------------------------------------------
 # SMTP mutation strategies for Snort 3's `smtp` service inspector.
@@ -468,11 +469,15 @@ def build_smtp_payload(strategy: str) -> bytes:
     elif strategy == "command_fuzz":
         # Per-verb argument fuzzing (RFC 5321 §4.1.1). Each verb has distinct
         # argument-parsing rules; we torture the ones Snort actually parses.
-        variant = random.choice([
+        variants = [
             "vrfy_fmt", "expn_fmt", "mail_param_size", "mail_param_body",
             "rcpt_param", "space_around_colon", "helo_no_arg", "noop_arg",
             "mail_8bitmime", "vrfy_overflow",
-        ])
+        ]
+        # Inject dynamic commands from source-code analysis if available
+        if has_dynamic_data():
+            variants.append("dynamic_cmd")
+        variant = random.choice(variants)
         if variant == "vrfy_fmt":
             # VRFY with format specifiers / huge arg (info-disclosure verb, §3.5).
             return _EHLO + b"VRFY " + (b"%n%s%x%d" * 200) + (b"A" * 20000) + b"\r\n"
@@ -496,6 +501,19 @@ def build_smtp_payload(strategy: str) -> bytes:
             return _EHLO + b"NOOP " + (b"N" * 40000) + b"\r\n"
         elif variant == "mail_8bitmime":
             return _EHLO + b"MAIL FROM:<\x80\x81\x82@b.com> BODY=8BITMIME\r\n"
+        elif variant == "dynamic_cmd":
+            # Use commands extracted from target source code analysis
+            dyn_cmds = get_commands()
+            if dyn_cmds:
+                lines = [_EHLO]
+                overflow_sz = random_buffer_size(4096)
+                for cmd in dyn_cmds:
+                    cmd_bytes = cmd.encode("utf-8", errors="replace") if isinstance(cmd, str) else cmd
+                    # Send the extracted command with an oversized argument
+                    lines.append(cmd_bytes + b" " + (b"X" * overflow_sz) + b"\r\n")
+                return b"".join(lines)
+            else:
+                return _EHLO + b"VRFY " + (b"v" * 60000) + b"\r\n"
         else:  # vrfy_overflow
             return _EHLO + b"VRFY " + (b"v" * 60000) + b"\r\n"
 

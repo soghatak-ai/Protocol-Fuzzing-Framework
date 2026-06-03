@@ -1,5 +1,6 @@
 import struct
 import random
+from protocol.dynamic_data import get_string_literals, get_commands, has_dynamic_data
 
 
 def _encode_name(name: str) -> bytes:

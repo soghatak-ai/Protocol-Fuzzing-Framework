@@ -1,4 +1,5 @@
 import random
+from protocol.dynamic_data import get_commands, random_buffer_size, has_dynamic_data
 
 FTP_STRATEGIES = [
     "cmd_overflow",
@@ -103,6 +104,10 @@ def build_ftp_payload(strategy: str) -> bytes:
             b"STAT\r\n",
             b"MLSD /\r\n",
         ]
+        # Augment with dynamically extracted commands from source analysis
+        if has_dynamic_data():
+            for dc in get_commands():
+                cmds.append(dc.encode("utf-8", errors="replace") + b" /fuzz\r\n")
         return b"".join(random.choice(cmds) for _ in range(2000))
 
     elif strategy == "boundary_port":
