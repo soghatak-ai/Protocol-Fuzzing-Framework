@@ -36,10 +36,24 @@ RUN mkdir -p /usr/local/etc/snort && \
     cp -r /tmp/snort3/lua/* /usr/local/etc/snort/ && \
     rm -rf /tmp/libdaq /tmp/snort3
 
-# Bake in the EICAR canary detection rule (Snort 3 nocase syntax)
+# Bake in multi-protocol canary detection rules for evasion testing
 RUN mkdir -p /etc/snort && \
-    printf 'alert tcp any any -> any any ( msg:"EICAR canary"; flow:established;\n  content:"EICAR-STANDARD-ANTIVIRUS-TEST-FILE!", nocase; sid:1000001; rev:1; )\n' \
-    > /etc/snort/local.rules
+    printf '\
+alert tcp any any -> any any ( msg:"EICAR canary"; flow:established;\n\
+  content:"EICAR-STANDARD-ANTIVIRUS-TEST-FILE!", nocase; sid:1000001; rev:1; )\n\
+\n\
+alert tcp any any -> any 21 ( msg:"FTP evasion canary"; flow:established,to_server;\n\
+  content:"EVASION-MARKER", nocase; sid:1000002; rev:1; )\n\
+\n\
+alert udp any any -> any 53 ( msg:"DNS evasion canary"; flow:to_server;\n\
+  content:"evasionmarker", nocase; sid:1000003; rev:1; )\n\
+\n\
+alert tcp any any -> any 25 ( msg:"SMTP evasion canary"; flow:established,to_server;\n\
+  content:"EICAR-STANDARD-ANTIVIRUS-TEST-FILE!", nocase; sid:1000004; rev:1; )\n\
+\n\
+alert tcp any any -> any 445 ( msg:"SMB evasion canary"; flow:established,to_server;\n\
+  content:"EVASION-MARKER", nocase; sid:1000005; rev:1; )\n\
+' > /etc/snort/local.rules
 
 # Snort's alert log directory (passed via `snort -l /var/log/snort`)
 RUN mkdir -p /var/log/snort

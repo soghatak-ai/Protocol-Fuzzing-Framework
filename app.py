@@ -22,14 +22,22 @@ from main import (fuzzer_state, event_log, reset_state, run_fuzzer, run_fuzzer_l
                   FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS,
                   HTTP_STRATEGY_NAMES, HTTP_DEFAULT_WEIGHTS,
                   SMTP_STRATEGY_NAMES, SMTP_DEFAULT_WEIGHTS,
-                  dns_bandit, ftp_bandit, http_bandit, smtp_bandit)
+                  SMB2_STRATEGY_NAMES, SMB2_DEFAULT_WEIGHTS,
+                  SMB3_STRATEGY_NAMES, SMB3_DEFAULT_WEIGHTS,
+                  HTTP2_STRATEGY_NAMES, HTTP2_DEFAULT_WEIGHTS,
+                  DCERPC_STRATEGY_NAMES, DCERPC_DEFAULT_WEIGHTS,
+                  dns_bandit, ftp_bandit, http_bandit, smtp_bandit,
+                  smb2_bandit, smb3_bandit, http2_bandit, dcerpc_bandit)
 from protocol.ftp import FTP_STRATEGY_LABELS
 from protocol.http import HTTP_STRATEGY_LABELS
 from protocol.smtp import SMTP_STRATEGY_LABELS
+from protocol.smb import SMB2_STRATEGY_LABELS, SMB3_STRATEGY_LABELS
+from protocol.http2 import HTTP2_STRATEGY_LABELS
+from protocol.dcerpc import DCERPC_STRATEGY_LABELS
 from engine.code_collector import (collect_to_dict, collect_to_single_text, VALID_EXTENSIONS,
                                     minify_code, hotspot_filter, extract_repo_map,
                                     build_optimized_context, estimate_tokens)
-from transport.file_sender import send_file_http, send_file_ftp, send_file_smtp
+from transport.file_sender import send_file_http, send_file_ftp, send_file_smtp, send_file_smb, send_file_http2, send_file_dcerpc
 from engine.semantic_search import index_codebase, get_all_chunks
 from engine.orchestrator import generate_tasks
 from engine.explorers import run_explorers
@@ -62,6 +70,14 @@ def _labels_for(protocol):
         return HTTP_STRATEGY_LABELS
     if protocol == "smtp":
         return SMTP_STRATEGY_LABELS
+    if protocol == "smb2":
+        return SMB2_STRATEGY_LABELS
+    if protocol == "smb3":
+        return SMB3_STRATEGY_LABELS
+    if protocol == "http2":
+        return HTTP2_STRATEGY_LABELS
+    if protocol == "dcerpc":
+        return DCERPC_STRATEGY_LABELS
     return DNS_STRATEGY_LABELS
 
 
@@ -72,6 +88,14 @@ def _bandit_for_proto(protocol):
         return http_bandit
     if protocol == "smtp":
         return smtp_bandit
+    if protocol == "smb2":
+        return smb2_bandit
+    if protocol == "smb3":
+        return smb3_bandit
+    if protocol == "http2":
+        return http2_bandit
+    if protocol == "dcerpc":
+        return dcerpc_bandit
     return dns_bandit
 
 
@@ -308,6 +332,60 @@ HTTP RESPONSE STRATEGIES (server->client; model the HTTP Evader "semantic gap" e
 - resp_version_confusion: response version robustness (http/1.1 lowercase, HTTP/2.0, HTTP/1.2, HTTP/1.01, HTTP/1.010, junk after version, hTTp, ICY). Targets status-line version parsing and chunked-applicability. Triggers: integer-overflow, state-corruption, evasion
 - resp_header_end: header-terminator variants (\\n\\n, SP/TAB in the empty line, \\n\\r\\r\\n, double colon Transfer-Encoding::chunked). Targets header/body boundary detection. Triggers: oob-read, state-corruption, evasion
 - resp_content_length: response Content-Length parsing tricks — double/half declared length, junk around the value (;/,/quotes/leading-trailing alpha/space/NBSP), decimals, NUL inside, hex (0x), uint32 overflow, >64bit huge, 1GB, 1000-zero padding, empty, invalid. Body has trailing junk past the declared length. Targets body-length tracking and body boundary. Triggers: integer-overflow, integer-underflow, oob-read, evasion
+
+SMB2 STRATEGIES (used when fuzzing SMBv2 inspectors, e.g. Snort 3 dce_smb — targets SMBv2 on port 445):
+- negotiate_confusion: Dialect negotiation attacks — huge dialect lists (500+), invalid dialect values (0x0000/0xFFFF), SMBv1 NEGOTIATE after SMBv2, SMB 3.1.1 negotiate context overflow, duplicate dialects. Targets version tracking and dialect selection. Triggers: buffer-overflow, state-corruption, oob-write
+- header_manipulation: SMB2 64-byte header field corruption — wrong protocol magic bytes, StructureSize != 64, CreditCharge/CreditRequest at 0xFFFF, all reserved flags set, command codes beyond OPLOCK_BREAK, MessageId at max 64-bit. Targets header parser field validation and command dispatch. Triggers: integer-overflow, oob-read, null-deref
+- compound_abuse: SMB2 compound/chained request attacks — circular NextCommand offsets (self-referential), 500+ deep compound chains, overlapping NextCommand offsets, NextCommand past packet boundary, RELATED flag with mismatched SessionId/TreeId, zero-body compounds. Targets message boundary tracking. Triggers: infinite-loop, oob-read, heap-overflow
+- netbios_desync: NetBIOS session layer framing attacks — length >> actual payload (50KB mismatch), zero-length messages, max length (16MB), multiple SMB messages in single NetBIOS frame, SMB header split across two NetBIOS frames, keepalive (0x85) injection between messages. Targets TCP reassembly and length-field parsing. Triggers: oob-read, buffer-overflow, state-corruption
+- session_state_attack: State machine violations — TREE_CONNECT before NEGOTIATE, double NEGOTIATE, SESSION_SETUP without NEGOTIATE, TREE_CONNECT with SessionId=0, commands after LOGOFF, random 8-byte SessionIds. Targets session/tree state tracking. Triggers: state-corruption, use-after-free, null-deref
+- tree_path_overflow: TREE_CONNECT UNC path attacks — 60KB paths, dot-dot traversal, null bytes in path, Unicode surrogates/non-BMP/BIDI markers, IPC$ traversal to admin$, empty paths. Targets UNC path parsing and buffer allocation. Triggers: buffer-overflow, heap-overflow, evasion
+- create_fuzz: CREATE request attacks — 64KB filenames, 100+ CREATE_CONTEXT entries with oversized data, DesiredAccess=0xFFFFFFFF, duplicate LeaseKey across files, conflicting CreateOptions, oversized Extended Attributes. Targets file handle allocation and name parsing. Triggers: heap-overflow, oob-write, memory-exhaustion
+- read_write_overflow: READ/WRITE buffer management attacks — ReadLength=0xFFFFFFFF (4GB), WriteOffset at max signed 64-bit, CreditCharge not matching payload size, zero-length write with data present, RDMA channel field confusion, 1000+ rapid WRITE flood. Targets data transfer buffer management. Triggers: integer-overflow, oob-write, memory-exhaustion
+- dce_pipe_attack: DCE/RPC over named pipes (IPC$) — BIND with 200+ context items, fragment length 0xFFFF, AUTH3 with 60KB auth blob, CallID=0xFFFFFFFF, 100 nested BINDs, rapid ALTER_CONTEXT switching. Targets RPC parsing and context management. Triggers: heap-overflow, oob-read, state-corruption
+- ioctl_attack: IOCTL/FSCTL dispatch attacks — non-existent FSCTL codes (0xDEADBEEF), FSCTL_PIPE_TRANSCEIVE with 60KB data, corrupted FSCTL_VALIDATE_NEGOTIATE_INFO, FSCTL_DFS_GET_REFERRALS with 60KB path, FSCTL_SRV_COPYCHUNK with invalid offsets, FSCTL_LMR_REQUEST_RESILIENCY with corrupt timeouts. Targets control code dispatch and buffer handling. Triggers: oob-read, heap-overflow, integer-overflow
+- oplock_lease_flood: Oplock/Lease mechanism attacks — oplock break with unknown level (0xFF), lease break for non-existent LeaseKey, rapid CREATE+CLOSE oplock cycle (500+), conflicting lease states, break acknowledgment without pending break, mixed v1/v2 lease contexts. Targets lock tracking and break handling. Triggers: state-corruption, use-after-free, null-deref
+- multi_protocol_evasion: Protocol confusion/evasion — SMBv1 header + SMBv2 body, interleaved SMBv1/SMBv2 headers, HTTP request on port 445, protocol ID switch mid-stream, random bytes before NEGOTIATE, TLS ClientHello wrapping SMB. Targets protocol identification and dispatch. Triggers: evasion, state-corruption, oob-read
+- query_info_overflow: QUERY_INFO/SET_INFO attacks — invalid InfoType/FileInfoClass combinations, OutputBufferLength=0xFFFFFFFF, oversized security descriptor in SET_INFO, oversized EA list, corrupt quota data, boundary buffer lengths (0, 1, 0xFFFF, 0xFFFFFFFF). Targets info class dispatch and buffer handling. Triggers: integer-overflow, oob-read, heap-overflow
+
+SMB3 STRATEGIES (used when fuzzing SMBv3 inspectors — targets SMBv3 encryption/compression/signing on port 445):
+- negotiate_confusion: SMB3 dialect negotiation attacks — SMB 3.1.1 negotiate context overflow with oversized preauth/encryption contexts, context type 0xFFFF with 8KB data, duplicate 3.x dialects. Targets SMB3-specific version negotiation. Triggers: buffer-overflow, state-corruption, oob-write
+- signing_evasion: Signing/integrity manipulation — corrupted 16-byte signature, unsigned message mid-signed session, preauth integrity hash tampering, wrong signing algorithm (AES-CMAC vs HMAC-SHA256), signed packet replay with different command. Targets authentication and integrity verification. Triggers: evasion, state-corruption, authentication-bypass
+- transform_header_attack: SMB3 encryption transform header attacks — invalid transform signature (0xFD'SMX'), all-0xFF nonce, OriginalMessageSize mismatch, non-negotiated cipher algorithm, double-wrapped transform, SMBv1 packet inside SMBv3 transform envelope. Targets decryption engine. Triggers: oob-read, heap-overflow, state-corruption
+- compression_attack: SMB3 compression transform attacks — invalid compression algorithm ID, decompression bomb (tiny compressed → huge output), chained compression with offset past buffer, PATTERN_V1 with invalid pattern, OriginalCompressedSegmentSize=0xFFFFFFFF, LZ77 data with match offset before buffer start. Targets decompression engine. Triggers: memory-exhaustion, oob-read, heap-overflow
+- multi_protocol_evasion: Protocol confusion/evasion — SMBv1 header + SMBv2 body, interleaved SMBv1/SMBv2 headers, HTTP request on port 445, protocol ID switch mid-stream, random bytes before NEGOTIATE, TLS ClientHello wrapping SMB. Targets protocol identification and dispatch. Triggers: evasion, state-corruption, oob-read
+
+HTTP/2 STRATEGIES (used when fuzzing HTTP/2 inspectors, e.g. Snort 3 http2_inspect — binary framing + HPACK on port 80/443):
+- hpack_state_desync: HPACK dynamic table desync — rapid table size updates (0→4096→0→65536), integer overflow in variable-length encoding (20 continuation bytes), out-of-bounds index references (index 200 on empty table), eviction boundary races, invalid Huffman padding, bomb entries (16KB values). Targets HPACK decoder state. Triggers: oob-read, compression-error, state-corruption, heap-overflow
+- continuation_flood: CVE-2024-27316 pattern — HEADERS without END_HEADERS + many CONTINUATION frames (500 tiny/200 medium/1000 empty), never-ending CONTINUATIONs, illegal interleave (DATA mid-CONTINUATION). Targets header block reassembly buffer. Triggers: memory-exhaustion, oob-read, state-corruption
+- stream_interleave_evasion: Spread payloads across 50 interleaved streams round-robin, use near-max stream IDs (0x7FFFFFFE), rapid open+RST_STREAM (200 streams), DATA before HEADERS, stream ID reuse. Targets per-stream state tracking. Triggers: state-corruption, use-after-free, memory-exhaustion
+- settings_manipulation: SETTINGS abuse — MAX_FRAME_SIZE=2^24-1 + oversized DATA, rapid HEADER_TABLE_SIZE toggle, INITIAL_WINDOW_SIZE=2^31-1 + WINDOW_UPDATE overflow, unknown settings (0xFF/0xFFFF), non-multiple-of-6 payload, 500-frame flood. Targets parameter tracking. Triggers: integer-overflow, state-corruption, resource-exhaustion
+- pseudo_header_smuggling: HTTP/2 semantic reconstruction attacks — duplicate :path (which does IDS use?), pseudo-headers after regular headers, uppercase field names, :authority vs Host mismatch, missing :method, prohibited Connection/TE/Upgrade headers, URL-encoded/null-byte/traversal :path values. Targets request reconstruction. Triggers: evasion, state-corruption, oob-read
+- unknown_frame_injection: Unknown frame types (0x0A–0xFF) injected between valid frames — between HEADERS and DATA, 50KB unknown payload, zero-length unknowns, all 246 undefined types. Tests length-based frame skipping alignment. Triggers: state-corruption, oob-read, evasion
+- flow_control_evasion: Flow control window manipulation — 100KB DATA exceeding 65535 window, zero-increment WINDOW_UPDATE (PROTOCOL_ERROR), SETTINGS reducing INITIAL_WINDOW_SIZE causing negative windows, 2000 1-byte DATA frames, DATA with max padding (255 bytes). Targets flow control accounting. Triggers: integer-overflow, oob-write, state-corruption
+- goaway_desync: GOAWAY then continue sending frames (IDS may stop tracking), increasing last-stream-id (prohibited), 50KB debug data overflow, 100 rapid GOAWAYs, GOAWAY on non-zero stream. Targets connection lifecycle. Triggers: evasion, state-corruption, oob-read
+- priority_tree_attack: Dependency tree abuse — self-dependency (stream depends on itself), 500-deep chains, 200 exclusive deps restructuring entire tree, weight=0 (invalid), PRIORITY on never-opened streams. Targets priority processing (deprecated but still parsed). Triggers: infinite-loop, memory-exhaustion, state-corruption
+- push_promise_confusion: Client sending PUSH_PROMISE (server-only), odd promised stream ID (must be even), PUSH_PROMISE on closed/RST streams, push after SETTINGS_ENABLE_PUSH=0, reuse same promised stream ID 10 times. Targets server push state. Triggers: state-corruption, oob-read, null-deref
+- data_padding_evasion: DATA/HEADERS padding extraction — max 255-byte padding with hidden payload, padding length exceeding frame payload (PROTOCOL_ERROR → OOB-read), padded HEADERS, alternating padded/unpadded DATA, padding-only DATA (no actual content). Targets padding subtraction logic. Triggers: oob-read, oob-write, integer-underflow
+- rst_stream_race: Race condition attacks — HEADERS+DATA+RST_STREAM in rapid succession (IDS may discard before inspecting), HEADERS without END_HEADERS then RST, RST on idle/closed streams, 100 streams opened with DATA then immediately cancelled. Targets stream cleanup vs inspection lifecycle. Triggers: use-after-free, evasion, state-corruption
+- preface_manipulation: Connection preface attacks — truncated magic (12 bytes only), junk before preface, HTTP/1.1 Upgrade then h2 preface, single-byte preface corruption, double SETTINGS after preface. Targets protocol detection/classification. Triggers: evasion, state-corruption, oob-read
+- header_block_fragmentation: HPACK header block split at adversarial boundaries — 1-byte CONTINUATION fragments, split mid-integer encoding, split mid-string literal, 30KB header block across 150 CONTINUATIONs, random-sized fragments (1-300 bytes). Targets HPACK partial-state buffering. Triggers: oob-read, state-corruption, buffer-overflow
+
+DCE/RPC STRATEGIES (used when fuzzing DCE/RPC inspectors, e.g. Snort 3 dce_tcp / dce_smb — CO protocol on port 135/445):
+- bind_flood: BIND PDU attacks — 200+ context elements exhausting context table, oversized context list with 50 transfer syntaxes, max_xmit_frag=0xFFFF/max_recv=0, 100 rapid re-BINDs, circular abstract syntax references, zero-context BIND. Targets BIND processing and context allocation. Triggers: memory-exhaustion, state-corruption, oob-write
+- frag_reassembly_attack: Fragment reassembly attacks — overlapping fragments (500-byte overlap), out-of-order delivery (last before first), 50 FIRST_FRAG without LAST_FRAG (hangs reassembly), zero-length fragments (header only), frag_length=0xFFFF mismatch, 500-fragment bomb with unique call_ids. Targets PDU reassembly engine. Triggers: oob-read, heap-overflow, memory-exhaustion
+- ptype_confusion: PDU type confusion — undefined PTYPE values (20-255), client sending server-only PDUs (BIND_ACK, RESPONSE, SHUTDOWN), PTYPE=0xFF with large body. Targets PTYPE dispatch and validation. Triggers: state-corruption, oob-read, null-deref
+- auth_verifier_overflow: Authentication verifier attacks — 60KB AUTH3 credentials blob, invalid auth_type=0xFF, auth_length header/actual mismatch (claims 5000, actual 50), auth_pad_length=255, oversized NTLMSSP NEGOTIATE (60KB domain/workstation), fake Kerberos AP-REQ with huge ticket. Targets auth verifier parsing. Triggers: heap-overflow, oob-read, integer-overflow
+- context_negotiation_abuse: Presentation context negotiation attacks — duplicate context_ids (3 contexts all id=0), unknown/garbage transfer syntax UUIDs, 255 context elements (uint8 max), same abstract syntax with conflicting versions, NDR32/NDR64 transfer syntax mixing. Targets context table management. Triggers: state-corruption, oob-write, type-confusion
+- stub_data_overflow: Stub data and NDR format attacks — 60KB stub data, alloc_hint=4 but 10KB actual stub (mismatch), NDR conformant array with max_count=0xFFFFFFFF, NDR varying string with actual_count=50000 but only 200 bytes, dynamic commands from target analysis, empty stub (0 bytes). Targets stub data extraction and NDR parsing. Triggers: heap-overflow, oob-read, integer-overflow
+- alter_context_race: ALTER_CONTEXT state attacks — ALTER_CONTEXT without prior BIND, 100 rapid ALTER_CONTEXTs with random UUIDs, ALTER_CONTEXT interleaved between request fragments, interface switching (EPM→SAMR) mid-session, context_id=0xFFFF. Targets context switching and state machine. Triggers: state-corruption, use-after-free, null-deref
+- cl_header_manipulation: Connectionless (CL) header attacks — invalid rpc_vers (0xFF instead of 4), frag_num=0xFFFF, ahint=0 (body length hint mismatch), max serial numbers (255/255), 50 requests with same activity UUID but different opnums. Targets CL header parsing. Triggers: oob-read, integer-overflow, state-corruption
+- endian_drep_confusion: Data representation (DREP) confusion — big-endian DREP with little-endian body, mixed character/float encoding flags, all-0xFF DREP, DREP switch between fragments (LE first, BE second), EBCDIC character encoding flag. Targets byte-order interpretation. Triggers: integer-overflow, oob-read, state-corruption
+- opnum_dispatch_fuzz: Operation number dispatch attacks — opnum=0xFFFF, sequential opnums 0-99, opnum=0 with 40KB stub, REQUEST with PFC_OBJECT_UUID flag + random UUID, rapid opnum switching between 0/5/15/31/0xFFFF. Targets opnum dispatch table and stub routing. Triggers: oob-read, null-deref, state-corruption
+- cancel_orphan_attack: CO_CANCEL/ORPHANED attacks — CO_CANCEL without pending request, 100 ORPHANED PDUs for non-existent call_ids, request then immediate cancel+orphan, interleaved requests with random cancels/orphans. Targets call lifecycle management. Triggers: use-after-free, state-corruption, null-deref
+- record_marking_desync: TCP Record Marking (RM) attacks — RM length=0x7FFFFFFF (2GB claim), split RM header across segments, zero-length RM record, max-length RM but only 100 bytes sent, single PDU split across multiple RM records. Targets TCP framing and reassembly. Triggers: oob-read, integer-overflow, buffer-overflow
+- multi_bind_ack_confusion: BIND/BIND_ACK state confusion — BIND on ctx 0 then REQUEST on ctx 99, BIND with EPM+SRVSVC+SAMR simultaneously, client spoofing BIND_ACK, double BIND for different interfaces, BIND_NAK then REQUEST anyway. Targets connection state tracking. Triggers: state-corruption, oob-read, use-after-free
+- uuid_manipulation: Interface UUID manipulation — all-zero UUIDs, all-0xFF UUIDs, 20 random high-entropy UUIDs, known UUIDs with wrong versions (0 and 0xFFFF), same UUID repeated 50 times. Targets UUID matching and interface lookup. Triggers: state-corruption, oob-read, null-deref
 """
 
 # ---------------------------------------------------------------------------
@@ -422,13 +500,17 @@ SEVERITY_MULTIPLIERS = {
 
 def compute_weights_from_vulns(verified_vulns):
     """Deterministic weight computation from verified vulnerabilities.
-    Returns (dns_weights, ftp_weights, http_weights, smtp_weights, reasoning_str)."""
+    Returns (dns_weights, ftp_weights, http_weights, smtp_weights, smb2_weights, smb3_weights, http2_weights, dcerpc_weights, reasoning_str)."""
 
     # Start with default weights
     dns_w = dict(zip(DNS_STRATEGY_NAMES, DNS_DEFAULT_WEIGHTS))
     ftp_w = dict(zip(FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS))
     http_w = dict(zip(HTTP_STRATEGY_NAMES, HTTP_DEFAULT_WEIGHTS))
     smtp_w = dict(zip(SMTP_STRATEGY_NAMES, SMTP_DEFAULT_WEIGHTS))
+    smb2_w = dict(zip(SMB2_STRATEGY_NAMES, SMB2_DEFAULT_WEIGHTS))
+    smb3_w = dict(zip(SMB3_STRATEGY_NAMES, SMB3_DEFAULT_WEIGHTS))
+    http2_w = dict(zip(HTTP2_STRATEGY_NAMES, HTTP2_DEFAULT_WEIGHTS))
+    dcerpc_w = dict(zip(DCERPC_STRATEGY_NAMES, DCERPC_DEFAULT_WEIGHTS))
 
     reasoning_lines = ["Weight computation (deterministic formula):"]
     reasoning_lines.append(f"  Starting from default weights. {len(verified_vulns)} verified vulnerabilities.")
@@ -467,6 +549,33 @@ def compute_weights_from_vulns(verified_vulns):
             reasoning_lines.append(
                 f"  SMTP/{strat}: {old:.1f} × {effective_mult:.2f} "
                 f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {smtp_w[strat]:.1f}")
+        elif strat in smb2_w:
+            old = smb2_w[strat]
+            smb2_w[strat] = old * effective_mult
+            reasoning_lines.append(
+                f"  SMB2/{strat}: {old:.1f} × {effective_mult:.2f} "
+                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {smb2_w[strat]:.1f}")
+            if strat in smb3_w:
+                old3 = smb3_w[strat]
+                smb3_w[strat] = old3 * effective_mult
+        elif strat in smb3_w:
+            old = smb3_w[strat]
+            smb3_w[strat] = old * effective_mult
+            reasoning_lines.append(
+                f"  SMB3/{strat}: {old:.1f} × {effective_mult:.2f} "
+                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {smb3_w[strat]:.1f}")
+        elif strat in http2_w:
+            old = http2_w[strat]
+            http2_w[strat] = old * effective_mult
+            reasoning_lines.append(
+                f"  HTTP2/{strat}: {old:.1f} × {effective_mult:.2f} "
+                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {http2_w[strat]:.1f}")
+        elif strat in dcerpc_w:
+            old = dcerpc_w[strat]
+            dcerpc_w[strat] = old * effective_mult
+            reasoning_lines.append(
+                f"  DCERPC/{strat}: {old:.1f} × {effective_mult:.2f} "
+                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {dcerpc_w[strat]:.1f}")
         else:
             reasoning_lines.append(f"  WARNING: strategy '{strat}' not recognized, skipping")
 
@@ -494,7 +603,31 @@ def compute_weights_from_vulns(verified_vulns):
         smtp_w = {s: round(v / smtp_total * 100, 1) for s, v in smtp_w.items()}
     reasoning_lines.append(f"  SMTP normalized (sum was {smtp_total:.1f})")
 
-    return dns_w, ftp_w, http_w, smtp_w, "\n".join(reasoning_lines)
+    # Normalize SMB2 to sum=100
+    smb2_total = sum(smb2_w.values())
+    if smb2_total > 0:
+        smb2_w = {s: round(v / smb2_total * 100, 1) for s, v in smb2_w.items()}
+    reasoning_lines.append(f"  SMB2 normalized (sum was {smb2_total:.1f})")
+
+    # Normalize SMB3 to sum=100
+    smb3_total = sum(smb3_w.values())
+    if smb3_total > 0:
+        smb3_w = {s: round(v / smb3_total * 100, 1) for s, v in smb3_w.items()}
+    reasoning_lines.append(f"  SMB3 normalized (sum was {smb3_total:.1f})")
+
+    # Normalize HTTP2 to sum=100
+    http2_total = sum(http2_w.values())
+    if http2_total > 0:
+        http2_w = {s: round(v / http2_total * 100, 1) for s, v in http2_w.items()}
+    reasoning_lines.append(f"  HTTP2 normalized (sum was {http2_total:.1f})")
+
+    # Normalize DCERPC to sum=100
+    dcerpc_total = sum(dcerpc_w.values())
+    if dcerpc_total > 0:
+        dcerpc_w = {s: round(v / dcerpc_total * 100, 1) for s, v in dcerpc_w.items()}
+    reasoning_lines.append(f"  DCERPC normalized (sum was {dcerpc_total:.1f})")
+
+    return dns_w, ftp_w, http_w, smtp_w, smb2_w, smb3_w, http2_w, dcerpc_w, "\n".join(reasoning_lines)
 
 # AI analysis state
 analysis_state = {
@@ -621,7 +754,7 @@ def api_start():
 
     body = request.json or {}
     protocol = body.get("protocol", "dns").lower()
-    if protocol not in ("dns", "ftp", "http", "smtp"):
+    if protocol not in ("dns", "ftp", "http", "smtp", "smb2", "smb3", "http2", "dcerpc"):
         protocol = "dns"
     mode = body.get("mode", "pipe").lower()
     live_config = body.get("live_config", {})
@@ -736,14 +869,14 @@ def api_filesend_send():
         return jsonify({"error": "No files provided"}), 400
 
     protocol = (request.form.get("protocol") or "http").lower().strip()
-    if protocol not in ("http", "ftp", "smtp"):
-        return jsonify({"error": "protocol must be 'http', 'ftp', or 'smtp'"}), 400
+    if protocol not in ("http", "ftp", "smtp", "smb2", "smb3", "http2", "dcerpc"):
+        return jsonify({"error": "protocol must be 'http', 'ftp', 'smtp', 'smb2', 'smb3', 'http2', or 'dcerpc'"}), 400
 
     host = (request.form.get("host") or "").strip()
     if not host:
         return jsonify({"error": "Target host is required"}), 400
 
-    default_port = {"http": 80, "ftp": 21, "smtp": 25}[protocol]
+    default_port = {"http": 80, "ftp": 21, "smtp": 25, "smb2": 445, "smb3": 445, "http2": 80, "dcerpc": 135}[protocol]
     try:
         port = int(request.form.get("port") or default_port)
     except ValueError:
@@ -767,6 +900,25 @@ def api_filesend_send():
                 subject=request.form.get("smtp_subject") or None,
                 user=request.form.get("smtp_user") or None,
                 password=request.form.get("smtp_pass") or None,
+            )
+        elif protocol in ("smb2", "smb3"):
+            res = send_file_smb(
+                host, port, f.filename, data,
+                share=request.form.get("smb_share") or "shared",
+                username=request.form.get("smb_user") or "",
+                password=request.form.get("smb_pass") or "",
+                protocol_label=protocol,
+            )
+        elif protocol == "http2":
+            res = send_file_http2(
+                host, port, f.filename, data,
+                method=request.form.get("http_method") or "POST",
+                path=request.form.get("http_path") or None,
+                host_header=request.form.get("http_host_header") or None,
+            )
+        elif protocol == "dcerpc":
+            res = send_file_dcerpc(
+                host, port, f.filename, data,
             )
         else:
             res = send_file_ftp(
@@ -812,14 +964,14 @@ def api_filesend_stream():
         return jsonify({"error": "No files provided"}), 400
 
     protocol = (request.form.get("protocol") or "http").lower().strip()
-    if protocol not in ("http", "ftp", "smtp"):
-        return jsonify({"error": "protocol must be 'http', 'ftp', or 'smtp'"}), 400
+    if protocol not in ("http", "ftp", "smtp", "smb2", "smb3", "http2", "dcerpc"):
+        return jsonify({"error": "protocol must be 'http', 'ftp', 'smtp', 'smb2', 'smb3', 'http2', or 'dcerpc'"}), 400
 
     host = (request.form.get("host") or "").strip()
     if not host:
         return jsonify({"error": "Target host is required"}), 400
 
-    default_port = {"http": 80, "ftp": 21, "smtp": 25}[protocol]
+    default_port = {"http": 80, "ftp": 21, "smtp": 25, "smb2": 445, "smb3": 445, "http2": 80, "dcerpc": 135}[protocol]
     try:
         port = int(request.form.get("port") or default_port)
     except ValueError:
@@ -839,6 +991,9 @@ def api_filesend_stream():
         "smtp_subject": request.form.get("smtp_subject") or None,
         "smtp_user": request.form.get("smtp_user") or None,
         "smtp_pass": request.form.get("smtp_pass") or None,
+        "smb_share": request.form.get("smb_share") or "shared",
+        "smb_user": request.form.get("smb_user") or "",
+        "smb_pass": request.form.get("smb_pass") or "",
     }
 
     q = queue.Queue()
@@ -876,6 +1031,17 @@ def api_filesend_stream():
                                          mail_from=opts["smtp_from"], rcpt_to=opts["smtp_to"],
                                          subject=opts["smtp_subject"], user=opts["smtp_user"],
                                          password=opts["smtp_pass"], on_packet=on_packet)
+                elif protocol in ("smb2", "smb3"):
+                    res = send_file_smb(host, port, fname, data,
+                                        share=opts["smb_share"], username=opts["smb_user"],
+                                        password=opts["smb_pass"], protocol_label=protocol)
+                elif protocol == "http2":
+                    res = send_file_http2(host, port, fname, data,
+                                          method=opts["http_method"], path=opts["http_path"],
+                                          host_header=opts["http_host_header"], on_packet=on_packet)
+                elif protocol == "dcerpc":
+                    res = send_file_dcerpc(host, port, fname, data,
+                                           on_packet=on_packet)
                 else:
                     res = send_file_ftp(host, port, fname, data,
                                         user=opts["ftp_user"], password=opts["ftp_pass"],
@@ -1175,7 +1341,7 @@ For each vulnerability, provide a concrete byte-level payload that would trigger
 
         # ── WEIGHER: DETERMINISTIC PYTHON ─────────────────────────
         print("[AI] ══ Computing weights (Python) ══")
-        dns_w, ftp_w, http_w, smtp_w, reasoning = compute_weights_from_vulns(raw_vulns)
+        dns_w, ftp_w, http_w, smtp_w, smb2_w, smb3_w, http2_w, dcerpc_w, reasoning = compute_weights_from_vulns(raw_vulns)
         print(f"[AI] Weights computed deterministically.")
 
         # Assemble final results
@@ -1189,6 +1355,10 @@ For each vulnerability, provide a concrete byte-level payload that would trigger
                 "ftp": ftp_w,
                 "http": http_w,
                 "smtp": smtp_w,
+                "smb2": smb2_w,
+                "smb3": smb3_w,
+                "http2": http2_w,
+                "dcerpc": dcerpc_w,
                 "weight_reasoning": reasoning,
             },
             "model_used": model_used,
@@ -1448,17 +1618,29 @@ def ai_get_weights():
     ftp_default = dict(zip(FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS))
     http_default = dict(zip(HTTP_STRATEGY_NAMES, HTTP_DEFAULT_WEIGHTS))
     smtp_default = dict(zip(SMTP_STRATEGY_NAMES, SMTP_DEFAULT_WEIGHTS))
+    smb2_default = dict(zip(SMB2_STRATEGY_NAMES, SMB2_DEFAULT_WEIGHTS))
+    smb3_default = dict(zip(SMB3_STRATEGY_NAMES, SMB3_DEFAULT_WEIGHTS))
+    http2_default = dict(zip(HTTP2_STRATEGY_NAMES, HTTP2_DEFAULT_WEIGHTS))
+    dcerpc_default = dict(zip(DCERPC_STRATEGY_NAMES, DCERPC_DEFAULT_WEIGHTS))
     return jsonify({
         "source": ai_weights.get("source", "default"),
         "dns": ai_weights.get("dns", dns_default),
         "ftp": ai_weights.get("ftp", ftp_default),
         "http": ai_weights.get("http", http_default),
         "smtp": ai_weights.get("smtp", smtp_default),
+        "smb2": ai_weights.get("smb2", smb2_default),
+        "smb3": ai_weights.get("smb3", smb3_default),
+        "http2": ai_weights.get("http2", http2_default),
+        "dcerpc": ai_weights.get("dcerpc", dcerpc_default),
         "reasoning": ai_weights.get("reasoning", ""),
         "dns_default": dns_default,
         "ftp_default": ftp_default,
         "http_default": http_default,
         "smtp_default": smtp_default,
+        "smb2_default": smb2_default,
+        "smb3_default": smb3_default,
+        "http2_default": http2_default,
+        "dcerpc_default": dcerpc_default,
     })
 
 
@@ -1489,6 +1671,10 @@ def ai_apply_weights():
     ftp_raw = rec.get("ftp", {})
     http_raw = rec.get("http", {})
     smtp_raw = rec.get("smtp", {})
+    smb2_raw = rec.get("smb2", {})
+    smb3_raw = rec.get("smb3", {})
+    http2_raw = rec.get("http2", {})
+    dcerpc_raw = rec.get("dcerpc", {})
 
     # Normalize DNS weights
     dns_total = sum(dns_raw.get(s, 0) for s in DNS_STRATEGY_NAMES)
@@ -1510,6 +1696,26 @@ def ai_apply_weights():
     if smtp_total > 0:
         ai_weights["smtp"] = {s: round(smtp_raw.get(s, 0) / smtp_total * 100, 1) for s in SMTP_STRATEGY_NAMES}
 
+    # Normalize SMB2 weights
+    smb2_total = sum(smb2_raw.get(s, 0) for s in SMB2_STRATEGY_NAMES)
+    if smb2_total > 0:
+        ai_weights["smb2"] = {s: round(smb2_raw.get(s, 0) / smb2_total * 100, 1) for s in SMB2_STRATEGY_NAMES}
+
+    # Normalize SMB3 weights
+    smb3_total = sum(smb3_raw.get(s, 0) for s in SMB3_STRATEGY_NAMES)
+    if smb3_total > 0:
+        ai_weights["smb3"] = {s: round(smb3_raw.get(s, 0) / smb3_total * 100, 1) for s in SMB3_STRATEGY_NAMES}
+
+    # Normalize HTTP2 weights
+    http2_total = sum(http2_raw.get(s, 0) for s in HTTP2_STRATEGY_NAMES)
+    if http2_total > 0:
+        ai_weights["http2"] = {s: round(http2_raw.get(s, 0) / http2_total * 100, 1) for s in HTTP2_STRATEGY_NAMES}
+
+    # Normalize DCERPC weights
+    dcerpc_total = sum(dcerpc_raw.get(s, 0) for s in DCERPC_STRATEGY_NAMES)
+    if dcerpc_total > 0:
+        ai_weights["dcerpc"] = {s: round(dcerpc_raw.get(s, 0) / dcerpc_total * 100, 1) for s in DCERPC_STRATEGY_NAMES}
+
     ai_weights["source"] = "ai"
     ai_weights["reasoning"] = rec.get("weight_reasoning", "")
 
@@ -1518,14 +1724,22 @@ def ai_apply_weights():
     ftp_bandit.reset()
     http_bandit.reset()
     smtp_bandit.reset()
+    smb2_bandit.reset()
+    smb3_bandit.reset()
+    http2_bandit.reset()
+    dcerpc_bandit.reset()
 
     log_event("INFO", f"AI weights applied — source: {results.get('model_used', 'unknown')}, RL bandits reset")
     print(f"[AI] Weights applied: DNS={ai_weights['dns']}")
     print(f"[AI] Weights applied: FTP={ai_weights['ftp']}")
     print(f"[AI] Weights applied: HTTP={ai_weights['http']}")
     print(f"[AI] Weights applied: SMTP={ai_weights['smtp']}")
+    print(f"[AI] Weights applied: SMB2={ai_weights['smb2']}")
+    print(f"[AI] Weights applied: SMB3={ai_weights['smb3']}")
+    print(f"[AI] Weights applied: HTTP2={ai_weights['http2']}")
+    print(f"[AI] Weights applied: DCERPC={ai_weights['dcerpc']}")
 
-    return jsonify({"status": "applied", "dns": ai_weights["dns"], "ftp": ai_weights["ftp"], "http": ai_weights["http"], "smtp": ai_weights["smtp"]})
+    return jsonify({"status": "applied", "dns": ai_weights["dns"], "ftp": ai_weights["ftp"], "http": ai_weights["http"], "smtp": ai_weights["smtp"], "smb2": ai_weights["smb2"], "smb3": ai_weights["smb3"], "http2": ai_weights["http2"], "dcerpc": ai_weights["dcerpc"]})
 
 
 @app.route("/api/ai/reset_weights", methods=["POST"])
@@ -1535,6 +1749,10 @@ def ai_reset_weights():
     ai_weights["ftp"] = dict(zip(FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS))
     ai_weights["http"] = dict(zip(HTTP_STRATEGY_NAMES, HTTP_DEFAULT_WEIGHTS))
     ai_weights["smtp"] = dict(zip(SMTP_STRATEGY_NAMES, SMTP_DEFAULT_WEIGHTS))
+    ai_weights["smb2"] = dict(zip(SMB2_STRATEGY_NAMES, SMB2_DEFAULT_WEIGHTS))
+    ai_weights["smb3"] = dict(zip(SMB3_STRATEGY_NAMES, SMB3_DEFAULT_WEIGHTS))
+    ai_weights["http2"] = dict(zip(HTTP2_STRATEGY_NAMES, HTTP2_DEFAULT_WEIGHTS))
+    ai_weights["dcerpc"] = dict(zip(DCERPC_STRATEGY_NAMES, DCERPC_DEFAULT_WEIGHTS))
     ai_weights["source"] = "default"
     ai_weights["reasoning"] = ""
 
@@ -1543,6 +1761,10 @@ def ai_reset_weights():
     ftp_bandit.reset()
     http_bandit.reset()
     smtp_bandit.reset()
+    smb2_bandit.reset()
+    smb3_bandit.reset()
+    http2_bandit.reset()
+    dcerpc_bandit.reset()
 
     log_event("INFO", "Strategy weights reset to defaults, RL bandits reset")
     return jsonify({"status": "reset"})
@@ -1651,10 +1873,10 @@ def ai_analyze_v2():
 
         # Compute weights from merged vulns
         if raw_vulns:
-            dns_w, ftp_w, http_w, smtp_w, reasoning = compute_weights_from_vulns(raw_vulns)
+            dns_w, ftp_w, http_w, smtp_w, smb2_w, smb3_w, http2_w, dcerpc_w, reasoning = compute_weights_from_vulns(raw_vulns)
             recommended_weights = {
                 "dns": dns_w, "ftp": ftp_w, "http": http_w, "smtp": smtp_w,
-                "weight_reasoning": reasoning,
+                "smb2": smb2_w, "smb3": smb3_w, "http2": http2_w, "dcerpc": dcerpc_w, "weight_reasoning": reasoning,
             }
         else:
             recommended_weights = None

