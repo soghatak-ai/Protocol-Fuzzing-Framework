@@ -33,8 +33,9 @@ def ai_call(system_prompt: str, user_prompt: str,
         api_version=api_version,
     )
 
+    max_retries = 8
     last_err = None
-    for attempt in range(4):
+    for attempt in range(max_retries):
         try:
             response = client.chat.completions.create(
                 model=model,
@@ -55,6 +56,7 @@ def ai_call(system_prompt: str, user_prompt: str,
                 elif "```" in raw:
                     parsed = json.loads(raw.split("```")[1].split("```")[0].strip())
                 else:
+                    print(f"[LLM] WARNING: JSON parse failed, raw tail: ...{raw[-200:]}")
                     parsed = {"raw_response": raw, "parse_error": True}
 
             usage = response.usage
@@ -65,8 +67,8 @@ def ai_call(system_prompt: str, user_prompt: str,
             last_err = e
             err_str = str(e)
             if "429" in err_str or "rate" in err_str.lower() or "timeout" in err_str.lower():
-                wait = 2 ** attempt
-                print(f"[LLM] Retry {attempt+1}/3 after {wait}s — {type(e).__name__}: {e}")
+                wait = min(2 ** attempt + 5, 60)
+                print(f"[LLM] Retry {attempt+1}/{max_retries} after {wait}s — {type(e).__name__}: {e}")
                 time.sleep(wait)
             else:
                 raise

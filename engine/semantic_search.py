@@ -135,7 +135,10 @@ def parse_file_to_chunks(filename: str, source: str, max_chunk_tokens: int = 600
     chunks = []
     source_lines = source.split("\n")
 
-    def _visit(node):
+    # Iterative AST walk (avoids recursion-depth issues on large C++ files)
+    stack = [tree.root_node]
+    while stack:
+        node = stack.pop()
         if node.type in extract_types:
             start = node.start_point[0]
             end = node.end_point[0]
@@ -144,11 +147,10 @@ def parse_file_to_chunks(filename: str, source: str, max_chunk_tokens: int = 600
             tokens_est = _estimate_tokens(code)
 
             if tokens_est > max_chunk_tokens:
-                # If a single node is too big (e.g. huge class), recurse into
+                # If a single node is too big (e.g. huge class), descend into
                 # children to get finer granularity.
-                for child in node.children:
-                    _visit(child)
-                return
+                stack.extend(reversed(node.children))
+                continue
 
             chunk_id = hashlib.sha256(
                 f"{filename}:{name}:{start}:{end}".encode()
@@ -164,12 +166,9 @@ def parse_file_to_chunks(filename: str, source: str, max_chunk_tokens: int = 600
                 "code": code,
                 "tokens_est": tokens_est,
             })
-            return  # don't recurse further into this node
+            continue  # don't descend further into this node
 
-        for child in node.children:
-            _visit(child)
-
-    _visit(tree.root_node)
+        stack.extend(reversed(node.children))
 
     # If AST extraction found nothing (e.g. header with only macros), fallback
     if not chunks:

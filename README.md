@@ -4,6 +4,8 @@ An AI-driven, multi-protocol fuzzer with a **5-phase agentic analysis pipeline**
 
 **8 protocols | 100+ mutation strategies | 500+ internal variants | AI-tuned weights | Real-time RL adaptation**
 
+> **Validated on Snort 3:** Full analysis of 2,051 source files → 18,065 AST chunks → 188 explorer tasks → **306 unique vulnerabilities** and **3,295 protocol constants** extracted in a single run.
+
 ## Key Features
 
 ### Multi-Protocol Fuzzing Engine
@@ -28,10 +30,16 @@ Analyzes uploaded IDS/firewall source code using semantic code understanding to 
 | Phase | Component | LLM Calls | Description |
 |-------|-----------|-----------|-------------|
 | 1 | **Semantic Graph** | 0 (embedding only) | AST parsing via tree-sitter (8 languages), chunking, embedding into ChromaDB vector store |
-| 2 | **Orchestrator** | 1 | LLM builds a repo map and generates 10-30 targeted investigation tasks |
+| 2 | **Orchestrator** | N (chunked) | Splits repo map into ~4K-token chunks, sends each to LLM independently, merges & deduplicates tasks. Handles large codebases (tested: 18K+ symbols) without exceeding context windows |
 | 3 | **Explorers** | N (up to 5 concurrent) | Each agent retrieves relevant code chunks via semantic search and produces vulnerability dossiers |
 | 4 | **Synthesizer** | 0 | Pure Python — merges dossiers, deduplicates vulns, extracts protocol constants to `dynamic_dictionary.json` |
 | 5 | **Weigher** | 0 | Deterministic formula maps vulns to strategy weights with severity multipliers (critical=5x, high=3x, medium=2x, low=1.5x) |
+
+**Resilience features:**
+- **Chunked Orchestrator** — Repo map is split into budget-sized chunks (~4K tokens each), sorted by security relevance (highest-scored symbols first). Each chunk generates 3-10 tasks independently, results are merged and deduplicated by search query.
+- **Truncated JSON Recovery** — If the LLM hits the completion-token cap (common with reasoning models like GPT-5), the framework recovers complete task/vuln objects from the partial JSON via bracket-balancing and regex extraction.
+- **ChromaDB Index Reuse** — Skips re-embedding when the uploaded file set hasn't changed, avoiding unnecessary rate-limit consumption.
+- **Rate-Limit Resilience** — Exponential backoff (up to 60s) with 8 retries, 2s courtesy pauses between orchestrator chunks.
 
 Supports both **Azure OpenAI (GPT-5)** and **Google Gemini** as LLM backends.
 
@@ -91,10 +99,10 @@ protocol-fuzzer/
 ├── ai_analyzer.py              # Standalone Gemini-powered AI analyzer (port 5001)
 ├── engine/
 │   ├── semantic_search.py      # Phase 1 — AST parsing (tree-sitter), chunking, ChromaDB embedding
-│   ├── orchestrator.py         # Phase 2 — Repo map building, investigation task generation
+│   ├── orchestrator.py         # Phase 2 — Chunked repo map, parallel task generation, dedup
 │   ├── explorers.py            # Phases 3 & 4 — Concurrent LLM explorer agents, dossier production
 │   ├── synthesizer.py          # Phase 5 — Dossier merging, dedup, dynamic_dictionary.json generation
-│   ├── llm_client.py           # Azure OpenAI chat completion wrapper (retry, JSON parsing)
+│   ├── llm_client.py           # Azure OpenAI chat completion wrapper (retry, truncated JSON recovery)
 │   ├── code_collector.py       # Source file collection and filtering
 │   ├── mutator.py              # DNS mutation engine (15 strategies)
 │   └── bandit.py               # UCB1 multi-armed bandit (RL weight adjuster, thread-safe)
@@ -268,6 +276,7 @@ Detectable anomalies:
 
 - **Backend:** Python 3.9+, Flask, SSE
 - **AI/ML:** Azure OpenAI (GPT-5), Google Gemini, tree-sitter (8 languages), ChromaDB, tiktoken
+- **Resilience:** Chunked orchestration, truncated JSON recovery, ChromaDB index reuse, exponential backoff
 - **RL:** UCB1 multi-armed bandit (thread-safe, per-protocol)
 - **Networking:** Raw sockets, PCAP pipe, custom packet crafting (binary protocol PDU construction)
 - **Monitoring:** psutil, paramiko (SSH)

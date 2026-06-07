@@ -100,6 +100,13 @@ def _bandit_for_proto(protocol):
 
 
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2 GB upload limit
+
+
+@app.errorhandler(413)
+def request_entity_too_large(error):
+    return jsonify({"error": "Upload too large. Maximum size is 2 GB."}), 413
+
 
 SNORT_BUILD = "/Users/soghatak/snort3/build"
 CRASHES_DIR = os.path.join(os.path.dirname(__file__), "crashes")
@@ -1814,8 +1821,23 @@ def ai_analyze_v2():
         # ── PHASE 1: SEMANTIC GRAPH ───────────────────────────────
         print("[AI-v2] ══ PHASE 1: Semantic Graph (AST parse + embed + ChromaDB) ══")
         analysis_state["status"] = "analyzing (phase 1/5: building semantic graph)"
-        index_result = index_codebase(all_files, fresh=True)
-        total_chunks = index_result["total_chunks"]
+
+        # Reuse existing ChromaDB index if file count matches (avoids re-embedding)
+        from engine.semantic_search import get_or_create_collection
+        existing = get_or_create_collection()
+        existing_count = existing.count()
+        if existing_count > 0 and abs(len(all_files) - analysis_state.get("_last_file_count", 0)) == 0:
+            print(f"[AI-v2]   Reusing existing ChromaDB index ({existing_count} chunks)")
+            total_chunks = existing_count
+            index_result = {"total_files": len(all_files), "total_chunks": total_chunks, "chunks": []}
+        else:
+            index_result = index_codebase(all_files, fresh=True)
+            total_chunks = index_result["total_chunks"]
+            analysis_state["_last_file_count"] = len(all_files)
+            import time as _time
+            print("[AI-v2]   Waiting 15s for rate-limit cooldown before LLM calls...")
+            _time.sleep(15)
+
         print(f"[AI-v2]   Indexed {total_chunks} chunks from {index_result['total_files']} files")
 
         if total_chunks == 0:

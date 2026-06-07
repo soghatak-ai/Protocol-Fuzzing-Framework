@@ -1,3 +1,4 @@
+.chromadb/
 crashes/
 __pycache__/
 *.pyc
