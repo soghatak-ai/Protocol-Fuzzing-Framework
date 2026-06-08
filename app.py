@@ -1412,10 +1412,12 @@ def ai_results():
 # ---------------------------------------------------------------------------
 # Conversational chat over a stored analysis
 # ---------------------------------------------------------------------------
-CHAT_MAX_CONTEXT_CHARS = 120_000  # hard cap on code context sent per chat turn
-CHAT_SNIPPET_MAX_CHARS = 16_000   # cap on vuln-relevant snippets sent per chat turn
-CHAT_SNIPPET_WINDOW = 24          # lines of code captured around each vuln anchor
-CHAT_HISTORY_TURNS = 8            # number of recent user+assistant turns to replay
+CHAT_MAX_CONTEXT_CHARS = 24_000   # hard cap on code context sent per chat turn
+CHAT_SNIPPET_MAX_CHARS = 12_000   # cap on vuln-relevant snippets sent per chat turn
+CHAT_SNIPPET_WINDOW = 16          # lines of code captured around each vuln anchor
+CHAT_HISTORY_TURNS = 4            # number of recent user+assistant turns to replay
+CHAT_MAX_VULNS = 40               # max vulns included in chat context
+CHAT_MAX_SUMMARY_CHARS = 1_000    # cap on codebase summary length
 
 
 def _parse_context_files(code_context):
@@ -1523,20 +1525,46 @@ def _build_chat_system_prompt(conv):
         if len(full_context) > CHAT_MAX_CONTEXT_CHARS:
             code_section += "\n\n... [context truncated] ..."
 
+    # Slim down vulns to essential fields only to save tokens
+    slim_vulns = []
+    # Sort by severity for priority (critical first)
+    sev_order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
+    sorted_vulns = sorted(vulns, key=lambda v: sev_order.get(v.get('severity', 'low'), 3))
+    for v in sorted_vulns[:CHAT_MAX_VULNS]:
+        slim_vulns.append({
+            'id': v.get('original_id') or v.get('id', '?'),
+            'function': v.get('function', '?'),
+            'bug_class': v.get('bug_class', '?'),
+            'severity': v.get('severity', '?'),
+            'line_range': v.get('line_range', '?'),
+            'matched_strategy': v.get('matched_strategy', ''),
+        })
     try:
-        vulns_json = json.dumps(vulns, indent=2)
+        vulns_json = json.dumps(slim_vulns, indent=1)
     except Exception:
         vulns_json = "[]"
+    vulns_note = f" (showing top {CHAT_MAX_VULNS} of {len(vulns)} by severity)" if len(vulns) > CHAT_MAX_VULNS else ""
+
+    # Truncate the summary
+    summary = analysis.get('file_summary', 'n/a') or 'n/a'
+    if len(summary) > CHAT_MAX_SUMMARY_CHARS:
+        summary = summary[:CHAT_MAX_SUMMARY_CHARS] + '... [truncated]'
+
+    # Cap file list
+    files_list = conv.get('files', []) or []
+    files_str = ', '.join(files_list[:20])
+    if len(files_list) > 20:
+        files_str += f' ... and {len(files_list) - 20} more'
 
     return f"""You are a senior security engineer assistant embedded in a protocol fuzzing platform.
 You are discussing ONE specific codebase that has already been analyzed for vulnerabilities.
 
 CODEBASE: {conv.get('title', 'Unknown')}
-FILES: {', '.join(conv.get('files', [])) or 'n/a'}
+FILES: {files_str or 'n/a'}
 
-SUMMARY: {analysis.get('file_summary', 'n/a')}
+SUMMARY: {summary}
 
-PRIOR VULNERABILITY ANALYSIS (JSON):
+PRIOR VULNERABILITY ANALYSIS ({len(vulns)} total{vulns_note}):
 {vulns_json}
 
 {code_label}:
