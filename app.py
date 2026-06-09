@@ -26,18 +26,23 @@ from main import (fuzzer_state, event_log, reset_state, run_fuzzer, run_fuzzer_l
                   SMB3_STRATEGY_NAMES, SMB3_DEFAULT_WEIGHTS,
                   HTTP2_STRATEGY_NAMES, HTTP2_DEFAULT_WEIGHTS,
                   DCERPC_STRATEGY_NAMES, DCERPC_DEFAULT_WEIGHTS,
+                  DHCP_STRATEGY_NAMES, DHCP_DEFAULT_WEIGHTS,
+                  DHCPV6_STRATEGY_NAMES, DHCPV6_DEFAULT_WEIGHTS,
                   dns_bandit, ftp_bandit, http_bandit, smtp_bandit,
-                  smb2_bandit, smb3_bandit, http2_bandit, dcerpc_bandit)
+                  smb2_bandit, smb3_bandit, http2_bandit, dcerpc_bandit, dhcp_bandit,
+                  dhcpv6_bandit)
 from protocol.ftp import FTP_STRATEGY_LABELS
 from protocol.http import HTTP_STRATEGY_LABELS
 from protocol.smtp import SMTP_STRATEGY_LABELS
 from protocol.smb import SMB2_STRATEGY_LABELS, SMB3_STRATEGY_LABELS
 from protocol.http2 import HTTP2_STRATEGY_LABELS
 from protocol.dcerpc import DCERPC_STRATEGY_LABELS
+from protocol.dhcp import DHCP_STRATEGY_LABELS
+from protocol.dhcpv6 import DHCPV6_STRATEGY_LABELS
 from engine.code_collector import (collect_to_dict, collect_to_single_text, VALID_EXTENSIONS,
                                     minify_code, hotspot_filter, extract_repo_map,
                                     build_optimized_context, estimate_tokens)
-from transport.file_sender import send_file_http, send_file_ftp, send_file_smtp, send_file_smb, send_file_http2, send_file_dcerpc
+from transport.file_sender import send_file_http, send_file_ftp, send_file_smtp, send_file_smb, send_file_http2, send_file_dcerpc, send_file_dhcp, send_file_dhcpv6
 from engine.semantic_search import index_codebase, get_all_chunks
 from engine.orchestrator import generate_tasks
 from engine.explorers import run_explorers
@@ -78,6 +83,10 @@ def _labels_for(protocol):
         return HTTP2_STRATEGY_LABELS
     if protocol == "dcerpc":
         return DCERPC_STRATEGY_LABELS
+    if protocol == "dhcp":
+        return DHCP_STRATEGY_LABELS
+    if protocol == "dhcpv6":
+        return DHCPV6_STRATEGY_LABELS
     return DNS_STRATEGY_LABELS
 
 
@@ -96,6 +105,10 @@ def _bandit_for_proto(protocol):
         return http2_bandit
     if protocol == "dcerpc":
         return dcerpc_bandit
+    if protocol == "dhcp":
+        return dhcp_bandit
+    if protocol == "dhcpv6":
+        return dhcpv6_bandit
     return dns_bandit
 
 
@@ -393,6 +406,38 @@ DCE/RPC STRATEGIES (used when fuzzing DCE/RPC inspectors, e.g. Snort 3 dce_tcp /
 - record_marking_desync: TCP Record Marking (RM) attacks — RM length=0x7FFFFFFF (2GB claim), split RM header across segments, zero-length RM record, max-length RM but only 100 bytes sent, single PDU split across multiple RM records. Targets TCP framing and reassembly. Triggers: oob-read, integer-overflow, buffer-overflow
 - multi_bind_ack_confusion: BIND/BIND_ACK state confusion — BIND on ctx 0 then REQUEST on ctx 99, BIND with EPM+SRVSVC+SAMR simultaneously, client spoofing BIND_ACK, double BIND for different interfaces, BIND_NAK then REQUEST anyway. Targets connection state tracking. Triggers: state-corruption, oob-read, use-after-free
 - uuid_manipulation: Interface UUID manipulation — all-zero UUIDs, all-0xFF UUIDs, 20 random high-entropy UUIDs, known UUIDs with wrong versions (0 and 0xFFFF), same UUID repeated 50 times. Targets UUID matching and interface lookup. Triggers: state-corruption, oob-read, null-deref
+
+DHCP STRATEGIES (used when fuzzing DHCPv4 inspectors — UDP ports 67/68, BOOTP+options format):
+- rogue_server_attack: Rogue DHCPOFFER/DHCPACK with attacker-controlled gateway/DNS/WPAD/NTP — gateway redirect, DNS hijack, WPAD proxy injection, full MITM (all services redirected), rapid offer racing, NAK-then-offer forcing client back to INIT. Targets rogue server detection. Triggers: evasion, state-corruption, configuration-hijack
+- starvation_flood: DHCP pool exhaustion — 50-MAC burst DISCOVER, slow drip with realistic vendor classes, vendor fingerprint mixing, DISCOVER+REQUEST confirm pairs, DECLINE flood marking addresses unavailable, INFORM flood from random IPs. Targets rate-based detection. Triggers: resource-exhaustion, evasion, threshold-bypass
+- option_tlv_overflow: TLV option parsing abuse — max length=255 options, length exceeding remaining packet (OOB read), missing end marker (0xFF), options past end marker, 200+ tiny options stressing loop counters, duplicate option 53 with conflicting message types, zero-length options, 1200-byte option chain bomb. Targets option parser. Triggers: oob-read, buffer-overflow, integer-overflow
+- option_overload_attack: Option 52 (overload) semantic gap — sname holds options (IDS misses), file holds options, both overloaded, conflicting DNS in main vs sname (IDS sees safe value, server sees attacker value), no end marker in overloaded field, nested overload (option 52 inside sname). Targets option field discovery. Triggers: evasion, oob-read, state-corruption
+- magic_cookie_corruption: Magic cookie (0x63825363) manipulation — wrong last byte, all-zero cookie (BOOTP fallback), partial cookie (2/4 bytes), pure BOOTP vendor area (no cookie), shifted cookie (4 pad bytes before), doubled cookie. Targets DHCP vs BOOTP detection. Triggers: evasion, state-corruption, oob-read
+- relay_agent_injection: Option 82 (Relay Agent Info) spoofing — forged circuit-ID with trusted switch port, 250-byte oversized sub-option, contradictory giaddr vs circuit-ID subnet, multiple option 82 instances, nested sub-options, fake multi-hop relay chain (hops=3). Targets relay authentication and subnet-aware rules. Triggers: evasion, oob-read, access-control-bypass
+- state_machine_violation: Illegal DHCP state transitions — DHCPREQUEST without prior DISCOVER, RELEASE then immediate reuse, FORCERENEW from spoofed server (RFC 3203), 10 rapid DORA cycles churning state tables, DECLINE before REQUEST, 20 duplicate DISCOVERs. Targets stateful detection. Triggers: state-corruption, evasion, resource-exhaustion
+- bootp_crossover: Pure BOOTP / mixed BOOTP-DHCP — BOOTP with no options (zero vendor area), BOOTP with magic cookie but no option 53, concatenated BOOTP+DHCP packets, op code mismatch (BOOTREPLY op with DISCOVER options). Targets protocol classification. Triggers: evasion, state-corruption
+- field_boundary_attack: Fixed-header field abuse — hlen=20 (overflow past 16-byte chaddr), truncated packet (cut at 100 bytes), oversized packet (1KB+ options), NULL-embedded sname, secs=0xFFFF. Targets header parsing boundaries. Triggers: oob-read, buffer-overflow, integer-overflow
+- xid_collision: Transaction ID manipulation — XID reuse across 10 clients, XID=0, XID=0xFFFFFFFF, rapid sequential XIDs (0-29), same XID with different MACs and message types. Targets transaction tracking. Triggers: state-corruption, evasion
+- lease_time_confusion: Lease time option manipulation — lease=0 (immediate expiration), lease=0xFFFFFFFF (infinite), T1>T2 (reversed renewal/rebinding), micro-lease (1 second), signed-negative-like value (0x80000001). Targets timer management. Triggers: integer-overflow, state-corruption
+- broadcast_flag_abuse: Flags field manipulation — all reserved bits set (0x7FFF), broadcast flag on unicast-only renewal, cleared broadcast on broadcast-required discovery, flags=0xFFFF. Targets flag validation. Triggers: evasion, state-corruption
+- client_id_spoof: Option 61 (Client Identifier) attacks — 200-byte oversized ID, client ID contradicting chaddr MAC, multiple option 61 instances, empty (zero-length) client ID, invalid hardware type byte (0xFF), htype mismatch (IEEE 802 vs Ethernet). Targets client identification. Triggers: evasion, oob-read, identity-confusion
+- sname_file_injection: sname (64B) / file (128B) field payload injection — path traversal (../../../../etc/passwd), shell metacharacters ($(wget...)), format strings (%n%x), non-NUL-terminated overflow, embedded magic cookie + options in sname, random binary payload. Targets string handling in fixed fields. Triggers: command-injection, buffer-overflow, oob-read
+
+DHCPv6 STRATEGIES (used when fuzzing DHCPv6 inspectors — UDP ports 546/547, 4-byte header + 16-bit TLV options):
+- rogue_server_advertise: Rogue DHCPv6 server attacks — fake Advertise with attacker-controlled DNS (option 23), domain search list (option 24), SIP servers (options 21/22), preference=255 to always win server selection, Rapid Commit hijack (single-message Reply), full MITM (DNS+domain+SIP+NTP redirected), 20 competing Advertise race. Targets rogue server detection. Triggers: evasion, configuration-hijack, state-corruption
+- duid_identity_attack: DUID manipulation (IEEE DHCPv6 starvation paper) — oversized DUID >130 bytes (RFC max violation), zero-length DUID, DUID type switching between messages (LLT→EN→UUID), DUID-LLT with extreme time values (0, 0x7FFFFFFF, 0xFFFFFFFF), enterprise number spoofing (Cisco=9, Microsoft=311), DUID-UUID with nil/max/pattern UUIDs, Client ID = Server ID contradiction, 50 unique DUID flood. Targets DUID parsing and identity tracking. Triggers: oob-read, identity-confusion, resource-exhaustion, evasion
+- starvation_solicit_flood: DHCPv6 address pool exhaustion (IEEE paper core attack) — 50-MAC burst Solicit with unique DUID-LL, Solicit+Request confirm pairs, single client with 20 IAIDs, IA_PD prefix delegation exhaustion, Rapid Commit flood (single-message assignment), Decline flood marking addresses unusable, DUID type mixing to evade rate limiting. Targets rate-based detection. Triggers: resource-exhaustion, evasion, threshold-bypass
+- option_nested_overflow: DHCPv6 option TLV exploitation (16-bit option-len, nestable containers) — option-len=0xFFFF with 10 bytes (OOB read), IA_NA with option-len=0 (missing IAID+T1+T2), 15-deep recursive IA_NA nesting, 64KB single option, 500 tiny options stressing allocators, duplicate singleton Client ID options, unknown option codes (0, 0xFFFF), container sub-option overflow past declared length. Targets option parser. Triggers: oob-read, buffer-overflow, integer-overflow, memory-exhaustion
+- relay_chain_injection: DHCPv6 relay agent message manipulation — 50-deep relay nesting (recursive Relay Message option 9), link-address spoofing (unspecified, loopback, multicast, v4-mapped), peer-address as multicast, Client Link-Layer option (79) outside Relay-Forward, missing Relay Message option, cross-scope relay (link-local link with GUA peer), hop-count=255 with deep nesting. Targets relay processing. Triggers: oob-read, stack-overflow, state-corruption, evasion
+- ia_lifetime_confusion: IA_NA/IA_PD lifetime and timer manipulation — T1>T2 (reversed renewal/rebinding), all values=0xFFFFFFFF (infinity), preferred-lifetime>valid-lifetime (RFC violation), zero valid-lifetime (immediate deprecation), prefix-length extremes (0=entire space, 128=single address), conflicting lifetimes across multiple IA addresses. Targets timer management. Triggers: integer-overflow, state-corruption
+- state_machine_desync: DHCPv6 state machine violations — Request without prior Solicit, Renew to wrong server (Server ID mismatch), Release of addresses not owned, Confirm on wrong link, Information-Request with IA_NA (stateless+stateful mix), 10 rapid SARR cycles churning state tables, Rebind with active binding. Targets stateful detection. Triggers: state-corruption, evasion, resource-exhaustion
+- reconfigure_forge: Reconfigure message exploitation — forged Reconfigure without Authentication option, bad RKAP HMAC-MD5, invalid Reconfigure msg-type values (1,3,7,255), Reconfigure Accept in client Solicit, wrong Server ID, 30 rapid Reconfigure flood. Targets Reconfigure authentication. Triggers: evasion, state-corruption, auth-bypass
+- dns_option_injection: DNS/domain option manipulation (options 23, 24, 39) — DNS label >63 bytes (RFC violation), compression pointers in DHCPv6 (not allowed), null bytes embedded in domain names, FQDN option with contradictory S+N flags, DNS servers pointing to loopback/all-zeros/all-ones, domain name >255 bytes total. Targets DNS-encoded data parsing. Triggers: oob-read, buffer-overflow, evasion
+- vendor_class_exploit: Vendor Class/Opts options (16/17) manipulation — enterprise number 0 and 0xFFFFFFFF, spoofed Cisco enterprise (9), vendor-class-data length mismatch (claims 100, sends 5), multiple Vendor Class options, 64KB oversized vendor-specific data. Targets vendor data parsing. Triggers: oob-read, buffer-overflow, integer-overflow
+- transaction_id_manipulation: 24-bit transaction-id attacks — txid=0 (edge case), txid=0xFFFFFF (max), txid reuse across 10 clients, sequential cycling (0-99), Reply spoofing with guessed txids, same txid across different message types (Solicit/Request/Renew/Release/Decline/Confirm). Targets transaction tracking. Triggers: state-corruption, evasion
+- prefix_delegation_abuse: IA_PD specific attacks — /0 prefix (entire address space), /128 prefix (single address), duplicate IAID across IA_PD options, IPv4-mapped IPv6 prefix (::ffff:10.0.0.0/96), overlapping prefix requests, 100 mass IA_PD requests. Targets prefix delegation handling. Triggers: oob-read, resource-exhaustion, state-corruption
+- multiprotocol_evasion: Cross-protocol and encapsulation attacks — DHCPv4-in-DHCPv6 (DHCPV4-QUERY msg-type 20, RFC 7341), invalid message types (0, 24, 50, 128, 255), STARTTLS (msg-type 23) on UDP (should be TCP per RFC 7653), unauthorized LEASEQUERY, Relay Message option inside client message, msg-type=0 (undefined). Targets protocol classification. Triggers: evasion, state-corruption
+- elapsed_time_preference_fuzz: Elapsed Time and Preference option edge cases — elapsed=0xFFFF (max 655.35s), elapsed=0 in non-initial Renew, Preference in non-Advertise Solicit, multiple Elapsed Time options, unknown status codes (7, 100, 0xFFFF), 64KB oversized status-message. Targets option validation. Triggers: integer-overflow, oob-read, state-corruption
 """
 
 # ---------------------------------------------------------------------------
@@ -507,7 +552,7 @@ SEVERITY_MULTIPLIERS = {
 
 def compute_weights_from_vulns(verified_vulns):
     """Deterministic weight computation from verified vulnerabilities.
-    Returns (dns_weights, ftp_weights, http_weights, smtp_weights, smb2_weights, smb3_weights, http2_weights, dcerpc_weights, reasoning_str)."""
+    Returns (dns_weights, ftp_weights, http_weights, smtp_weights, smb2_weights, smb3_weights, http2_weights, dcerpc_weights, dhcp_weights, dhcpv6_weights, reasoning_str)."""
 
     # Start with default weights
     dns_w = dict(zip(DNS_STRATEGY_NAMES, DNS_DEFAULT_WEIGHTS))
@@ -518,6 +563,8 @@ def compute_weights_from_vulns(verified_vulns):
     smb3_w = dict(zip(SMB3_STRATEGY_NAMES, SMB3_DEFAULT_WEIGHTS))
     http2_w = dict(zip(HTTP2_STRATEGY_NAMES, HTTP2_DEFAULT_WEIGHTS))
     dcerpc_w = dict(zip(DCERPC_STRATEGY_NAMES, DCERPC_DEFAULT_WEIGHTS))
+    dhcp_w = dict(zip(DHCP_STRATEGY_NAMES, DHCP_DEFAULT_WEIGHTS))
+    dhcpv6_w = dict(zip(DHCPV6_STRATEGY_NAMES, DHCPV6_DEFAULT_WEIGHTS))
 
     reasoning_lines = ["Weight computation (deterministic formula):"]
     reasoning_lines.append(f"  Starting from default weights. {len(verified_vulns)} verified vulnerabilities.")
@@ -583,6 +630,18 @@ def compute_weights_from_vulns(verified_vulns):
             reasoning_lines.append(
                 f"  DCERPC/{strat}: {old:.1f} × {effective_mult:.2f} "
                 f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {dcerpc_w[strat]:.1f}")
+        elif strat in dhcp_w:
+            old = dhcp_w[strat]
+            dhcp_w[strat] = old * effective_mult
+            reasoning_lines.append(
+                f"  DHCP/{strat}: {old:.1f} × {effective_mult:.2f} "
+                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {dhcp_w[strat]:.1f}")
+        elif strat in dhcpv6_w:
+            old = dhcpv6_w[strat]
+            dhcpv6_w[strat] = old * effective_mult
+            reasoning_lines.append(
+                f"  DHCPv6/{strat}: {old:.1f} × {effective_mult:.2f} "
+                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {dhcpv6_w[strat]:.1f}")
         else:
             reasoning_lines.append(f"  WARNING: strategy '{strat}' not recognized, skipping")
 
@@ -634,7 +693,19 @@ def compute_weights_from_vulns(verified_vulns):
         dcerpc_w = {s: round(v / dcerpc_total * 100, 1) for s, v in dcerpc_w.items()}
     reasoning_lines.append(f"  DCERPC normalized (sum was {dcerpc_total:.1f})")
 
-    return dns_w, ftp_w, http_w, smtp_w, smb2_w, smb3_w, http2_w, dcerpc_w, "\n".join(reasoning_lines)
+    # Normalize DHCP to sum=100
+    dhcp_total = sum(dhcp_w.values())
+    if dhcp_total > 0:
+        dhcp_w = {s: round(v / dhcp_total * 100, 1) for s, v in dhcp_w.items()}
+    reasoning_lines.append(f"  DHCP normalized (sum was {dhcp_total:.1f})")
+
+    # Normalize DHCPv6 to sum=100
+    dhcpv6_total = sum(dhcpv6_w.values())
+    if dhcpv6_total > 0:
+        dhcpv6_w = {s: round(v / dhcpv6_total * 100, 1) for s, v in dhcpv6_w.items()}
+    reasoning_lines.append(f"  DHCPv6 normalized (sum was {dhcpv6_total:.1f})")
+
+    return dns_w, ftp_w, http_w, smtp_w, smb2_w, smb3_w, http2_w, dcerpc_w, dhcp_w, dhcpv6_w, "\n".join(reasoning_lines)
 
 # AI analysis state
 analysis_state = {
@@ -761,7 +832,7 @@ def api_start():
 
     body = request.json or {}
     protocol = body.get("protocol", "dns").lower()
-    if protocol not in ("dns", "ftp", "http", "smtp", "smb2", "smb3", "http2", "dcerpc"):
+    if protocol not in ("dns", "ftp", "http", "smtp", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6"):
         protocol = "dns"
     mode = body.get("mode", "pipe").lower()
     live_config = body.get("live_config", {})
@@ -876,14 +947,14 @@ def api_filesend_send():
         return jsonify({"error": "No files provided"}), 400
 
     protocol = (request.form.get("protocol") or "http").lower().strip()
-    if protocol not in ("http", "ftp", "smtp", "smb2", "smb3", "http2", "dcerpc"):
-        return jsonify({"error": "protocol must be 'http', 'ftp', 'smtp', 'smb2', 'smb3', 'http2', or 'dcerpc'"}), 400
+    if protocol not in ("http", "ftp", "smtp", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6"):
+        return jsonify({"error": "protocol must be 'http', 'ftp', 'smtp', 'smb2', 'smb3', 'http2', 'dcerpc', 'dhcp', or 'dhcpv6'"}), 400
 
     host = (request.form.get("host") or "").strip()
     if not host:
         return jsonify({"error": "Target host is required"}), 400
 
-    default_port = {"http": 80, "ftp": 21, "smtp": 25, "smb2": 445, "smb3": 445, "http2": 80, "dcerpc": 135}[protocol]
+    default_port = {"http": 80, "ftp": 21, "smtp": 25, "smb2": 445, "smb3": 445, "http2": 80, "dcerpc": 135, "dhcp": 67, "dhcpv6": 547}[protocol]
     try:
         port = int(request.form.get("port") or default_port)
     except ValueError:
@@ -925,6 +996,14 @@ def api_filesend_send():
             )
         elif protocol == "dcerpc":
             res = send_file_dcerpc(
+                host, port, f.filename, data,
+            )
+        elif protocol == "dhcp":
+            res = send_file_dhcp(
+                host, port, f.filename, data,
+            )
+        elif protocol == "dhcpv6":
+            res = send_file_dhcpv6(
                 host, port, f.filename, data,
             )
         else:
@@ -971,14 +1050,14 @@ def api_filesend_stream():
         return jsonify({"error": "No files provided"}), 400
 
     protocol = (request.form.get("protocol") or "http").lower().strip()
-    if protocol not in ("http", "ftp", "smtp", "smb2", "smb3", "http2", "dcerpc"):
-        return jsonify({"error": "protocol must be 'http', 'ftp', 'smtp', 'smb2', 'smb3', 'http2', or 'dcerpc'"}), 400
+    if protocol not in ("http", "ftp", "smtp", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6"):
+        return jsonify({"error": "protocol must be 'http', 'ftp', 'smtp', 'smb2', 'smb3', 'http2', 'dcerpc', 'dhcp', or 'dhcpv6'"}), 400
 
     host = (request.form.get("host") or "").strip()
     if not host:
         return jsonify({"error": "Target host is required"}), 400
 
-    default_port = {"http": 80, "ftp": 21, "smtp": 25, "smb2": 445, "smb3": 445, "http2": 80, "dcerpc": 135}[protocol]
+    default_port = {"http": 80, "ftp": 21, "smtp": 25, "smb2": 445, "smb3": 445, "http2": 80, "dcerpc": 135, "dhcp": 67, "dhcpv6": 547}[protocol]
     try:
         port = int(request.form.get("port") or default_port)
     except ValueError:
@@ -1049,6 +1128,12 @@ def api_filesend_stream():
                 elif protocol == "dcerpc":
                     res = send_file_dcerpc(host, port, fname, data,
                                            on_packet=on_packet)
+                elif protocol == "dhcp":
+                    res = send_file_dhcp(host, port, fname, data,
+                                         on_packet=on_packet)
+                elif protocol == "dhcpv6":
+                    res = send_file_dhcpv6(host, port, fname, data,
+                                            on_packet=on_packet)
                 else:
                     res = send_file_ftp(host, port, fname, data,
                                         user=opts["ftp_user"], password=opts["ftp_pass"],
@@ -1348,7 +1433,7 @@ For each vulnerability, provide a concrete byte-level payload that would trigger
 
         # ── WEIGHER: DETERMINISTIC PYTHON ─────────────────────────
         print("[AI] ══ Computing weights (Python) ══")
-        dns_w, ftp_w, http_w, smtp_w, smb2_w, smb3_w, http2_w, dcerpc_w, reasoning = compute_weights_from_vulns(raw_vulns)
+        dns_w, ftp_w, http_w, smtp_w, smb2_w, smb3_w, http2_w, dcerpc_w, dhcp_w, dhcpv6_w, reasoning = compute_weights_from_vulns(raw_vulns)
         print(f"[AI] Weights computed deterministically.")
 
         # Assemble final results
@@ -1366,6 +1451,8 @@ For each vulnerability, provide a concrete byte-level payload that would trigger
                 "smb3": smb3_w,
                 "http2": http2_w,
                 "dcerpc": dcerpc_w,
+                "dhcp": dhcp_w,
+                "dhcpv6": dhcpv6_w,
                 "weight_reasoning": reasoning,
             },
             "model_used": model_used,
@@ -1657,6 +1744,8 @@ def ai_get_weights():
     smb3_default = dict(zip(SMB3_STRATEGY_NAMES, SMB3_DEFAULT_WEIGHTS))
     http2_default = dict(zip(HTTP2_STRATEGY_NAMES, HTTP2_DEFAULT_WEIGHTS))
     dcerpc_default = dict(zip(DCERPC_STRATEGY_NAMES, DCERPC_DEFAULT_WEIGHTS))
+    dhcp_default = dict(zip(DHCP_STRATEGY_NAMES, DHCP_DEFAULT_WEIGHTS))
+    dhcpv6_default = dict(zip(DHCPV6_STRATEGY_NAMES, DHCPV6_DEFAULT_WEIGHTS))
     return jsonify({
         "source": ai_weights.get("source", "default"),
         "dns": ai_weights.get("dns", dns_default),
@@ -1667,6 +1756,8 @@ def ai_get_weights():
         "smb3": ai_weights.get("smb3", smb3_default),
         "http2": ai_weights.get("http2", http2_default),
         "dcerpc": ai_weights.get("dcerpc", dcerpc_default),
+        "dhcp": ai_weights.get("dhcp", dhcp_default),
+        "dhcpv6": ai_weights.get("dhcpv6", dhcpv6_default),
         "reasoning": ai_weights.get("reasoning", ""),
         "dns_default": dns_default,
         "ftp_default": ftp_default,
@@ -1676,6 +1767,8 @@ def ai_get_weights():
         "smb3_default": smb3_default,
         "http2_default": http2_default,
         "dcerpc_default": dcerpc_default,
+        "dhcp_default": dhcp_default,
+        "dhcpv6_default": dhcpv6_default,
     })
 
 
@@ -1710,6 +1803,8 @@ def ai_apply_weights():
     smb3_raw = rec.get("smb3", {})
     http2_raw = rec.get("http2", {})
     dcerpc_raw = rec.get("dcerpc", {})
+    dhcp_raw = rec.get("dhcp", {})
+    dhcpv6_raw = rec.get("dhcpv6", {})
 
     # Normalize DNS weights
     dns_total = sum(dns_raw.get(s, 0) for s in DNS_STRATEGY_NAMES)
@@ -1751,6 +1846,16 @@ def ai_apply_weights():
     if dcerpc_total > 0:
         ai_weights["dcerpc"] = {s: round(dcerpc_raw.get(s, 0) / dcerpc_total * 100, 1) for s in DCERPC_STRATEGY_NAMES}
 
+    # Normalize DHCP weights
+    dhcp_total = sum(dhcp_raw.get(s, 0) for s in DHCP_STRATEGY_NAMES)
+    if dhcp_total > 0:
+        ai_weights["dhcp"] = {s: round(dhcp_raw.get(s, 0) / dhcp_total * 100, 1) for s in DHCP_STRATEGY_NAMES}
+
+    # Normalize DHCPv6 weights
+    dhcpv6_total = sum(dhcpv6_raw.get(s, 0) for s in DHCPV6_STRATEGY_NAMES)
+    if dhcpv6_total > 0:
+        ai_weights["dhcpv6"] = {s: round(dhcpv6_raw.get(s, 0) / dhcpv6_total * 100, 1) for s in DHCPV6_STRATEGY_NAMES}
+
     ai_weights["source"] = "ai"
     ai_weights["reasoning"] = rec.get("weight_reasoning", "")
 
@@ -1763,6 +1868,8 @@ def ai_apply_weights():
     smb3_bandit.reset()
     http2_bandit.reset()
     dcerpc_bandit.reset()
+    dhcp_bandit.reset()
+    dhcpv6_bandit.reset()
 
     log_event("INFO", f"AI weights applied — source: {results.get('model_used', 'unknown')}, RL bandits reset")
     print(f"[AI] Weights applied: DNS={ai_weights['dns']}")
@@ -1773,8 +1880,10 @@ def ai_apply_weights():
     print(f"[AI] Weights applied: SMB3={ai_weights['smb3']}")
     print(f"[AI] Weights applied: HTTP2={ai_weights['http2']}")
     print(f"[AI] Weights applied: DCERPC={ai_weights['dcerpc']}")
+    print(f"[AI] Weights applied: DHCP={ai_weights['dhcp']}")
+    print(f"[AI] Weights applied: DHCPv6={ai_weights['dhcpv6']}")
 
-    return jsonify({"status": "applied", "dns": ai_weights["dns"], "ftp": ai_weights["ftp"], "http": ai_weights["http"], "smtp": ai_weights["smtp"], "smb2": ai_weights["smb2"], "smb3": ai_weights["smb3"], "http2": ai_weights["http2"], "dcerpc": ai_weights["dcerpc"]})
+    return jsonify({"status": "applied", "dns": ai_weights["dns"], "ftp": ai_weights["ftp"], "http": ai_weights["http"], "smtp": ai_weights["smtp"], "smb2": ai_weights["smb2"], "smb3": ai_weights["smb3"], "http2": ai_weights["http2"], "dcerpc": ai_weights["dcerpc"], "dhcp": ai_weights["dhcp"], "dhcpv6": ai_weights["dhcpv6"]})
 
 
 @app.route("/api/ai/reset_weights", methods=["POST"])
@@ -1788,6 +1897,8 @@ def ai_reset_weights():
     ai_weights["smb3"] = dict(zip(SMB3_STRATEGY_NAMES, SMB3_DEFAULT_WEIGHTS))
     ai_weights["http2"] = dict(zip(HTTP2_STRATEGY_NAMES, HTTP2_DEFAULT_WEIGHTS))
     ai_weights["dcerpc"] = dict(zip(DCERPC_STRATEGY_NAMES, DCERPC_DEFAULT_WEIGHTS))
+    ai_weights["dhcp"] = dict(zip(DHCP_STRATEGY_NAMES, DHCP_DEFAULT_WEIGHTS))
+    ai_weights["dhcpv6"] = dict(zip(DHCPV6_STRATEGY_NAMES, DHCPV6_DEFAULT_WEIGHTS))
     ai_weights["source"] = "default"
     ai_weights["reasoning"] = ""
 
@@ -1800,6 +1911,8 @@ def ai_reset_weights():
     smb3_bandit.reset()
     http2_bandit.reset()
     dcerpc_bandit.reset()
+    dhcp_bandit.reset()
+    dhcpv6_bandit.reset()
 
     log_event("INFO", "Strategy weights reset to defaults, RL bandits reset")
     return jsonify({"status": "reset"})
@@ -1923,10 +2036,11 @@ def ai_analyze_v2():
 
         # Compute weights from merged vulns
         if raw_vulns:
-            dns_w, ftp_w, http_w, smtp_w, smb2_w, smb3_w, http2_w, dcerpc_w, reasoning = compute_weights_from_vulns(raw_vulns)
+            dns_w, ftp_w, http_w, smtp_w, smb2_w, smb3_w, http2_w, dcerpc_w, dhcp_w, dhcpv6_w, reasoning = compute_weights_from_vulns(raw_vulns)
             recommended_weights = {
                 "dns": dns_w, "ftp": ftp_w, "http": http_w, "smtp": smtp_w,
-                "smb2": smb2_w, "smb3": smb3_w, "http2": http2_w, "dcerpc": dcerpc_w, "weight_reasoning": reasoning,
+                "smb2": smb2_w, "smb3": smb3_w, "http2": http2_w, "dcerpc": dcerpc_w,
+                "dhcp": dhcp_w, "dhcpv6": dhcpv6_w, "weight_reasoning": reasoning,
             }
         else:
             recommended_weights = None
@@ -1978,6 +2092,7 @@ def ai_analyze_v2():
         analysis_state["error"] = str(e)
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
 
 
 if __name__ == "__main__":

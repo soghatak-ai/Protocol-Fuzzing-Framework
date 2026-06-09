@@ -554,3 +554,134 @@ def send_file_dcerpc(host, port, filename, data, on_packet=None, timeout=10):
     except Exception as e:
         result["detail"] = f"{type(e).__name__}: {e}"
     return result
+
+
+def send_file_dhcp(host, port, filename, data, on_packet=None, timeout=5):
+    """Send a file as a DHCP packet over UDP.
+
+    Wraps the file contents inside DHCP option 43 (Vendor-Specific Information)
+    of a DHCPINFORM message so that Snort's DHCP rules will inspect the payload.
+    The raw file bytes are embedded as the option value.
+    """
+    import struct as _st
+    import random as _rnd
+
+    result = {"file": filename, "ok": False, "detail": "", "sent_bytes": 0, "response": None}
+
+    # Build a minimal DHCPINFORM (op=1, htype=1, hlen=6, hops=0)
+    xid = _rnd.randint(1, 0xFFFFFFFF)
+    mac = bytes([_rnd.randint(0, 255) for _ in range(6)])
+    ciaddr = bytes([192, 168, 1, _rnd.randint(2, 254)])
+
+    hdr = _st.pack("!BBBB I HH 4s 4s 4s 4s",
+                    1,        # op = BOOTREQUEST
+                    1,        # htype = Ethernet
+                    6,        # hlen
+                    0,        # hops
+                    xid,
+                    0,        # secs
+                    0x8000,   # flags (broadcast)
+                    ciaddr,   # ciaddr
+                    b"\x00" * 4,  # yiaddr
+                    b"\x00" * 4,  # siaddr
+                    b"\x00" * 4)  # giaddr
+    hdr += (mac + b"\x00" * 10)  # chaddr (16 bytes)
+    hdr += b"\x00" * 64          # sname
+    hdr += b"\x00" * 128         # file
+
+    magic = bytes([99, 130, 83, 99])
+
+    # Option 53 = DHCPINFORM (8)
+    opt53 = bytes([53, 1, 8])
+    # Option 43 = Vendor-Specific: embed file data (max 255 per option, chain if needed)
+    opt_payload = b""
+    offset = 0
+    while offset < len(data):
+        chunk = data[offset:offset + 255]
+        opt_payload += bytes([43, len(chunk)]) + chunk
+        offset += 255
+    # Option 12 = hostname (filename)
+    safe_name = filename.encode("ascii", errors="replace")[:63]
+    opt12 = bytes([12, len(safe_name)]) + safe_name
+    opt_end = b"\xff"
+
+    pkt = hdr + magic + opt53 + opt12 + opt_payload + opt_end
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(timeout)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            s.sendto(pkt, (host, int(port)))
+            _emit(on_packet, "tx", "DHCP INFORM (file payload)", pkt)
+            result["sent_bytes"] = len(pkt)
+            try:
+                resp, _ = s.recvfrom(4096)
+                _emit(on_packet, "rx", "DHCP response", resp)
+                result["response"] = f"received {len(resp)} bytes"
+            except socket.timeout:
+                pass
+        result["ok"] = True
+        result["detail"] = f"sent {len(pkt)} bytes as DHCP INFORM on UDP/{port}"
+    except Exception as e:
+        result["detail"] = f"{type(e).__name__}: {e}"
+    return result
+
+
+def send_file_dhcpv6(host, port, filename, data, on_packet=None, timeout=5):
+    """Send a file as a DHCPv6 packet over UDP.
+
+    Wraps the file contents inside DHCPv6 option 17 (Vendor-specific Information)
+    of an Information-Request message so that Snort's DHCPv6 rules will inspect
+    the payload.  The raw file bytes are embedded as the option value.
+    """
+    import struct as _st
+    import random as _rnd
+
+    result = {"file": filename, "ok": False, "detail": "", "sent_bytes": 0, "response": None}
+
+    # DHCPv6 Information-Request: msg-type=11, transaction-id=random 24-bit
+    txid = _rnd.randint(0, 0xFFFFFF)
+    hdr = _st.pack("!I", (11 << 24) | txid)  # 1 byte msg-type + 3 bytes txid
+
+    # Option 1 — Client Identifier (DUID-LL, type=3, hw=1 Ethernet, 6 random bytes)
+    duid_ll = _st.pack("!HH", 3, 1) + bytes([_rnd.randint(0, 255) for _ in range(6)])
+    opt_cid = _st.pack("!HH", 1, len(duid_ll)) + duid_ll
+
+    # Option 6 — Option Request (request DNS Recursive Name Server option 23)
+    opt_oro = _st.pack("!HH H", 6, 2, 23)
+
+    # Option 8 — Elapsed Time (0 hundredths)
+    opt_elapsed = _st.pack("!HH H", 8, 2, 0)
+
+    # Option 17 — Vendor-specific Information: embed file data
+    # enterprise-number (4 bytes) + vendor data
+    enterprise = _st.pack("!I", 0)  # enterprise 0
+    vendor_data = b""
+    offset = 0
+    while offset < len(data):
+        chunk = data[offset:offset + 65535]
+        # sub-option code=1, length=len(chunk)
+        vendor_data += _st.pack("!HH", 1, len(chunk)) + chunk
+        offset += 65535
+    opt17_value = enterprise + vendor_data
+    opt17 = _st.pack("!HH", 17, len(opt17_value)) + opt17_value
+
+    pkt = hdr + opt_cid + opt_oro + opt_elapsed + opt17
+
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as s:
+            s.settimeout(timeout)
+            s.sendto(pkt, (host, int(port)))
+            _emit(on_packet, "tx", "DHCPv6 Information-Request (file payload)", pkt)
+            result["sent_bytes"] = len(pkt)
+            try:
+                resp, _ = s.recvfrom(4096)
+                _emit(on_packet, "rx", "DHCPv6 response", resp)
+                result["response"] = f"received {len(resp)} bytes"
+            except socket.timeout:
+                pass
+        result["ok"] = True
+        result["detail"] = f"sent {len(pkt)} bytes as DHCPv6 Information-Request on UDP/{port}"
+    except Exception as e:
+        result["detail"] = f"{type(e).__name__}: {e}"
+    return result

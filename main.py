@@ -29,6 +29,12 @@ from protocol.http2 import (Http2Mutator, HTTP2_STRATEGY_LABELS,
 from protocol.dcerpc import (DcerpcMutator, DCERPC_STRATEGY_LABELS,
                              DCERPC_STRATEGIES as DCERPC_STRATEGY_NAMES,
                              DCERPC_WEIGHTS as DCERPC_DEFAULT_WEIGHTS)
+from protocol.dhcp import (DhcpMutator, DHCP_STRATEGY_LABELS,
+                           DHCP_STRATEGIES as DHCP_STRATEGY_NAMES,
+                           DHCP_WEIGHTS as DHCP_DEFAULT_WEIGHTS)
+from protocol.dhcpv6 import (Dhcpv6Mutator, DHCPV6_STRATEGY_LABELS,
+                             DHCPV6_STRATEGIES as DHCPV6_STRATEGY_NAMES,
+                             DHCPV6_WEIGHTS as DHCPV6_DEFAULT_WEIGHTS)
 from engine.mutator import (SmartDNSMutator, ByteMutator, CompressionLoopMutator,
                             LabelComplexityMutator, ResponseMutator,
                             EDNSExploitMutator, DNSSECRecordMutator, TCPDNSSegmentMutator,
@@ -71,6 +77,8 @@ ai_weights = {
     "smb3": dict(zip(SMB3_STRATEGY_NAMES, SMB3_DEFAULT_WEIGHTS)),
     "http2": dict(zip(HTTP2_STRATEGY_NAMES, HTTP2_DEFAULT_WEIGHTS)),
     "dcerpc": dict(zip(DCERPC_STRATEGY_NAMES, DCERPC_DEFAULT_WEIGHTS)),
+    "dhcp": dict(zip(DHCP_STRATEGY_NAMES, DHCP_DEFAULT_WEIGHTS)),
+    "dhcpv6": dict(zip(DHCPV6_STRATEGY_NAMES, DHCPV6_DEFAULT_WEIGHTS)),
     "reasoning": "",
 }
 
@@ -83,6 +91,8 @@ smb2_bandit = UCB1Bandit(SMB2_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 smb3_bandit = UCB1Bandit(SMB3_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 http2_bandit = UCB1Bandit(HTTP2_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 dcerpc_bandit = UCB1Bandit(DCERPC_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
+dhcp_bandit = UCB1Bandit(DHCP_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
+dhcpv6_bandit = UCB1Bandit(DHCPV6_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 
 
 def _bandit_for(protocol):
@@ -100,6 +110,10 @@ def _bandit_for(protocol):
         return http2_bandit
     if protocol == "dcerpc":
         return dcerpc_bandit
+    if protocol == "dhcp":
+        return dhcp_bandit
+    if protocol == "dhcpv6":
+        return dhcpv6_bandit
     return dns_bandit
 
 fuzzer_state = {
@@ -453,6 +467,22 @@ def run_fuzzer(build_dir: str):
         smb_mutator = None
         dcerpc_mutator = DcerpcMutator(external_weights=ai_weights.get("dcerpc"), bandit=dcerpc_bandit)
         seed_message = None
+    elif protocol == "dhcp":
+        transport = StreamTransport(target_port=67)
+        ftp_mutator = None
+        http_mutator = None
+        smtp_mutator = None
+        smb_mutator = None
+        dhcp_mutator = DhcpMutator(external_weights=ai_weights.get("dhcp"), bandit=dhcp_bandit)
+        seed_message = None
+    elif protocol == "dhcpv6":
+        transport = StreamTransport(target_port=547)
+        ftp_mutator = None
+        http_mutator = None
+        smtp_mutator = None
+        smb_mutator = None
+        dhcpv6_mutator = Dhcpv6Mutator(external_weights=ai_weights.get("dhcpv6"), bandit=dhcpv6_bandit)
+        seed_message = None
     else:
         transport = StreamTransport(target_port=53)
         ftp_mutator = None
@@ -558,6 +588,26 @@ def run_fuzzer(build_dir: str):
                     src_port = random.randint(1025, 65534)
                     pipe.write(transport.wrap_tcp_session(payload, src_port=src_port))
                     fuzzer_state["iteration"] += 4  # full TCP session per DCE/RPC message
+                elif protocol == "dhcp":
+                    if iteration == 1 or (iteration - 1) % 50 == 0:
+                        _dhcp_payload, _dhcp_strategy, _dhcp_dst_port = dhcp_mutator.mutate()
+                    payload, strategy = _dhcp_payload, _dhcp_strategy
+                    fuzzer_state["current_strategy"] = strategy
+                    fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                    src_ip = random.randint(0x01000001, 0xFEFFFFFF)
+                    src_port = 68 if _dhcp_dst_port == 67 else 67
+                    pipe.write(transport.wrap_udp_to_port(payload, _dhcp_dst_port,
+                                                          src_ip=src_ip, src_port=src_port))
+                elif protocol == "dhcpv6":
+                    if iteration == 1 or (iteration - 1) % 50 == 0:
+                        _dhcpv6_payload, _dhcpv6_strategy, _dhcpv6_dst_port = dhcpv6_mutator.mutate()
+                    payload, strategy = _dhcpv6_payload, _dhcpv6_strategy
+                    fuzzer_state["current_strategy"] = strategy
+                    fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                    src_ip = random.randint(0x01000001, 0xFEFFFFFF)
+                    src_port = 546 if _dhcpv6_dst_port == 547 else 547
+                    pipe.write(transport.wrap_udp_to_port(payload, _dhcpv6_dst_port,
+                                                          src_ip=src_ip, src_port=src_port))
                 else:
                     dns_w = ai_weights.get("dns", {})
                     strategy = dns_bandit.select_with_weights(dns_w)
@@ -595,7 +645,7 @@ def run_fuzzer(build_dir: str):
                 active_bandit = _bandit_for(protocol)
                 active_bandit.update(strategy, 0.0)
 
-                stat_interval = 500 if protocol in ("ftp", "http", "smtp", "smb2", "smb3", "http2", "dcerpc") else 10000
+                stat_interval = 500 if protocol in ("ftp", "http", "smtp", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6") else 10000
                 if fuzzer_state["iteration"] % stat_interval == 0:
                     elapsed = time.time() - fuzzer_state["start_time"] if fuzzer_state["start_time"] else 1
                     fuzzer_state["packets_per_sec"] = int(fuzzer_state["iteration"] / max(elapsed, 0.001))
@@ -722,6 +772,20 @@ def run_fuzzer_live(config: dict):
         smb_mutator_inst = None
         dcerpc_mutator_inst = DcerpcMutator(external_weights=ai_weights.get("dcerpc"), bandit=dcerpc_bandit)
         seed_message = None
+    elif protocol == "dhcp":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        dhcp_mutator_inst = DhcpMutator(external_weights=ai_weights.get("dhcp"), bandit=dhcp_bandit)
+        seed_message = None
+    elif protocol == "dhcpv6":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        dhcpv6_mutator_inst = Dhcpv6Mutator(external_weights=ai_weights.get("dhcpv6"), bandit=dhcpv6_bandit)
+        seed_message = None
     else:
         ftp_mutator_inst = None
         http_mutator_inst = None
@@ -759,6 +823,8 @@ def run_fuzzer_live(config: dict):
     _smb_payload, _smb_strategy = None, None
     _h2_payload, _h2_strategy = None, None
     _dcerpc_payload, _dcerpc_strategy = None, None
+    _dhcp_payload, _dhcp_strategy, _dhcp_dst_port = None, None, None
+    _dhcpv6_payload, _dhcpv6_strategy, _dhcpv6_dst_port = None, None, None
 
     try:
         while fuzzer_state["running"] and not fuzzer_state["anomaly_detected"]:
@@ -819,6 +885,22 @@ def run_fuzzer_live(config: dict):
                 fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
                 live_transport.send_tcp(_dcerpc_payload, port=135)
                 fuzzer_state["iteration"] += 1
+            elif protocol == "dhcp":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _dhcp_payload, _dhcp_strategy, _dhcp_dst_port = dhcp_mutator_inst.mutate()
+                strategy = _dhcp_strategy
+                fuzzer_state["current_strategy"] = strategy
+                fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_udp(_dhcp_payload, port=_dhcp_dst_port)
+                fuzzer_state["iteration"] += 1
+            elif protocol == "dhcpv6":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _dhcpv6_payload, _dhcpv6_strategy, _dhcpv6_dst_port = dhcpv6_mutator_inst.mutate()
+                strategy = _dhcpv6_strategy
+                fuzzer_state["current_strategy"] = strategy
+                fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_udp(_dhcpv6_payload, port=_dhcpv6_dst_port)
+                fuzzer_state["iteration"] += 1
             else:
                 dns_w = ai_weights.get("dns", {})
                 strategy = dns_bandit.select_with_weights(dns_w)
@@ -849,7 +931,7 @@ def run_fuzzer_live(config: dict):
             active_bandit = _bandit_for(protocol)
             active_bandit.update(strategy, 0.0)
 
-            stat_interval = 500 if protocol in ("ftp", "http", "smtp", "smb2", "smb3", "http2", "dcerpc") else 10000
+            stat_interval = 500 if protocol in ("ftp", "http", "smtp", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6") else 10000
             if fuzzer_state["iteration"] % stat_interval == 0:
                 elapsed = time.time() - fuzzer_state["start_time"] if fuzzer_state["start_time"] else 1
                 fuzzer_state["packets_per_sec"] = int(fuzzer_state["iteration"] / max(elapsed, 0.001))

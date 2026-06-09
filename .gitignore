@@ -10,4 +10,4 @@ generate_ppt.py
 .env
 vuln_target/
 evasion_*
-templates/
+templates/*.bak

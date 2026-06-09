@@ -180,6 +180,7 @@ class StreamTransport:
     def wrap_udp_to_port(self, payload: bytes, dst_port: int,
                          src_ip: int = 0x7f000001, src_port: int = 12345) -> bytes:
         """Like wrap_payload but allows targeting an arbitrary destination port."""
+        payload = payload[:65507]  # max UDP payload in IPv4: 65535 - 20 (IP) - 8 (UDP)
         ip_total_len = 20 + 8 + len(payload)
         ip_hdr = bytearray(struct.pack("!BBHHHBBHII",
             0x45, 0, ip_total_len, random.randint(1, 0xFFFF), 0, 64, 17, 0,
