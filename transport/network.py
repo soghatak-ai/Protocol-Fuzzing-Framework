@@ -23,6 +23,9 @@ def _tcp_checksum(src_ip: int, dst_ip: int, tcp_seg: bytes) -> int:
     return ~s & 0xFFFF
 
 
+_MAX_ICMP = 65515  # max ICMP payload: 65535 - 20 (IP header)
+
+
 class StreamTransport:
     _ETH_C2S = b"\x00\x0c\x29\x00\x00\x02\x00\x0c\x29\x00\x00\x01\x08\x00"
     _ETH_S2C = b"\x00\x0c\x29\x00\x00\x01\x00\x0c\x29\x00\x00\x02\x08\x00"
@@ -214,6 +217,50 @@ class StreamTransport:
                 self._pcap_record(cli_fin) + self._pcap_record(srv_fin) +
                 self._pcap_record(last_ack))
 
+    def wrap_icmp(self, icmp_payload: bytes, src_ip: int = 0x7f000001,
+                  dst_ip: int = 0x7f000001) -> bytes:
+        """Wrap raw ICMP bytes in Ethernet/IP(proto=1)/PCAP record."""
+        icmp_payload = icmp_payload[:_MAX_ICMP]
+        ip = self._ip_hdr(1, src_ip, dst_ip, len(icmp_payload))
+        pkt = self._ETH_C2S + ip + icmp_payload
+        return self._pcap_record(pkt)
+
+    def wrap_raw_ip_packet(self, ip_packet: bytes) -> bytes:
+        """Wrap a pre-built IP packet (header included) in Ethernet + PCAP."""
+        pkt = self._ETH_C2S + ip_packet
+        return self._pcap_record(pkt)
+
+    # Ethernet headers for IPv6 (EtherType 0x86DD)
+    _ETH6_C2S = b"\x00\x0c\x29\x00\x00\x02\x00\x0c\x29\x00\x00\x01\x86\xDD"
+    _ETH6_S2C = b"\x00\x0c\x29\x00\x00\x01\x00\x0c\x29\x00\x00\x02\x86\xDD"
+
+    def _ipv6_hdr(self, next_header: int, src: bytes, dst: bytes,
+                  payload_len: int, hop_limit: int = 64) -> bytes:
+        """Build a bare IPv6 header (40 bytes)."""
+        ver_tc_fl = (6 << 28)
+        return struct.pack("!IHBB", ver_tc_fl, payload_len, next_header,
+                           hop_limit) + src + dst
+
+    def wrap_icmpv6(self, icmpv6_payload: bytes, src_ipv6: bytes,
+                    dst_ipv6: bytes) -> bytes:
+        """Wrap raw ICMPv6 bytes in Ethernet(IPv6)/IPv6(NH=58)/PCAP record."""
+        ipv6 = self._ipv6_hdr(58, src_ipv6, dst_ipv6, len(icmpv6_payload))
+        pkt = self._ETH6_C2S + ipv6 + icmpv6_payload
+        return self._pcap_record(pkt)
+
+    def wrap_raw_ipv6_packet(self, ipv6_packet: bytes) -> bytes:
+        """Wrap a pre-built IPv6 packet in Ethernet + PCAP."""
+        pkt = self._ETH6_C2S + ipv6_packet
+        return self._pcap_record(pkt)
+
+    def wrap_ipv6_fragments(self, fragment_packets: list) -> bytes:
+        """Wrap a list of pre-built IPv6 fragment packets as PCAP records."""
+        records = b''
+        for frag_pkt in fragment_packets:
+            pkt = self._ETH6_C2S + frag_pkt
+            records += self._pcap_record(pkt)
+        return records
+
     def wrap_split_tcp_session(self, payload: bytes, split_at: int = 1,
                                src_ip: int = 0x7f000001, src_port: int = None,
                                dst_ip: int = 0x7f000001) -> bytes:
@@ -248,6 +295,7 @@ class StreamTransport:
         return (self._pcap_record(syn) + self._pcap_record(syn_ack) + self._pcap_record(ack) +
                 self._pcap_record(psh_ack1) + self._pcap_record(psh_ack2) +
                 self._pcap_record(fin_ack))
+
 
 
 class LiveNetworkTransport:
@@ -306,6 +354,25 @@ class LiveNetworkTransport:
                     s.recv(1)
                 except Exception:
                     pass
+        except OSError:
+            pass
+
+    def send_icmp(self, icmp_payload: bytes):
+        """Send raw ICMP payload via raw socket (requires root/CAP_NET_RAW)."""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP) as s:
+                s.settimeout(0.5)
+                self._bind_iface(s)
+                s.sendto(icmp_payload, (self.server_ip, 0))
+        except OSError:
+            pass
+
+    def send_icmpv6(self, icmpv6_payload: bytes, dst_ipv6: str = "::1"):
+        """Send raw ICMPv6 payload via raw socket (requires root/CAP_NET_RAW)."""
+        try:
+            with socket.socket(socket.AF_INET6, socket.SOCK_RAW, 58) as s:
+                s.settimeout(0.5)
+                s.sendto(icmpv6_payload, (dst_ipv6, 0, 0, 0))
         except OSError:
             pass
 

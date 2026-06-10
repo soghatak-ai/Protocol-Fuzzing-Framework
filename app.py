@@ -22,27 +22,35 @@ from main import (fuzzer_state, event_log, reset_state, run_fuzzer, run_fuzzer_l
                   FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS,
                   HTTP_STRATEGY_NAMES, HTTP_DEFAULT_WEIGHTS,
                   SMTP_STRATEGY_NAMES, SMTP_DEFAULT_WEIGHTS,
+                  SSH_STRATEGY_NAMES, SSH_DEFAULT_WEIGHTS,
                   SMB2_STRATEGY_NAMES, SMB2_DEFAULT_WEIGHTS,
                   SMB3_STRATEGY_NAMES, SMB3_DEFAULT_WEIGHTS,
                   HTTP2_STRATEGY_NAMES, HTTP2_DEFAULT_WEIGHTS,
                   DCERPC_STRATEGY_NAMES, DCERPC_DEFAULT_WEIGHTS,
                   DHCP_STRATEGY_NAMES, DHCP_DEFAULT_WEIGHTS,
                   DHCPV6_STRATEGY_NAMES, DHCPV6_DEFAULT_WEIGHTS,
-                  dns_bandit, ftp_bandit, http_bandit, smtp_bandit,
+                  SNMP_STRATEGY_NAMES, SNMP_DEFAULT_WEIGHTS,
+                  ICMP_STRATEGY_NAMES, ICMP_DEFAULT_WEIGHTS,
+                  ICMPV6_STRATEGY_NAMES, ICMPV6_DEFAULT_WEIGHTS,
+                  dns_bandit, ftp_bandit, http_bandit, smtp_bandit, ssh_bandit,
                   smb2_bandit, smb3_bandit, http2_bandit, dcerpc_bandit, dhcp_bandit,
-                  dhcpv6_bandit)
+                  dhcpv6_bandit, snmp_bandit, icmp_bandit, icmpv6_bandit)
 from protocol.ftp import FTP_STRATEGY_LABELS
 from protocol.http import HTTP_STRATEGY_LABELS
 from protocol.smtp import SMTP_STRATEGY_LABELS
+from protocol.ssh import SSH_STRATEGY_LABELS
 from protocol.smb import SMB2_STRATEGY_LABELS, SMB3_STRATEGY_LABELS
 from protocol.http2 import HTTP2_STRATEGY_LABELS
 from protocol.dcerpc import DCERPC_STRATEGY_LABELS
 from protocol.dhcp import DHCP_STRATEGY_LABELS
 from protocol.dhcpv6 import DHCPV6_STRATEGY_LABELS
+from protocol.snmp import SNMP_STRATEGY_LABELS
+from protocol.icmp import ICMP_STRATEGY_LABELS
+from protocol.icmpv6 import ICMPV6_STRATEGY_LABELS
 from engine.code_collector import (collect_to_dict, collect_to_single_text, VALID_EXTENSIONS,
                                     minify_code, hotspot_filter, extract_repo_map,
                                     build_optimized_context, estimate_tokens)
-from transport.file_sender import send_file_http, send_file_ftp, send_file_smtp, send_file_smb, send_file_http2, send_file_dcerpc, send_file_dhcp, send_file_dhcpv6
+from transport.file_sender import send_file_http, send_file_ftp, send_file_smtp, send_file_ssh, send_file_smb, send_file_http2, send_file_dcerpc, send_file_dhcp, send_file_dhcpv6, send_file_snmp, send_file_icmp, send_file_icmpv6
 from engine.semantic_search import index_codebase, get_all_chunks
 from engine.orchestrator import generate_tasks
 from engine.explorers import run_explorers
@@ -75,6 +83,8 @@ def _labels_for(protocol):
         return HTTP_STRATEGY_LABELS
     if protocol == "smtp":
         return SMTP_STRATEGY_LABELS
+    if protocol == "ssh":
+        return SSH_STRATEGY_LABELS
     if protocol == "smb2":
         return SMB2_STRATEGY_LABELS
     if protocol == "smb3":
@@ -87,6 +97,12 @@ def _labels_for(protocol):
         return DHCP_STRATEGY_LABELS
     if protocol == "dhcpv6":
         return DHCPV6_STRATEGY_LABELS
+    if protocol == "snmp":
+        return SNMP_STRATEGY_LABELS
+    if protocol == "icmp":
+        return ICMP_STRATEGY_LABELS
+    if protocol == "icmpv6":
+        return ICMPV6_STRATEGY_LABELS
     return DNS_STRATEGY_LABELS
 
 
@@ -97,6 +113,8 @@ def _bandit_for_proto(protocol):
         return http_bandit
     if protocol == "smtp":
         return smtp_bandit
+    if protocol == "ssh":
+        return ssh_bandit
     if protocol == "smb2":
         return smb2_bandit
     if protocol == "smb3":
@@ -109,6 +127,12 @@ def _bandit_for_proto(protocol):
         return dhcp_bandit
     if protocol == "dhcpv6":
         return dhcpv6_bandit
+    if protocol == "snmp":
+        return snmp_bandit
+    if protocol == "icmp":
+        return icmp_bandit
+    if protocol == "icmpv6":
+        return icmpv6_bandit
     return dns_bandit
 
 
@@ -406,6 +430,7 @@ DCE/RPC STRATEGIES (used when fuzzing DCE/RPC inspectors, e.g. Snort 3 dce_tcp /
 - record_marking_desync: TCP Record Marking (RM) attacks — RM length=0x7FFFFFFF (2GB claim), split RM header across segments, zero-length RM record, max-length RM but only 100 bytes sent, single PDU split across multiple RM records. Targets TCP framing and reassembly. Triggers: oob-read, integer-overflow, buffer-overflow
 - multi_bind_ack_confusion: BIND/BIND_ACK state confusion — BIND on ctx 0 then REQUEST on ctx 99, BIND with EPM+SRVSVC+SAMR simultaneously, client spoofing BIND_ACK, double BIND for different interfaces, BIND_NAK then REQUEST anyway. Targets connection state tracking. Triggers: state-corruption, oob-read, use-after-free
 - uuid_manipulation: Interface UUID manipulation — all-zero UUIDs, all-0xFF UUIDs, 20 random high-entropy UUIDs, known UUIDs with wrong versions (0 and 0xFFFF), same UUID repeated 50 times. Targets UUID matching and interface lookup. Triggers: state-corruption, oob-read, null-deref
+- connection_state_uaf: CVE-2026-20026/CVE-2026-20027 — sustained multi-REQUEST flood on an established connection targeting buffer lifecycle bugs: 200-500 REQUESTs with escalating call_ids (free-list stress), interleaved ALTER_CONTEXT+REQUEST (context table realloc UAF), same call_id reused 300× (tracking state collision), rapid context_id switching with OOB ids (0-9 when only 0-7 bound), stub size oscillation tiny↔huge (realloc OOB read), REQUEST+CO_CANCEL+immediate reuse (freed tracking state access), 300 random opnum storm (dispatch table confusion), 400 first-fragments-only (reassembly state never freed → stale pointer read on flush). Targets per-call and per-context buffer allocation/deallocation in the DCE/RPC inspector. Triggers: use-after-free, oob-read, crash, info-leak
 
 DHCP STRATEGIES (used when fuzzing DHCPv4 inspectors — UDP ports 67/68, BOOTP+options format):
 - rogue_server_attack: Rogue DHCPOFFER/DHCPACK with attacker-controlled gateway/DNS/WPAD/NTP — gateway redirect, DNS hijack, WPAD proxy injection, full MITM (all services redirected), rapid offer racing, NAK-then-offer forcing client back to INIT. Targets rogue server detection. Triggers: evasion, state-corruption, configuration-hijack
@@ -438,6 +463,70 @@ DHCPv6 STRATEGIES (used when fuzzing DHCPv6 inspectors — UDP ports 546/547, 4-
 - prefix_delegation_abuse: IA_PD specific attacks — /0 prefix (entire address space), /128 prefix (single address), duplicate IAID across IA_PD options, IPv4-mapped IPv6 prefix (::ffff:10.0.0.0/96), overlapping prefix requests, 100 mass IA_PD requests. Targets prefix delegation handling. Triggers: oob-read, resource-exhaustion, state-corruption
 - multiprotocol_evasion: Cross-protocol and encapsulation attacks — DHCPv4-in-DHCPv6 (DHCPV4-QUERY msg-type 20, RFC 7341), invalid message types (0, 24, 50, 128, 255), STARTTLS (msg-type 23) on UDP (should be TCP per RFC 7653), unauthorized LEASEQUERY, Relay Message option inside client message, msg-type=0 (undefined). Targets protocol classification. Triggers: evasion, state-corruption
 - elapsed_time_preference_fuzz: Elapsed Time and Preference option edge cases — elapsed=0xFFFF (max 655.35s), elapsed=0 in non-initial Renew, Preference in non-Advertise Solicit, multiple Elapsed Time options, unknown status codes (7, 100, 0xFFFF), 64KB oversized status-message. Targets option validation. Triggers: integer-overflow, oob-read, state-corruption
+
+SSH STRATEGIES (used when fuzzing SSH inspectors, e.g. Snort 3 ssh — the inspector only parses the UNENCRYPTED handshake on port 22: version exchange, binary packet protocol, KEXINIT/KEXDH/NEWKEYS; gid 135 events):
+- version_overflow: SSH identification-string abuse (RFC 4253 §4.2: max 255 chars incl. CR LF, no NUL) — giant softwareversion/comments, no CRLF terminator, embedded NUL, bare-LF, extra dashes splitting protoversion. Targets the version-string buffer (max_server_version_len). Triggers: buffer-overflow, oob-read, evasion (135:3 SECURECRT, 135:7 VERSION)
+- version_confusion: protocol version mismatch/downgrade (RFC 4253 §5) — SSH-1.5 banner then SSH2 body, "1.99" compatibility confusion, malformed protoversion (9.9/2/./2.0.0), missing "SSH-" magic, SSH2-then-SSH1-packet, double version line. Targets version detection and the SSH1<->SSH2 state machine. Triggers: state-corruption, evasion, null-deref (135:4 PROTOMISMATCH)
+- banner_flood: pre-version line abuse (server MAY send lines before the version string, which MUST NOT begin with "SSH-") — thousands of pre-lines, one giant pre-line, unterminated pre-data, illegal "SSH-"-prefixed pre-lines, bare-CR lines, NUL lines. Targets pre-version line buffering/reassembly. Triggers: memory-exhaustion, oob-read, state-corruption
+- packet_length_attack: binary-packet packet_length (uint32) field torture (RFC 4253 §6) — 0xFFFFFFFF, 0, 1, ~16MB declared with few bytes, packet_length vs padding_length underflow (payload_len = packet_length - padding_length - 1), length>>actual, genuinely-huge well-formed packet. Targets the length field and the payload_len computation. Triggers: integer-overflow, integer-underflow, oob-read, heap-overflow (135:6 PAYLOAD_SIZE)
+- padding_corruption: padding_length byte abuse (RFC 4253 §6: MUST be 4..255, total a multiple of the block size) — padding=0, <4, 255 with small packet, padding>packet, padding==packet_length (payload_len=-1), total not a block multiple. Targets padding subtraction. Triggers: integer-underflow, oob-read, buffer-overflow (135:6 PAYLOAD_SIZE)
+- kexinit_namelist_overflow: KEXINIT name-list (uint32 length-prefixed) parser abuse (RFC 4253 §7.1) — first name-list claims 0xFFFFFFFF with few bytes (OOB read), thousands of algorithm names, one 50KB name, all 10 lists zero-length, name-list length past packet boundary, names with embedded NUL/comma/control chars, every list a count flood. Targets KEXINIT parsing and allocation. Triggers: oob-read, memory-exhaustion, heap-overflow
+- challenge_response_overflow: CVE-2002-1357 Challenge-Response Buffer Overflow — the client sends more than max_client_bytes (default 19600) BEFORE key exchange completes: one giant pre-KEX packet, many medium packets with no NEWKEYS, a KEXDH_INIT whose mpint alone exceeds the limit, a slow drip of tiny packets past the threshold. Targets the pre-KEX byte accounting. Triggers: buffer-overflow, resource-exhaustion (135:1 RESPOVERFLOW)
+- crc32_attack: CVE-2001-0144 SSH1 CRC32 compensation attack — SSH-1.5 banner then SSH1 packets with oversized length, many identical 8-byte padding blocks (the deattack heuristic), all-zero blocks, malformed SSH_CMSG_SESSION_KEY. Targets the SSH1 CRC32 deattack detector. Triggers: integer-overflow, oob-read, buffer-overflow (135:2 CRC32)
+- kexdh_mpint_overflow: KEXDH_INIT/REPLY mpint & string length parsing (RFC 4253 §8) — mpint declares 0xFFFFFFFF length with few bytes, negative mpint (high bit set), zero-length mpint, unnecessary leading zeros, KEXDH_REPLY (server-only) from client with giant host-key/signature strings, mpint length past packet boundary. Targets the bignum/string parser. Triggers: oob-read, integer-overflow, heap-overflow (135:5 WRONGDIR)
+- state_machine_desync: out-of-order / wrong-direction key-exchange messages (RFC 4253 §7) — KEXDH_INIT before KEXINIT, premature NEWKEYS, triple KEXINIT, SERVICE_REQUEST before NEWKEYS, server-only SERVICE_ACCEPT from client, NEWKEYS then cleartext KEX, KEXINIT storm. Targets the inspector's KEX state tracking. Triggers: state-corruption, evasion, null-deref (135:5 WRONGDIR)
+- encrypted_packet_evasion: abuse max_encrypted_packets (default 25 — the inspector stops deep inspection after this many encrypted packets) — complete a fake KEX then push >25 "encrypted" packets so Snort gives up, then send an overflow that should now be missed; rapid NEWKEYS; post-encryption overflow; many small encrypted packets. Targets the inspect-then-give-up lifecycle. Triggers: evasion, state-corruption
+- disconnect_desync: transport-layer message abuse (RFC 4253 §11) — data after DISCONNECT, SSH_MSG_IGNORE flood, SSH_MSG_DEBUG with a huge message, SSH_MSG_UNIMPLEMENTED storm, DISCONNECT with reason 0xFFFFFFFF + oversized description, DEBUG with terminal-control escapes. Targets transport message handling and post-disconnect tracking. Triggers: state-corruption, oob-read, evasion
+- guess_kex_confusion: KEX guessing logic (RFC 4253 §7.1) — first_kex_packet_follows=1 with a guessed packet that won't match, all-zero / all-0xFF cookie, the trailing reserved uint32 set non-zero, multiple guessed packets, a guessed packet with an oversized mpint. Targets the "ignore the wrongly-guessed packet" branch and cookie/reserved validation. Triggers: state-corruption, oob-read
+- gex_group_attack: Diffie-Hellman Group Exchange (RFC 4419) integer/bignum parser — GEX_REQUEST with min>max, n=0xFFFFFFFF, all-zero min/n/max, GEX_GROUP with an oversized prime p, GEX_REQUEST_OLD with max n, GEX_INIT with an oversized e, GEX_GROUP with negative p/g. Targets the group-exchange parser (distinct from fixed group1/group14 DH). Triggers: integer-overflow, oob-read, heap-overflow
+
+SNMP STRATEGIES (used when fuzzing SNMP stacks/agents — UDP 161 requests, 162 traps. Snort 3 has NO dedicated SNMP inspector: detection is via gid-1 text rules (community public/private sid 1407-1410, request/trap sid 1417-1420) plus whatever BER/ASN.1 decoding runs. Canonical fuzz corpus is PROTOS c06-SNMPv1, CVE-2002-0012/0013):
+- ber_length_overflow: BER length-field integer overflow — long-form length declaring 0xFFFFFFFF/0x7FFFFFFF bytes with a tiny body, 5-octet length (0x85, illegal), length > remaining buffer at SEQUENCE/OCTET-STRING/INTEGER/VarBind/PDU level, 64-bit length that wraps when added to the read offset. Targets the length-parsing arithmetic. Triggers: integer-overflow, heap-overflow, oob-read
+- ber_indefinite_nonminimal: Indefinite-length form (0x80 + EOC, ambiguous for SNMP) and redundant non-minimal length octets (RFC 3417 explicitly permits non-minimal lengths: 0x81 0x06, 0x83 00 00 06, 4-octet long form everywhere). Snort and the target disagree on field boundaries. Triggers: evasion, state-corruption, oob-read
+- truncated_tlv: Declared length exceeds the bytes actually present at every nesting level — outer SEQUENCE body halved, community/PDU/VarBind-SEQUENCE/OID/INTEGER claim more than supplied, OID then no value. OOB read past the packet end. Triggers: oob-read, crash
+- version_pdu_confusion: version INTEGER abuse + version/PDU mismatch — negative version (-1), 8-byte huge version, 0-length INTEGER (illegal), v1(version=0) carrying a GetBulk[A5] (v2-only) PDU, msgVersion=3 with a v1 community wrapper, unknown version 99, non-minimal padded version. Downgrade + dispatcher state confusion. Triggers: state-corruption, evasion, null-deref
+- getbulk_amplification: GetBulkRequest[A5] resource exhaustion — max-repetitions=0x7FFFFFFF, non-repeaters=0x7FFFFFFF, negative non-repeaters, 400-OID lists, non-repeaters > varbind count, 9-byte oversized max-repetitions (RFC 3416 max-bindings=2147483647). Forces enormous responses (amplification DoS). Triggers: resource-exhaustion, integer-overflow, dos
+- oid_encoding_attack: OID parser abuse — >128 sub-identifiers (RFC 3416 limit), sub-id > 2^32-1 (5-byte base-128), overlong non-minimal encoding (leading 0x80 continuation bytes), unterminated sub-id (high bit set on last byte), empty OID (length 0), giant 0xFFFFFFFF sub-ids, invalid first byte 0xFF. OID parser integer overflow. Triggers: integer-overflow, oob-read, buffer-overflow
+- varbind_bomb: VarBindList abuse — 2000-varbind flood, response-only exception tags (noSuchObject[80]/noSuchInstance[81]/endOfMibView[82]) inside a request, type-confused values (nested PDU/OID where a scalar is expected), 40KB OCTET-STRING values, zero-length varbind SEQUENCEs, deeply nested value. Memory exhaustion + type confusion. Triggers: memory-exhaustion, type-confusion, oob-read
+- trap_v1_malform: SNMPv1 Trap-PDU[A4] torture (the historically broken parser, PROTOS c06 / CVE-2002-0012) sent to UDP 162 — agent-addr IpAddress not 4 bytes (0/16), generic-trap out of 0..6 range (huge/negative), malformed enterprise OID, oversized specific-trap, >32-bit TimeTicks, missing fields, oversized varbinds, empty-field 'protos_classic'. Triggers: buffer-overflow, integer-overflow, dos
+- integer_field_overflow: INTEGER encoding abuse across request-id/error-status/error-index and application integers — 9-byte request-id (>64-bit), 0-length INTEGER (illegal), error-status outside 0..18 (0xFFFF), 10-byte Counter64 (>64-bit), negative via padding, non-minimal leading-zero integer, huge error-index. Integer parser overflow. Triggers: integer-overflow, oob-read
+- community_overflow: community OCTET-STRING abuse — 40KB oversized, embedded NUL bytes, format-string (%n%s%x), the rule-tripping 'public'/'private', zero-length community, random binary, length-field lie (declares 4, supplies more). Buffer overflow + Snort rule evasion. Triggers: buffer-overflow, evasion, format-string
+- nested_sequence_bomb: Deeply nested SEQUENCE-of-SEQUENCE (1500 levels), deep VarBind nesting (800), alternating SEQUENCE/context tags (600), wide-then-deep. Exhausts recursive-descent BER parsers. Triggers: stack-overflow, resource-exhaustion, crash
+- v3_header_malform: SNMPv3 HeaderData / dispatcher abuse — invalid msgFlags (0x02 priv-without-auth reserved, 0xFF), unknown msgSecurityModel (0/99/huge), msgMaxSize < 484 (RFC violation), 6-byte huge msgMaxSize, truncated msgGlobalData, ScopedPduData CHOICE confusion (encryptedPDU where plaintext expected), msgFlags wrong OCTET-STRING size. Triggers: state-corruption, oob-read, evasion
+- usm_param_overflow: USM UsmSecurityParameters abuse (RFC 3414/3411 size bounds) — msgUserName > 32 bytes (SIZE 0..32), engineID > 32 / < 5 bytes (SIZE 5..32), oversized auth params (≠12), oversized priv params (≠8), engineBoots/engineTime > 2^31, truncated inner SEQUENCE, all-oversize. USM parser buffer overflow. Triggers: buffer-overflow, integer-overflow, oob-read
+- engineid_scopedpdu_abuse: engineID discovery (RFC 5343) + ScopedPDU context-field abuse — empty-engineID/empty-user discovery, invalid engineID format byte (0x00/0x7F/0xFF), 20KB contextEngineID, 20KB contextName, NUL-laden contextName, client-sent Report-PDU[A8] (engine-to-engine only), scopedPDU SEQUENCE length mismatch. Triggers: state-corruption, oob-read, dos
+
+ICMP STRATEGIES (used when fuzzing ICMPv4 processing — IP protocol 1, Snort 3 GID 124 ICMP4 / GID 116 IP decoder / GID 123 frag3):
+- fragment_reassembly_evasion: IP fragmentation of ICMP packets — overlapping fragments (BSD vs Windows reassembly policy disagreement), tiny fragments splitting ICMP header across boundary (itype/icode rules can't match), out-of-order delivery, duplicate first fragments, fragment chains with gaps, oversized reassembled total exceeding 65535. Targets IP defrag engine. Triggers: oob-read, heap-overflow, evasion, memory-corruption
+- embedded_header_confusion: ICMP error messages (type 3/11/12) carry the "original datagram" IP+8 bytes — malformed embedded IP header (IHL=0/15, protocol mismatch, truncated), embedded header contradicting outer header (different src/dst IP), embedded TCP/UDP ports crafted to confuse 5-tuple tracking, oversized embedded payload (>576 bytes), embedded header with IP options shifting the ICMP data offset. Targets error-message inner-header parser. Triggers: oob-read, state-corruption, type-confusion
+- type_code_matrix_attack: Full type×code combinatorial sweep including undefined/reserved pairs — type 0-255 × code 0-255, emphasis on rarely-tested types (type 40 Photuris, type 42 Extended Echo, type 253/254 experimental), valid types with invalid codes (Echo Reply code=255), type 3 with code>15 (undefined Destination Unreachable sub-codes). Targets type/code dispatch and validation. Triggers: oob-read, null-deref, state-corruption
+- checksum_desync: ICMP checksum manipulation — correct checksum (baseline), intentionally wrong checksum (IDS may drop while target accepts with offloading), checksum=0x0000 (special?), checksum=0xFFFF, near-miss checksum (off by 1), checksum computed over truncated packet. IDS/target disagreement on validity. Triggers: evasion, state-corruption
+- redirect_route_injection: ICMP Redirect (type 5) with crafted gateway addresses — redirect to attacker IP, redirect to 127.0.0.1 (loopback), redirect to multicast/broadcast, code 0-3 (network/host/ToS+network/ToS+host), oversized embedded original datagram, rapid redirect flood from spoofed router IP. Targets route table manipulation detection. Triggers: evasion, state-corruption, route-hijack
+- tunnel_payload_evasion: ICMP Echo payloads carrying covert protocol data — DNS query in echo payload, HTTP request in echo payload, shellcode/NOP sled pattern, ICMP-over-ICMP nesting, payload matching IDS content rules but inside ICMP data field (cross-protocol evasion), oversized echo data (>1400 bytes). Targets deep inspection of ICMP payload. Triggers: evasion, oob-read
+- pmtud_blackhole: Path MTU Discovery abuse via ICMP type 3 code 4 (Fragmentation Needed) — next-hop MTU=0 (implementation-dependent), MTU=68 (minimum), MTU=1 (absurd), MTU > outer packet size (invalid), MTU=0xFFFF, rapid PMTUD messages from spoofed intermediate routers, embedded packet not matching any active flow. Targets PMTUD state tracking. Triggers: integer-overflow, state-corruption, dos
+- unreachable_state_exhaustion: ICMP Destination Unreachable (type 3) flood with unique embedded 5-tuples — each message references a different src_ip/dst_ip/src_port/dst_port/proto, forcing the IDS to look up/create state entries for flows that don't exist, mixed sub-codes (port/host/network/admin unreachable), rapid burst of 500+ unique entries. Targets connection tracking state table. Triggers: memory-exhaustion, state-corruption, dos
+- ip_option_header_shift: IP header with options before the ICMP payload — Record Route (type 7), Timestamp (type 68), Loose/Strict Source Route (type 131/137), Security (type 130), maximum IHL=15 (60-byte IP header), multiple options filling all 40 option bytes, options with invalid lengths, NOP padding patterns. Shifts the ICMP payload offset; IDS may read wrong bytes as ICMP header. Triggers: oob-read, evasion, buffer-overflow
+- ping_of_death_reassembly: Classic Ping of Death (CVE-1999-0128) and modern variants — fragment chain whose reassembled total exceeds 65535 bytes (IP length overflow), last fragment with offset+size > 65535, Jolt2-style identical fragments, teardrop-style negative fragment length, land attack (src=dst IP) with oversized echo. Targets IP reassembly buffer allocation. Triggers: integer-overflow, heap-overflow, dos
+- rate_limit_bypass: Circumvent ICMP rate limiting — slow drip below threshold (1 pkt/sec), burst then pause pattern, mixed ICMP types to avoid per-type counters, source IP rotation across /24, alternating echo request/reply direction, fragmented ICMP (fragments may bypass ICMP rate counter since type isn't visible until reassembly). Targets rate-limiting logic. Triggers: evasion, threshold-bypass
+- echo_id_seq_desync: ICMP Echo identifier/sequence number tracking confusion — ID=0, ID=0xFFFF, seq=0xFFFF, ID reuse across different source IPs, rapid ID cycling (0-1000), seq number going backwards, matching echo reply for non-existent request, ID/seq mismatch between request and reply. Targets session/flow tracking. Triggers: state-corruption, evasion
+- source_quench_deprecated: ICMP Source Quench (type 4, deprecated by RFC 6633) — some IDS still parse it, others ignore; valid source quench with embedded datagram, source quench with all codes (0-255, only 0 is defined), oversized embedded data, rapid flood. Tests deprecated-type handling code paths. Triggers: state-corruption, oob-read, evasion
+- timestamp_address_mask_probe: ICMP Timestamp (type 13/14) and Address Mask (type 17/18) requests/replies — information-leak probes that reveal host uptime/clock and subnet mask; malformed timestamp fields (originate=0xFFFFFFFF, oversized payload), address mask with wrong length, types 15/16 (Information Request/Reply, obsolete), rapid probe sweep. Targets rarely-exercised parser branches. Triggers: oob-read, info-leak, state-corruption
+
+ICMPv6 STRATEGIES (used when fuzzing ICMPv6 processing — IP protocol 58, Snort 3 GID 125 ICMP6 / GID 116 IP decoder):
+- ndp_ra_spoofing: Rogue Router Advertisement injection — spoofed RA with crafted prefix info (rogue /64 prefix, zero-lifetime flush, MTU manipulation to force fragmentation, RDNSS injection for DNS hijack), SLLA option with attacker MAC, multiple prefix options with conflicting flags (L/A/R). Targets NDP RA parser and SLAAC autoconfiguration. Triggers: route-hijack, dns-hijack, evasion, state-corruption
+- ndp_ns_na_confusion: Neighbor Solicitation/Advertisement manipulation — NA with Override+Solicited flags on unsolicited messages, NS with invalid hop limit (≠255), target address spoofing (link-local vs global confusion), TLLA option with broadcast MAC, DAD interference (NA for tentative address), rapid NS/NA flood with rotating addresses. Targets NDP neighbor cache and DAD. Triggers: cache-poisoning, state-corruption, dos
+- ndp_option_tlv_overflow: NDP option TLV abuse — oversized option (length=255, 2040 bytes), zero-length option (infinite loop in parsers), option length exceeding packet boundary, deeply nested/chained options, unknown option types (128-255), option with length=0 causing division-by-zero in 8-byte unit calculation. Targets NDP option parser. Triggers: buffer-overflow, oob-read, infinite-loop, crash
+- fragment_header_evasion: IPv6 Fragment Header (NH=44) abuse — overlapping fragments (RFC 5722 violation), atomic fragments (M=0, offset=0), tiny first fragment hiding ICMPv6 type/code, out-of-order delivery, fragment ID reuse, reassembled size exceeding 65535, fragment chain with conflicting Next Header values. Targets IPv6 fragment reassembly engine. Triggers: heap-overflow, oob-read, evasion, memory-corruption
+- extension_header_chain: IPv6 extension header chain manipulation — long chains (HbH→Dst→Routing→Fragment→AH→ESP→Dst→ICMPv6), duplicate extension headers (RFC 8200 violation), unknown Next Header values (143-252), Hop-by-Hop with oversized PadN/unknown options, Routing Header type 0 (deprecated, source routing), Destination Options with huge TLV. Targets extension header chain parser. Triggers: stack-overflow, evasion, oob-read, resource-exhaustion
+- pseudo_header_checksum_desync: ICMPv6 checksum uses IPv6 pseudo-header (src+dst+length+NH=58) — correct checksum baseline, intentionally wrong checksum (IDS drops but target with offloading accepts), checksum=0x0000 (special per RFC), near-miss off-by-one, checksum computed with wrong source address, checksum over truncated payload, upper-layer length mismatch in pseudo-header. IDS/target checksum disagreement. Triggers: evasion, state-corruption
+- mld_multicast_abuse: Multicast Listener Discovery v1/v2 (types 130-132, 143) abuse — MLDv1 Report/Done for sensitive groups (ff02::1, ff02::2, ff02::fb), MLDv2 Report with oversized number of group records, MLD with source address not link-local (RFC violation), MLD Query with max response code manipulation, forged Done messages to trigger group leave, oversized auxiliary data in MLDv2 records. Targets MLD state machine. Triggers: state-corruption, dos, evasion
+- packet_too_big_pmtud: ICMPv6 Packet Too Big (type 2) PMTUD manipulation — MTU=0 (implementation-dependent), MTU=1280 (IPv6 minimum, forces fragmentation), MTU=1 (absurd), MTU > original packet (invalid), MTU=0xFFFFFFFF, rapid PTB from spoofed intermediate routers, embedded packet not matching any active flow. Targets PMTUD state tracking. Triggers: integer-overflow, state-corruption, dos
+- parameter_problem_pointer: ICMPv6 Parameter Problem (type 4) with crafted pointer — pointer=0 (version field), pointer=4 (payload length), pointer=6 (next header), pointer=7 (hop limit), pointer=40+ (into extension headers), pointer beyond packet length (oob read trigger), all three codes (erroneous header/unrecognized NH/unrecognized option), embedded packet with malformed extension headers. Targets error-message inner-packet parser. Triggers: oob-read, state-corruption, crash
+- echo_tunnel_covert_channel: ICMPv6 Echo Request/Reply (types 128/129) payload abuse — DNS query in echo payload, HTTP request in echo payload, shellcode/NOP sled, ICMPv6-over-ICMPv6 nesting, payload matching IDS content rules inside echo data (cross-protocol evasion), oversized echo data (>1400 bytes), echo with IPv6 extension headers before ICMPv6. Targets deep payload inspection. Triggers: evasion, oob-read
+- redirect_route_hijack: ICMPv6 Redirect (type 137) manipulation — redirect target to attacker link-local, redirect to multicast address, redirect with options containing spoofed TLLA, redirect for off-link destinations (RFC violation), rapid redirect flood from spoofed router, embedded original packet manipulation. Targets route table and neighbor cache manipulation detection. Triggers: route-hijack, cache-poisoning, evasion
+- dest_unreachable_state_exhaustion: ICMPv6 Destination Unreachable (type 1) flood with unique embedded 5-tuples — each message references different src/dst IPv6 + ports + NH, forcing IDS to look up/create state entries for non-existent flows, mixed codes (no-route/admin-prohibited/beyond-scope/addr-unreachable/port-unreachable/src-addr-failed/reject-route), burst of 500+ unique entries. Targets connection tracking state table. Triggers: memory-exhaustion, state-corruption, dos
+- hop_limit_manipulation: IPv6 Hop Limit field abuse — hop_limit=0 (should be discarded), hop_limit=1 (link-local only), hop_limit=255 (NDP requirement, valid for on-link), ICMPv6 messages with wrong hop limit for their type (Echo with HL=1, RA with HL≠255), Time Exceeded (type 3) generation trigger, mixed hop limits in fragment chain. Targets hop limit validation and time-exceeded generation. Triggers: evasion, state-corruption
+- rpl_dao_dis_attack: RPL (Routing Protocol for Low-Power Networks, RFC 6550) ICMPv6 message abuse — RPL DIS (type 155 code 0) flood, DAO (code 2) with crafted RPL Instance ID and DODAG ID, oversized RPL options, RPL messages outside LLN context (sent to general IPv6 infrastructure), DIO (code 1) with conflicting rank/version, Security section with invalid algorithm. Targets RPL-aware IDS parsers processing ICMPv6 type 155. Triggers: state-corruption, oob-read, evasion, crash
 """
 
 # ---------------------------------------------------------------------------
@@ -552,19 +641,23 @@ SEVERITY_MULTIPLIERS = {
 
 def compute_weights_from_vulns(verified_vulns):
     """Deterministic weight computation from verified vulnerabilities.
-    Returns (dns_weights, ftp_weights, http_weights, smtp_weights, smb2_weights, smb3_weights, http2_weights, dcerpc_weights, dhcp_weights, dhcpv6_weights, reasoning_str)."""
+    Returns (dns_weights, ftp_weights, http_weights, smtp_weights, ssh_weights, smb2_weights, smb3_weights, http2_weights, dcerpc_weights, dhcp_weights, dhcpv6_weights, snmp_weights, icmp_weights, icmpv6_weights, reasoning_str)."""
 
     # Start with default weights
     dns_w = dict(zip(DNS_STRATEGY_NAMES, DNS_DEFAULT_WEIGHTS))
     ftp_w = dict(zip(FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS))
     http_w = dict(zip(HTTP_STRATEGY_NAMES, HTTP_DEFAULT_WEIGHTS))
     smtp_w = dict(zip(SMTP_STRATEGY_NAMES, SMTP_DEFAULT_WEIGHTS))
+    ssh_w = dict(zip(SSH_STRATEGY_NAMES, SSH_DEFAULT_WEIGHTS))
     smb2_w = dict(zip(SMB2_STRATEGY_NAMES, SMB2_DEFAULT_WEIGHTS))
     smb3_w = dict(zip(SMB3_STRATEGY_NAMES, SMB3_DEFAULT_WEIGHTS))
     http2_w = dict(zip(HTTP2_STRATEGY_NAMES, HTTP2_DEFAULT_WEIGHTS))
     dcerpc_w = dict(zip(DCERPC_STRATEGY_NAMES, DCERPC_DEFAULT_WEIGHTS))
     dhcp_w = dict(zip(DHCP_STRATEGY_NAMES, DHCP_DEFAULT_WEIGHTS))
     dhcpv6_w = dict(zip(DHCPV6_STRATEGY_NAMES, DHCPV6_DEFAULT_WEIGHTS))
+    snmp_w = dict(zip(SNMP_STRATEGY_NAMES, SNMP_DEFAULT_WEIGHTS))
+    icmp_w = dict(zip(ICMP_STRATEGY_NAMES, ICMP_DEFAULT_WEIGHTS))
+    icmpv6_w = dict(zip(ICMPV6_STRATEGY_NAMES, ICMPV6_DEFAULT_WEIGHTS))
 
     reasoning_lines = ["Weight computation (deterministic formula):"]
     reasoning_lines.append(f"  Starting from default weights. {len(verified_vulns)} verified vulnerabilities.")
@@ -603,6 +696,12 @@ def compute_weights_from_vulns(verified_vulns):
             reasoning_lines.append(
                 f"  SMTP/{strat}: {old:.1f} × {effective_mult:.2f} "
                 f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {smtp_w[strat]:.1f}")
+        elif strat in ssh_w:
+            old = ssh_w[strat]
+            ssh_w[strat] = old * effective_mult
+            reasoning_lines.append(
+                f"  SSH/{strat}: {old:.1f} × {effective_mult:.2f} "
+                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {ssh_w[strat]:.1f}")
         elif strat in smb2_w:
             old = smb2_w[strat]
             smb2_w[strat] = old * effective_mult
@@ -642,6 +741,24 @@ def compute_weights_from_vulns(verified_vulns):
             reasoning_lines.append(
                 f"  DHCPv6/{strat}: {old:.1f} × {effective_mult:.2f} "
                 f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {dhcpv6_w[strat]:.1f}")
+        elif strat in snmp_w:
+            old = snmp_w[strat]
+            snmp_w[strat] = old * effective_mult
+            reasoning_lines.append(
+                f"  SNMP/{strat}: {old:.1f} × {effective_mult:.2f} "
+                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {snmp_w[strat]:.1f}")
+        elif strat in icmp_w:
+            old = icmp_w[strat]
+            icmp_w[strat] = old * effective_mult
+            reasoning_lines.append(
+                f"  ICMP/{strat}: {old:.1f} × {effective_mult:.2f} "
+                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {icmp_w[strat]:.1f}")
+        elif strat in icmpv6_w:
+            old = icmpv6_w[strat]
+            icmpv6_w[strat] = old * effective_mult
+            reasoning_lines.append(
+                f"  ICMPv6/{strat}: {old:.1f} × {effective_mult:.2f} "
+                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {icmpv6_w[strat]:.1f}")
         else:
             reasoning_lines.append(f"  WARNING: strategy '{strat}' not recognized, skipping")
 
@@ -668,6 +785,12 @@ def compute_weights_from_vulns(verified_vulns):
     if smtp_total > 0:
         smtp_w = {s: round(v / smtp_total * 100, 1) for s, v in smtp_w.items()}
     reasoning_lines.append(f"  SMTP normalized (sum was {smtp_total:.1f})")
+
+    # Normalize SSH to sum=100
+    ssh_total = sum(ssh_w.values())
+    if ssh_total > 0:
+        ssh_w = {s: round(v / ssh_total * 100, 1) for s, v in ssh_w.items()}
+    reasoning_lines.append(f"  SSH normalized (sum was {ssh_total:.1f})")
 
     # Normalize SMB2 to sum=100
     smb2_total = sum(smb2_w.values())
@@ -705,7 +828,25 @@ def compute_weights_from_vulns(verified_vulns):
         dhcpv6_w = {s: round(v / dhcpv6_total * 100, 1) for s, v in dhcpv6_w.items()}
     reasoning_lines.append(f"  DHCPv6 normalized (sum was {dhcpv6_total:.1f})")
 
-    return dns_w, ftp_w, http_w, smtp_w, smb2_w, smb3_w, http2_w, dcerpc_w, dhcp_w, dhcpv6_w, "\n".join(reasoning_lines)
+    # Normalize SNMP to sum=100
+    snmp_total = sum(snmp_w.values())
+    if snmp_total > 0:
+        snmp_w = {s: round(v / snmp_total * 100, 1) for s, v in snmp_w.items()}
+    reasoning_lines.append(f"  SNMP normalized (sum was {snmp_total:.1f})")
+
+    # Normalize ICMP to sum=100
+    icmp_total = sum(icmp_w.values())
+    if icmp_total > 0:
+        icmp_w = {s: round(v / icmp_total * 100, 1) for s, v in icmp_w.items()}
+    reasoning_lines.append(f"  ICMP normalized (sum was {icmp_total:.1f})")
+
+    # Normalize ICMPv6 to sum=100
+    icmpv6_total = sum(icmpv6_w.values())
+    if icmpv6_total > 0:
+        icmpv6_w = {s: round(v / icmpv6_total * 100, 1) for s, v in icmpv6_w.items()}
+    reasoning_lines.append(f"  ICMPv6 normalized (sum was {icmpv6_total:.1f})")
+
+    return dns_w, ftp_w, http_w, smtp_w, ssh_w, smb2_w, smb3_w, http2_w, dcerpc_w, dhcp_w, dhcpv6_w, snmp_w, icmp_w, icmpv6_w, "\n".join(reasoning_lines)
 
 # AI analysis state
 analysis_state = {
@@ -832,7 +973,7 @@ def api_start():
 
     body = request.json or {}
     protocol = body.get("protocol", "dns").lower()
-    if protocol not in ("dns", "ftp", "http", "smtp", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6"):
+    if protocol not in ("dns", "ftp", "http", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6"):
         protocol = "dns"
     mode = body.get("mode", "pipe").lower()
     live_config = body.get("live_config", {})
@@ -947,14 +1088,14 @@ def api_filesend_send():
         return jsonify({"error": "No files provided"}), 400
 
     protocol = (request.form.get("protocol") or "http").lower().strip()
-    if protocol not in ("http", "ftp", "smtp", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6"):
-        return jsonify({"error": "protocol must be 'http', 'ftp', 'smtp', 'smb2', 'smb3', 'http2', 'dcerpc', 'dhcp', or 'dhcpv6'"}), 400
+    if protocol not in ("http", "ftp", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp"):
+        return jsonify({"error": "protocol must be 'http', 'ftp', 'smtp', 'ssh', 'smb2', 'smb3', 'http2', 'dcerpc', 'dhcp', 'dhcpv6', 'snmp', or 'icmp'"}), 400
 
     host = (request.form.get("host") or "").strip()
     if not host:
         return jsonify({"error": "Target host is required"}), 400
 
-    default_port = {"http": 80, "ftp": 21, "smtp": 25, "smb2": 445, "smb3": 445, "http2": 80, "dcerpc": 135, "dhcp": 67, "dhcpv6": 547}[protocol]
+    default_port = {"http": 80, "ftp": 21, "smtp": 25, "ssh": 22, "smb2": 445, "smb3": 445, "http2": 80, "dcerpc": 135, "dhcp": 67, "dhcpv6": 547, "snmp": 161, "icmp": 0}[protocol]
     try:
         port = int(request.form.get("port") or default_port)
     except ValueError:
@@ -978,6 +1119,10 @@ def api_filesend_send():
                 subject=request.form.get("smtp_subject") or None,
                 user=request.form.get("smtp_user") or None,
                 password=request.form.get("smtp_pass") or None,
+            )
+        elif protocol == "ssh":
+            res = send_file_ssh(
+                host, port, f.filename, data,
             )
         elif protocol in ("smb2", "smb3"):
             res = send_file_smb(
@@ -1004,6 +1149,14 @@ def api_filesend_send():
             )
         elif protocol == "dhcpv6":
             res = send_file_dhcpv6(
+                host, port, f.filename, data,
+            )
+        elif protocol == "snmp":
+            res = send_file_snmp(
+                host, port, f.filename, data,
+            )
+        elif protocol == "icmp":
+            res = send_file_icmp(
                 host, port, f.filename, data,
             )
         else:
@@ -1050,14 +1203,14 @@ def api_filesend_stream():
         return jsonify({"error": "No files provided"}), 400
 
     protocol = (request.form.get("protocol") or "http").lower().strip()
-    if protocol not in ("http", "ftp", "smtp", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6"):
-        return jsonify({"error": "protocol must be 'http', 'ftp', 'smtp', 'smb2', 'smb3', 'http2', 'dcerpc', 'dhcp', or 'dhcpv6'"}), 400
+    if protocol not in ("http", "ftp", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp"):
+        return jsonify({"error": "protocol must be 'http', 'ftp', 'smtp', 'ssh', 'smb2', 'smb3', 'http2', 'dcerpc', 'dhcp', 'dhcpv6', 'snmp', or 'icmp'"}), 400
 
     host = (request.form.get("host") or "").strip()
     if not host:
         return jsonify({"error": "Target host is required"}), 400
 
-    default_port = {"http": 80, "ftp": 21, "smtp": 25, "smb2": 445, "smb3": 445, "http2": 80, "dcerpc": 135, "dhcp": 67, "dhcpv6": 547}[protocol]
+    default_port = {"http": 80, "ftp": 21, "smtp": 25, "ssh": 22, "smb2": 445, "smb3": 445, "http2": 80, "dcerpc": 135, "dhcp": 67, "dhcpv6": 547, "snmp": 161, "icmp": 0}[protocol]
     try:
         port = int(request.form.get("port") or default_port)
     except ValueError:
@@ -1117,6 +1270,8 @@ def api_filesend_stream():
                                          mail_from=opts["smtp_from"], rcpt_to=opts["smtp_to"],
                                          subject=opts["smtp_subject"], user=opts["smtp_user"],
                                          password=opts["smtp_pass"], on_packet=on_packet)
+                elif protocol == "ssh":
+                    res = send_file_ssh(host, port, fname, data, on_packet=on_packet)
                 elif protocol in ("smb2", "smb3"):
                     res = send_file_smb(host, port, fname, data,
                                         share=opts["smb_share"], username=opts["smb_user"],
@@ -1133,7 +1288,16 @@ def api_filesend_stream():
                                          on_packet=on_packet)
                 elif protocol == "dhcpv6":
                     res = send_file_dhcpv6(host, port, fname, data,
-                                            on_packet=on_packet)
+                                           on_packet=on_packet)
+                elif protocol == "snmp":
+                    res = send_file_snmp(host, port, fname, data,
+                                         on_packet=on_packet)
+                elif protocol == "icmp":
+                    res = send_file_icmp(host, port, fname, data,
+                                         on_packet=on_packet)
+                elif protocol == "icmpv6":
+                    res = send_file_icmpv6(host, port, fname, data,
+                                           on_packet=on_packet)
                 else:
                     res = send_file_ftp(host, port, fname, data,
                                         user=opts["ftp_user"], password=opts["ftp_pass"],
@@ -1433,7 +1597,7 @@ For each vulnerability, provide a concrete byte-level payload that would trigger
 
         # ── WEIGHER: DETERMINISTIC PYTHON ─────────────────────────
         print("[AI] ══ Computing weights (Python) ══")
-        dns_w, ftp_w, http_w, smtp_w, smb2_w, smb3_w, http2_w, dcerpc_w, dhcp_w, dhcpv6_w, reasoning = compute_weights_from_vulns(raw_vulns)
+        dns_w, ftp_w, http_w, smtp_w, ssh_w, smb2_w, smb3_w, http2_w, dcerpc_w, dhcp_w, dhcpv6_w, snmp_w, icmp_w, icmpv6_w, reasoning = compute_weights_from_vulns(raw_vulns)
         print(f"[AI] Weights computed deterministically.")
 
         # Assemble final results
@@ -1447,12 +1611,16 @@ For each vulnerability, provide a concrete byte-level payload that would trigger
                 "ftp": ftp_w,
                 "http": http_w,
                 "smtp": smtp_w,
+                "ssh": ssh_w,
                 "smb2": smb2_w,
                 "smb3": smb3_w,
                 "http2": http2_w,
                 "dcerpc": dcerpc_w,
                 "dhcp": dhcp_w,
                 "dhcpv6": dhcpv6_w,
+                "snmp": snmp_w,
+                "icmp": icmp_w,
+                "icmpv6": icmpv6_w,
                 "weight_reasoning": reasoning,
             },
             "model_used": model_used,
@@ -1740,35 +1908,47 @@ def ai_get_weights():
     ftp_default = dict(zip(FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS))
     http_default = dict(zip(HTTP_STRATEGY_NAMES, HTTP_DEFAULT_WEIGHTS))
     smtp_default = dict(zip(SMTP_STRATEGY_NAMES, SMTP_DEFAULT_WEIGHTS))
+    ssh_default = dict(zip(SSH_STRATEGY_NAMES, SSH_DEFAULT_WEIGHTS))
     smb2_default = dict(zip(SMB2_STRATEGY_NAMES, SMB2_DEFAULT_WEIGHTS))
     smb3_default = dict(zip(SMB3_STRATEGY_NAMES, SMB3_DEFAULT_WEIGHTS))
     http2_default = dict(zip(HTTP2_STRATEGY_NAMES, HTTP2_DEFAULT_WEIGHTS))
     dcerpc_default = dict(zip(DCERPC_STRATEGY_NAMES, DCERPC_DEFAULT_WEIGHTS))
     dhcp_default = dict(zip(DHCP_STRATEGY_NAMES, DHCP_DEFAULT_WEIGHTS))
     dhcpv6_default = dict(zip(DHCPV6_STRATEGY_NAMES, DHCPV6_DEFAULT_WEIGHTS))
+    snmp_default = dict(zip(SNMP_STRATEGY_NAMES, SNMP_DEFAULT_WEIGHTS))
+    icmp_default = dict(zip(ICMP_STRATEGY_NAMES, ICMP_DEFAULT_WEIGHTS))
+    icmpv6_default = dict(zip(ICMPV6_STRATEGY_NAMES, ICMPV6_DEFAULT_WEIGHTS))
     return jsonify({
         "source": ai_weights.get("source", "default"),
         "dns": ai_weights.get("dns", dns_default),
         "ftp": ai_weights.get("ftp", ftp_default),
         "http": ai_weights.get("http", http_default),
         "smtp": ai_weights.get("smtp", smtp_default),
+        "ssh": ai_weights.get("ssh", ssh_default),
         "smb2": ai_weights.get("smb2", smb2_default),
         "smb3": ai_weights.get("smb3", smb3_default),
         "http2": ai_weights.get("http2", http2_default),
         "dcerpc": ai_weights.get("dcerpc", dcerpc_default),
         "dhcp": ai_weights.get("dhcp", dhcp_default),
         "dhcpv6": ai_weights.get("dhcpv6", dhcpv6_default),
+        "snmp": ai_weights.get("snmp", snmp_default),
+        "icmp": ai_weights.get("icmp", icmp_default),
+        "icmpv6": ai_weights.get("icmpv6", icmpv6_default),
         "reasoning": ai_weights.get("reasoning", ""),
         "dns_default": dns_default,
         "ftp_default": ftp_default,
         "http_default": http_default,
         "smtp_default": smtp_default,
+        "ssh_default": ssh_default,
         "smb2_default": smb2_default,
         "smb3_default": smb3_default,
         "http2_default": http2_default,
         "dcerpc_default": dcerpc_default,
         "dhcp_default": dhcp_default,
         "dhcpv6_default": dhcpv6_default,
+        "snmp_default": snmp_default,
+        "icmp_default": icmp_default,
+        "icmpv6_default": icmpv6_default,
     })
 
 
@@ -1799,12 +1979,16 @@ def ai_apply_weights():
     ftp_raw = rec.get("ftp", {})
     http_raw = rec.get("http", {})
     smtp_raw = rec.get("smtp", {})
+    ssh_raw = rec.get("ssh", {})
     smb2_raw = rec.get("smb2", {})
     smb3_raw = rec.get("smb3", {})
     http2_raw = rec.get("http2", {})
     dcerpc_raw = rec.get("dcerpc", {})
     dhcp_raw = rec.get("dhcp", {})
     dhcpv6_raw = rec.get("dhcpv6", {})
+    snmp_raw = rec.get("snmp", {})
+    icmp_raw = rec.get("icmp", {})
+    icmpv6_raw = rec.get("icmpv6", {})
 
     # Normalize DNS weights
     dns_total = sum(dns_raw.get(s, 0) for s in DNS_STRATEGY_NAMES)
@@ -1825,6 +2009,11 @@ def ai_apply_weights():
     smtp_total = sum(smtp_raw.get(s, 0) for s in SMTP_STRATEGY_NAMES)
     if smtp_total > 0:
         ai_weights["smtp"] = {s: round(smtp_raw.get(s, 0) / smtp_total * 100, 1) for s in SMTP_STRATEGY_NAMES}
+
+    # Normalize SSH weights
+    ssh_total = sum(ssh_raw.get(s, 0) for s in SSH_STRATEGY_NAMES)
+    if ssh_total > 0:
+        ai_weights["ssh"] = {s: round(ssh_raw.get(s, 0) / ssh_total * 100, 1) for s in SSH_STRATEGY_NAMES}
 
     # Normalize SMB2 weights
     smb2_total = sum(smb2_raw.get(s, 0) for s in SMB2_STRATEGY_NAMES)
@@ -1856,6 +2045,21 @@ def ai_apply_weights():
     if dhcpv6_total > 0:
         ai_weights["dhcpv6"] = {s: round(dhcpv6_raw.get(s, 0) / dhcpv6_total * 100, 1) for s in DHCPV6_STRATEGY_NAMES}
 
+    # Normalize SNMP weights
+    snmp_total = sum(snmp_raw.get(s, 0) for s in SNMP_STRATEGY_NAMES)
+    if snmp_total > 0:
+        ai_weights["snmp"] = {s: round(snmp_raw.get(s, 0) / snmp_total * 100, 1) for s in SNMP_STRATEGY_NAMES}
+
+    # Normalize ICMP weights
+    icmp_total = sum(icmp_raw.get(s, 0) for s in ICMP_STRATEGY_NAMES)
+    if icmp_total > 0:
+        ai_weights["icmp"] = {s: round(icmp_raw.get(s, 0) / icmp_total * 100, 1) for s in ICMP_STRATEGY_NAMES}
+
+    # Normalize ICMPv6 weights
+    icmpv6_total = sum(icmpv6_raw.get(s, 0) for s in ICMPV6_STRATEGY_NAMES)
+    if icmpv6_total > 0:
+        ai_weights["icmpv6"] = {s: round(icmpv6_raw.get(s, 0) / icmpv6_total * 100, 1) for s in ICMPV6_STRATEGY_NAMES}
+
     ai_weights["source"] = "ai"
     ai_weights["reasoning"] = rec.get("weight_reasoning", "")
 
@@ -1870,6 +2074,9 @@ def ai_apply_weights():
     dcerpc_bandit.reset()
     dhcp_bandit.reset()
     dhcpv6_bandit.reset()
+    snmp_bandit.reset()
+    icmp_bandit.reset()
+    icmpv6_bandit.reset()
 
     log_event("INFO", f"AI weights applied — source: {results.get('model_used', 'unknown')}, RL bandits reset")
     print(f"[AI] Weights applied: DNS={ai_weights['dns']}")
@@ -1882,8 +2089,11 @@ def ai_apply_weights():
     print(f"[AI] Weights applied: DCERPC={ai_weights['dcerpc']}")
     print(f"[AI] Weights applied: DHCP={ai_weights['dhcp']}")
     print(f"[AI] Weights applied: DHCPv6={ai_weights['dhcpv6']}")
+    print(f"[AI] Weights applied: SNMP={ai_weights['snmp']}")
+    print(f"[AI] Weights applied: ICMP={ai_weights.get('icmp', {})}")
+    print(f"[AI] Weights applied: ICMPv6={ai_weights.get('icmpv6', {})}")
 
-    return jsonify({"status": "applied", "dns": ai_weights["dns"], "ftp": ai_weights["ftp"], "http": ai_weights["http"], "smtp": ai_weights["smtp"], "smb2": ai_weights["smb2"], "smb3": ai_weights["smb3"], "http2": ai_weights["http2"], "dcerpc": ai_weights["dcerpc"], "dhcp": ai_weights["dhcp"], "dhcpv6": ai_weights["dhcpv6"]})
+    return jsonify({"status": "applied", "dns": ai_weights["dns"], "ftp": ai_weights["ftp"], "http": ai_weights["http"], "smtp": ai_weights["smtp"], "ssh": ai_weights["ssh"], "smb2": ai_weights["smb2"], "smb3": ai_weights["smb3"], "http2": ai_weights["http2"], "dcerpc": ai_weights["dcerpc"], "dhcp": ai_weights["dhcp"], "dhcpv6": ai_weights["dhcpv6"], "snmp": ai_weights["snmp"], "icmp": ai_weights.get("icmp", {}), "icmpv6": ai_weights.get("icmpv6", {})})
 
 
 @app.route("/api/ai/reset_weights", methods=["POST"])
@@ -1893,12 +2103,16 @@ def ai_reset_weights():
     ai_weights["ftp"] = dict(zip(FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS))
     ai_weights["http"] = dict(zip(HTTP_STRATEGY_NAMES, HTTP_DEFAULT_WEIGHTS))
     ai_weights["smtp"] = dict(zip(SMTP_STRATEGY_NAMES, SMTP_DEFAULT_WEIGHTS))
+    ai_weights["ssh"] = dict(zip(SSH_STRATEGY_NAMES, SSH_DEFAULT_WEIGHTS))
     ai_weights["smb2"] = dict(zip(SMB2_STRATEGY_NAMES, SMB2_DEFAULT_WEIGHTS))
     ai_weights["smb3"] = dict(zip(SMB3_STRATEGY_NAMES, SMB3_DEFAULT_WEIGHTS))
     ai_weights["http2"] = dict(zip(HTTP2_STRATEGY_NAMES, HTTP2_DEFAULT_WEIGHTS))
     ai_weights["dcerpc"] = dict(zip(DCERPC_STRATEGY_NAMES, DCERPC_DEFAULT_WEIGHTS))
     ai_weights["dhcp"] = dict(zip(DHCP_STRATEGY_NAMES, DHCP_DEFAULT_WEIGHTS))
     ai_weights["dhcpv6"] = dict(zip(DHCPV6_STRATEGY_NAMES, DHCPV6_DEFAULT_WEIGHTS))
+    ai_weights["snmp"] = dict(zip(SNMP_STRATEGY_NAMES, SNMP_DEFAULT_WEIGHTS))
+    ai_weights["icmp"] = dict(zip(ICMP_STRATEGY_NAMES, ICMP_DEFAULT_WEIGHTS))
+    ai_weights["icmpv6"] = dict(zip(ICMPV6_STRATEGY_NAMES, ICMPV6_DEFAULT_WEIGHTS))
     ai_weights["source"] = "default"
     ai_weights["reasoning"] = ""
 
@@ -1913,6 +2127,9 @@ def ai_reset_weights():
     dcerpc_bandit.reset()
     dhcp_bandit.reset()
     dhcpv6_bandit.reset()
+    snmp_bandit.reset()
+    icmp_bandit.reset()
+    icmpv6_bandit.reset()
 
     log_event("INFO", "Strategy weights reset to defaults, RL bandits reset")
     return jsonify({"status": "reset"})
@@ -2036,11 +2253,11 @@ def ai_analyze_v2():
 
         # Compute weights from merged vulns
         if raw_vulns:
-            dns_w, ftp_w, http_w, smtp_w, smb2_w, smb3_w, http2_w, dcerpc_w, dhcp_w, dhcpv6_w, reasoning = compute_weights_from_vulns(raw_vulns)
+            dns_w, ftp_w, http_w, smtp_w, ssh_w, smb2_w, smb3_w, http2_w, dcerpc_w, dhcp_w, dhcpv6_w, snmp_w, icmp_w, icmpv6_w, reasoning = compute_weights_from_vulns(raw_vulns)
             recommended_weights = {
-                "dns": dns_w, "ftp": ftp_w, "http": http_w, "smtp": smtp_w,
+                "dns": dns_w, "ftp": ftp_w, "http": http_w, "smtp": smtp_w, "ssh": ssh_w,
                 "smb2": smb2_w, "smb3": smb3_w, "http2": http2_w, "dcerpc": dcerpc_w,
-                "dhcp": dhcp_w, "dhcpv6": dhcpv6_w, "weight_reasoning": reasoning,
+                "dhcp": dhcp_w, "dhcpv6": dhcpv6_w, "snmp": snmp_w, "icmp": icmp_w, "icmpv6": icmpv6_w, "weight_reasoning": reasoning,
             }
         else:
             recommended_weights = None

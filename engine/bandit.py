@@ -103,6 +103,10 @@ class UCB1Bandit:
         total = sum(adjusted.values())
         if total > 0:
             adjusted = {a: round(v / total, 6) for a, v in adjusted.items()}
+        else:
+            # Fallback: equal weights when base_weights is empty or all-zero
+            n = len(self.arms)
+            adjusted = {a: round(1.0 / n, 6) for a in self.arms}
         return adjusted
 
     def select_with_weights(self, base_weights):

@@ -1180,12 +1180,16 @@
                     <option value="ftp">FTP</option>
                     <option value="http">HTTP</option>
                     <option value="smtp">SMTP</option>
+                    <option value="ssh">SSH</option>
                     <option value="smb2">SMB2</option>
                     <option value="smb3">SMB3</option>
                     <option value="http2">HTTP/2</option>
                     <option value="dcerpc">DCE/RPC</option>
                     <option value="dhcp">DHCPv4</option>
                     <option value="dhcpv6">DHCPv6</option>
+                    <option value="snmp">SNMP</option>
+                    <option value="icmp">ICMPv4</option>
+                    <option value="icmpv6">ICMPv6</option>
                 </select>
             </div>
             <div class="target-info">
@@ -1458,12 +1462,16 @@
                                 <option value="http">HTTP</option>
                                 <option value="ftp">FTP</option>
                                 <option value="smtp">SMTP</option>
+                                <option value="ssh">SSH</option>
                                 <option value="smb2">SMB2</option>
                                 <option value="smb3">SMB3</option>
                                 <option value="http2">HTTP/2</option>
                                 <option value="dcerpc">DCE/RPC</option>
                                 <option value="dhcp">DHCPv4</option>
                                 <option value="dhcpv6">DHCPv6</option>
+                                <option value="snmp">SNMP</option>
+                                <option value="icmp">ICMPv4</option>
+                                <option value="icmpv6">ICMPv6</option>
                             </select>
                         </div>
                         <div class="config-grid" style="grid-template-columns:1fr 1fr;">
@@ -2377,12 +2385,16 @@
                 { key: 'ftp', title: 'FTP Strategy Weights', defKey: 'ftp_default' },
                 { key: 'http', title: 'HTTP Strategy Weights', defKey: 'http_default' },
                 { key: 'smtp', title: 'SMTP Strategy Weights', defKey: 'smtp_default' },
+                { key: 'ssh', title: 'SSH Strategy Weights', defKey: 'ssh_default' },
                 { key: 'smb2', title: 'SMB2 Strategy Weights', defKey: 'smb2_default' },
                 { key: 'smb3', title: 'SMB3 Strategy Weights', defKey: 'smb3_default' },
                 { key: 'http2', title: 'HTTP/2 Strategy Weights', defKey: 'http2_default' },
                 { key: 'dcerpc', title: 'DCE/RPC Strategy Weights', defKey: 'dcerpc_default' },
                 { key: 'dhcp', title: 'DHCPv4 Strategy Weights', defKey: 'dhcp_default' },
-                { key: 'dhcpv6', title: 'DHCPv6 Strategy Weights', defKey: 'dhcpv6_default' }
+                { key: 'dhcpv6', title: 'DHCPv6 Strategy Weights', defKey: 'dhcpv6_default' },
+                { key: 'snmp', title: 'SNMP Strategy Weights', defKey: 'snmp_default' },
+                { key: 'icmp', title: 'ICMP Strategy Weights', defKey: 'icmp_default' },
+                { key: 'icmpv6', title: 'ICMPv6 Strategy Weights', defKey: 'icmpv6_default' }
             ];
 
             const legend = `<div class="ai-w-legend">
@@ -2531,7 +2543,7 @@
         function formatWeightReasoning(raw) {
             if (!raw) return '';
             // Split on known line boundaries: "  DNS/", "  FTP/", etc. or "  WARNING"
-            const lines = raw.split(/(?=\s{2}(?:DNS|FTP|HTTP2?|SMTP|SMB[23]|DCERPC|DHCPv?6?|WARNING|Weight))/g);
+            const lines = raw.split(/(?=\s{2}(?:DNS|FTP|HTTP2?|SMTP|SSH|SMB[23]|DCERPC|DHCPv?6?|SNMP|ICMPv?6?|WARNING|Weight))/g);
             return lines.map(line => {
                 line = line.trim();
                 if (!line) return '';
@@ -2545,7 +2557,7 @@
                     cls = 'wr-norm';
                 } else {
                     // Highlight protocol name
-                    html = html.replace(/^((?:DNS|FTP|HTTP2?|SMTP|SMB[23]|DCERPC|DHCPv?6?)\/\S+):/, '<span class="wr-proto">$1</span>:');
+                    html = html.replace(/^((?:DNS|FTP|HTTP2?|SMTP|SSH|SMB[23]|DCERPC|DHCPv?6?|SNMP|ICMPv?6?)\/\S+):/, '<span class="wr-proto">$1</span>:');
                     // Highlight severity
                     html = html.replace(/sev=critical/gi, '<span class="wr-sev-critical">sev=critical</span>');
                     html = html.replace(/sev=high/gi, '<span class="wr-sev-high">sev=high</span>');
@@ -2834,9 +2846,9 @@
             document.getElementById('fs-ftp-opts').style.display = proto === 'ftp' ? '' : 'none';
             document.getElementById('fs-smtp-opts').style.display = proto === 'smtp' ? '' : 'none';
             document.getElementById('fs-smb-opts').style.display = (proto === 'smb2' || proto === 'smb3') ? '' : 'none';
-            document.getElementById('fs-port').value = { http: 80, ftp: 21, smtp: 25, smb2: 445, smb3: 445, http2: 80, dcerpc: 135, dhcp: 67, dhcpv6: 547 }[proto] || 80;
+            document.getElementById('fs-port').value = { http: 80, ftp: 21, smtp: 25, ssh: 22, smb2: 445, smb3: 445, http2: 80, dcerpc: 135, dhcp: 67, dhcpv6: 547, snmp: 161, icmp: 0, icmpv6: 0 }[proto] || 80;
             const hostInput = document.getElementById('fs-host');
-            hostInput.placeholder = proto === 'dhcpv6' ? '::1 or fe80::1 (IPv6)' : '172.21.0.2';
+            hostInput.placeholder = (proto === 'dhcpv6' || proto === 'icmpv6') ? 'fe80::1 (IPv6 required)' : '172.21.0.2';
         }
 
         function fsRenderFiles() {
@@ -2900,6 +2912,14 @@
                 // DHCP needs no extra options — DHCPINFORM wrapper is constructed server-side
             } else if (fsProto === 'dhcpv6') {
                 // DHCPv6 needs no extra options — Information-Request wrapper is constructed server-side
+            } else if (fsProto === 'snmp') {
+                // SNMP needs no extra options — SetRequest wrapper is constructed server-side
+            } else if (fsProto === 'icmp') {
+                // ICMP needs no extra options — Echo Request wrapper is constructed server-side
+            } else if (fsProto === 'icmpv6') {
+                // ICMPv6 needs no extra options — Echo Request wrapper is constructed server-side
+            } else if (fsProto === 'ssh') {
+                // SSH needs no extra options — banner+KEXINIT+IGNORE wrapper is constructed server-side
             } else if (fsProto === 'smtp') {
                 fd.append('smtp_from', document.getElementById('fs-smtp-from').value || 'sender@example.com');
                 fd.append('smtp_to', document.getElementById('fs-smtp-to').value || 'recipient@example.com');

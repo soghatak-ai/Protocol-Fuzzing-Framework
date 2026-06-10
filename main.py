@@ -17,6 +17,9 @@ from protocol.http import (HttpMutator, HTTP_STRATEGY_LABELS,
 from protocol.smtp import (SmtpMutator, SMTP_STRATEGY_LABELS,
                            SMTP_STRATEGIES as SMTP_STRATEGY_NAMES,
                            SMTP_WEIGHTS as SMTP_DEFAULT_WEIGHTS)
+from protocol.ssh import (SshMutator, SSH_STRATEGY_LABELS,
+                          SSH_STRATEGIES as SSH_STRATEGY_NAMES,
+                          SSH_WEIGHTS as SSH_DEFAULT_WEIGHTS)
 from protocol.smb import (Smb2Mutator, Smb3Mutator,
                           SMB2_STRATEGY_LABELS, SMB3_STRATEGY_LABELS,
                           SMB2_STRATEGIES as SMB2_STRATEGY_NAMES,
@@ -35,6 +38,15 @@ from protocol.dhcp import (DhcpMutator, DHCP_STRATEGY_LABELS,
 from protocol.dhcpv6 import (Dhcpv6Mutator, DHCPV6_STRATEGY_LABELS,
                              DHCPV6_STRATEGIES as DHCPV6_STRATEGY_NAMES,
                              DHCPV6_WEIGHTS as DHCPV6_DEFAULT_WEIGHTS)
+from protocol.snmp import (SnmpMutator, SNMP_STRATEGY_LABELS,
+                           SNMP_STRATEGIES as SNMP_STRATEGY_NAMES,
+                           SNMP_WEIGHTS as SNMP_DEFAULT_WEIGHTS)
+from protocol.icmp import (IcmpMutator, ICMP_STRATEGY_LABELS,
+                           ICMP_STRATEGIES as ICMP_STRATEGY_NAMES,
+                           ICMP_WEIGHTS as ICMP_DEFAULT_WEIGHTS)
+from protocol.icmpv6 import (Icmpv6Mutator, ICMPV6_STRATEGY_LABELS,
+                             ICMPV6_STRATEGIES as ICMPV6_STRATEGY_NAMES,
+                             ICMPV6_WEIGHTS as ICMPV6_DEFAULT_WEIGHTS)
 from engine.mutator import (SmartDNSMutator, ByteMutator, CompressionLoopMutator,
                             LabelComplexityMutator, ResponseMutator,
                             EDNSExploitMutator, DNSSECRecordMutator, TCPDNSSegmentMutator,
@@ -73,12 +85,14 @@ ai_weights = {
     "ftp": dict(zip(FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS)),
     "http": dict(zip(HTTP_STRATEGY_NAMES, HTTP_DEFAULT_WEIGHTS)),
     "smtp": dict(zip(SMTP_STRATEGY_NAMES, SMTP_DEFAULT_WEIGHTS)),
+    "ssh": dict(zip(SSH_STRATEGY_NAMES, SSH_DEFAULT_WEIGHTS)),
     "smb2": dict(zip(SMB2_STRATEGY_NAMES, SMB2_DEFAULT_WEIGHTS)),
     "smb3": dict(zip(SMB3_STRATEGY_NAMES, SMB3_DEFAULT_WEIGHTS)),
     "http2": dict(zip(HTTP2_STRATEGY_NAMES, HTTP2_DEFAULT_WEIGHTS)),
     "dcerpc": dict(zip(DCERPC_STRATEGY_NAMES, DCERPC_DEFAULT_WEIGHTS)),
     "dhcp": dict(zip(DHCP_STRATEGY_NAMES, DHCP_DEFAULT_WEIGHTS)),
     "dhcpv6": dict(zip(DHCPV6_STRATEGY_NAMES, DHCPV6_DEFAULT_WEIGHTS)),
+    "snmp": dict(zip(SNMP_STRATEGY_NAMES, SNMP_DEFAULT_WEIGHTS)),
     "reasoning": "",
 }
 
@@ -87,12 +101,16 @@ dns_bandit = UCB1Bandit(DNS_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 ftp_bandit = UCB1Bandit(FTP_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 http_bandit = UCB1Bandit(HTTP_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 smtp_bandit = UCB1Bandit(SMTP_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
+ssh_bandit = UCB1Bandit(SSH_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 smb2_bandit = UCB1Bandit(SMB2_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 smb3_bandit = UCB1Bandit(SMB3_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 http2_bandit = UCB1Bandit(HTTP2_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 dcerpc_bandit = UCB1Bandit(DCERPC_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 dhcp_bandit = UCB1Bandit(DHCP_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 dhcpv6_bandit = UCB1Bandit(DHCPV6_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
+snmp_bandit = UCB1Bandit(SNMP_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
+icmp_bandit = UCB1Bandit(ICMP_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
+icmpv6_bandit = UCB1Bandit(ICMPV6_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 
 
 def _bandit_for(protocol):
@@ -102,6 +120,8 @@ def _bandit_for(protocol):
         return http_bandit
     if protocol == "smtp":
         return smtp_bandit
+    if protocol == "ssh":
+        return ssh_bandit
     if protocol == "smb2":
         return smb2_bandit
     if protocol == "smb3":
@@ -114,6 +134,12 @@ def _bandit_for(protocol):
         return dhcp_bandit
     if protocol == "dhcpv6":
         return dhcpv6_bandit
+    if protocol == "snmp":
+        return snmp_bandit
+    if protocol == "icmp":
+        return icmp_bandit
+    if protocol == "icmpv6":
+        return icmpv6_bandit
     return dns_bandit
 
 fuzzer_state = {
@@ -436,6 +462,14 @@ def run_fuzzer(build_dir: str):
         smtp_mutator = SmtpMutator(external_weights=ai_weights.get("smtp"), bandit=smtp_bandit)
         smb_mutator = None
         seed_message = None
+    elif protocol == "ssh":
+        transport = StreamTransport(target_port=22)
+        ftp_mutator = None
+        http_mutator = None
+        smtp_mutator = None
+        ssh_mutator = SshMutator(external_weights=ai_weights.get("ssh"), bandit=ssh_bandit)
+        smb_mutator = None
+        seed_message = None
     elif protocol == "smb2":
         transport = StreamTransport(target_port=445)
         ftp_mutator = None
@@ -482,6 +516,30 @@ def run_fuzzer(build_dir: str):
         smtp_mutator = None
         smb_mutator = None
         dhcpv6_mutator = Dhcpv6Mutator(external_weights=ai_weights.get("dhcpv6"), bandit=dhcpv6_bandit)
+        seed_message = None
+    elif protocol == "snmp":
+        transport = StreamTransport(target_port=161)
+        ftp_mutator = None
+        http_mutator = None
+        smtp_mutator = None
+        smb_mutator = None
+        snmp_mutator = SnmpMutator(external_weights=ai_weights.get("snmp"), bandit=snmp_bandit)
+        seed_message = None
+    elif protocol == "icmp":
+        transport = StreamTransport(target_port=0)
+        ftp_mutator = None
+        http_mutator = None
+        smtp_mutator = None
+        smb_mutator = None
+        icmp_mutator = IcmpMutator(external_weights=ai_weights.get("icmp"), bandit=icmp_bandit)
+        seed_message = None
+    elif protocol == "icmpv6":
+        transport = StreamTransport(target_port=0)
+        ftp_mutator = None
+        http_mutator = None
+        smtp_mutator = None
+        smb_mutator = None
+        icmpv6_mutator = Icmpv6Mutator(external_weights=ai_weights.get("icmpv6"), bandit=icmpv6_bandit)
         seed_message = None
     else:
         transport = StreamTransport(target_port=53)
@@ -561,6 +619,15 @@ def run_fuzzer(build_dir: str):
                     src_port = random.randint(1025, 65534)
                     pipe.write(transport.wrap_tcp_session(payload, src_port=src_port))
                     fuzzer_state["iteration"] += 4  # full TCP session per SMTP transaction
+                elif protocol == "ssh":
+                    if iteration == 1 or (iteration - 1) % 50 == 0:
+                        _ssh_payload, _ssh_strategy = ssh_mutator.mutate()
+                    payload, strategy = _ssh_payload, _ssh_strategy
+                    fuzzer_state["current_strategy"] = strategy
+                    fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                    src_port = random.randint(1025, 65534)
+                    pipe.write(transport.wrap_tcp_session(payload, src_port=src_port))
+                    fuzzer_state["iteration"] += 4  # full TCP session per SSH handshake
                 elif protocol in ("smb2", "smb3"):
                     if iteration == 1 or (iteration - 1) % 50 == 0:
                         _smb_payload, _smb_strategy = smb_mutator.mutate()
@@ -608,6 +675,43 @@ def run_fuzzer(build_dir: str):
                     src_port = 546 if _dhcpv6_dst_port == 547 else 547
                     pipe.write(transport.wrap_udp_to_port(payload, _dhcpv6_dst_port,
                                                           src_ip=src_ip, src_port=src_port))
+                elif protocol == "snmp":
+                    if iteration == 1 or (iteration - 1) % 50 == 0:
+                        _snmp_payload, _snmp_strategy, _snmp_dst_port = snmp_mutator.mutate()
+                    payload, strategy = _snmp_payload, _snmp_strategy
+                    fuzzer_state["current_strategy"] = strategy
+                    fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                    src_ip = random.randint(0x01000001, 0xFEFFFFFF)
+                    src_port = random.randint(1025, 65534)
+                    pipe.write(transport.wrap_udp_to_port(payload, _snmp_dst_port,
+                                                          src_ip=src_ip, src_port=src_port))
+                elif protocol == "icmp":
+                    if iteration == 1 or (iteration - 1) % 50 == 0:
+                        _icmp_data, _icmp_strategy, _icmp_pkt_type = icmp_mutator.mutate()
+                    strategy = _icmp_strategy
+                    fuzzer_state["current_strategy"] = strategy
+                    fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                    src_ip = random.randint(0x01000001, 0xFEFFFFFF)
+                    if _icmp_pkt_type == "fragments":
+                        pipe.write(transport.wrap_ip_fragments(_icmp_data, src_ip=src_ip))
+                        fuzzer_state["iteration"] += max(0, len(_icmp_data) - 1)
+                    elif _icmp_pkt_type == "raw_ip":
+                        pipe.write(transport.wrap_raw_ip_packet(_icmp_data))
+                    else:
+                        pipe.write(transport.wrap_icmp(_icmp_data, src_ip=src_ip))
+                elif protocol == "icmpv6":
+                    if iteration == 1 or (iteration - 1) % 50 == 0:
+                        _v6_data, _v6_strategy, _v6_pkt_type, _v6_src, _v6_dst = icmpv6_mutator.mutate()
+                    strategy = _v6_strategy
+                    fuzzer_state["current_strategy"] = strategy
+                    fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                    if _v6_pkt_type == "fragments":
+                        pipe.write(transport.wrap_ipv6_fragments(_v6_data))
+                        fuzzer_state["iteration"] += max(0, len(_v6_data) - 1)
+                    elif _v6_pkt_type == "raw_ipv6":
+                        pipe.write(transport.wrap_raw_ipv6_packet(_v6_data))
+                    else:
+                        pipe.write(transport.wrap_icmpv6(_v6_data, _v6_src, _v6_dst))
                 else:
                     dns_w = ai_weights.get("dns", {})
                     strategy = dns_bandit.select_with_weights(dns_w)
@@ -645,7 +749,7 @@ def run_fuzzer(build_dir: str):
                 active_bandit = _bandit_for(protocol)
                 active_bandit.update(strategy, 0.0)
 
-                stat_interval = 500 if protocol in ("ftp", "http", "smtp", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6") else 10000
+                stat_interval = 500 if protocol in ("ftp", "http", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6") else 10000
                 if fuzzer_state["iteration"] % stat_interval == 0:
                     elapsed = time.time() - fuzzer_state["start_time"] if fuzzer_state["start_time"] else 1
                     fuzzer_state["packets_per_sec"] = int(fuzzer_state["iteration"] / max(elapsed, 0.001))
@@ -745,6 +849,13 @@ def run_fuzzer_live(config: dict):
         smtp_mutator_inst = SmtpMutator(external_weights=ai_weights.get("smtp"), bandit=smtp_bandit)
         smb_mutator_inst = None
         seed_message = None
+    elif protocol == "ssh":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        ssh_mutator_inst = SshMutator(external_weights=ai_weights.get("ssh"), bandit=ssh_bandit)
+        smb_mutator_inst = None
+        seed_message = None
     elif protocol == "smb2":
         ftp_mutator_inst = None
         http_mutator_inst = None
@@ -786,6 +897,27 @@ def run_fuzzer_live(config: dict):
         smb_mutator_inst = None
         dhcpv6_mutator_inst = Dhcpv6Mutator(external_weights=ai_weights.get("dhcpv6"), bandit=dhcpv6_bandit)
         seed_message = None
+    elif protocol == "snmp":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        snmp_mutator_inst = SnmpMutator(external_weights=ai_weights.get("snmp"), bandit=snmp_bandit)
+        seed_message = None
+    elif protocol == "icmp":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        icmp_mutator_inst = IcmpMutator(external_weights=ai_weights.get("icmp"), bandit=icmp_bandit)
+        seed_message = None
+    elif protocol == "icmpv6":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        icmpv6_mutator_inst = Icmpv6Mutator(external_weights=ai_weights.get("icmpv6"), bandit=icmpv6_bandit)
+        seed_message = None
     else:
         ftp_mutator_inst = None
         http_mutator_inst = None
@@ -820,11 +952,15 @@ def run_fuzzer_live(config: dict):
     _ftp_payload, _ftp_strategy = None, None
     _http_payload, _http_strategy = None, None
     _smtp_payload, _smtp_strategy = None, None
+    _ssh_payload, _ssh_strategy = None, None
     _smb_payload, _smb_strategy = None, None
     _h2_payload, _h2_strategy = None, None
     _dcerpc_payload, _dcerpc_strategy = None, None
     _dhcp_payload, _dhcp_strategy, _dhcp_dst_port = None, None, None
     _dhcpv6_payload, _dhcpv6_strategy, _dhcpv6_dst_port = None, None, None
+    _snmp_payload, _snmp_strategy, _snmp_dst_port = None, None, None
+    _icmp_data, _icmp_strategy, _icmp_pkt_type = None, None, None
+    _v6_data, _v6_strategy, _v6_pkt_type, _v6_src, _v6_dst = None, None, None, None, None
 
     try:
         while fuzzer_state["running"] and not fuzzer_state["anomaly_detected"]:
@@ -860,6 +996,16 @@ def run_fuzzer_live(config: dict):
                 # Live mode is the CLIENT: client->server SMTP commands/DATA drive
                 # the on-path smtp inspector. Default SMTP port is 25.
                 live_transport.send_tcp(_smtp_payload, port=25)
+                fuzzer_state["iteration"] += 1
+            elif protocol == "ssh":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _ssh_payload, _ssh_strategy = ssh_mutator_inst.mutate()
+                strategy = _ssh_strategy
+                fuzzer_state["current_strategy"] = strategy
+                fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                # Live mode is the CLIENT: client->server SSH handshake bytes drive
+                # the on-path ssh inspector. Default SSH port is 22.
+                live_transport.send_tcp(_ssh_payload, port=22)
                 fuzzer_state["iteration"] += 1
             elif protocol in ("smb2", "smb3"):
                 if iteration == 1 or (iteration - 1) % 50 == 0:
@@ -901,6 +1047,40 @@ def run_fuzzer_live(config: dict):
                 fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
                 live_transport.send_udp(_dhcpv6_payload, port=_dhcpv6_dst_port)
                 fuzzer_state["iteration"] += 1
+            elif protocol == "snmp":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _snmp_payload, _snmp_strategy, _snmp_dst_port = snmp_mutator_inst.mutate()
+                strategy = _snmp_strategy
+                fuzzer_state["current_strategy"] = strategy
+                fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_udp(_snmp_payload, port=_snmp_dst_port)
+                fuzzer_state["iteration"] += 1
+            elif protocol == "icmp":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _icmp_data, _icmp_strategy, _icmp_pkt_type = icmp_mutator_inst.mutate()
+                strategy = _icmp_strategy
+                fuzzer_state["current_strategy"] = strategy
+                fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                if _icmp_pkt_type in ("icmp", "raw_ip"):
+                    live_transport.send_icmp(_icmp_data)
+                else:
+                    for frag_data, frag_off, frag_mf, frag_id, frag_proto in _icmp_data:
+                        live_transport.send_icmp(frag_data)
+                fuzzer_state["iteration"] += 1
+            elif protocol == "icmpv6":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _v6_data, _v6_strategy, _v6_pkt_type, _v6_src, _v6_dst = icmpv6_mutator_inst.mutate()
+                strategy = _v6_strategy
+                fuzzer_state["current_strategy"] = strategy
+                fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                if _v6_pkt_type == "icmpv6":
+                    live_transport.send_icmpv6(_v6_data, dst_ipv6=server_ip)
+                elif _v6_pkt_type == "fragments":
+                    for frag_pkt in _v6_data:
+                        live_transport.send_icmpv6(frag_pkt, dst_ipv6=server_ip)
+                else:
+                    live_transport.send_icmpv6(_v6_data, dst_ipv6=server_ip)
+                fuzzer_state["iteration"] += 1
             else:
                 dns_w = ai_weights.get("dns", {})
                 strategy = dns_bandit.select_with_weights(dns_w)
@@ -931,7 +1111,7 @@ def run_fuzzer_live(config: dict):
             active_bandit = _bandit_for(protocol)
             active_bandit.update(strategy, 0.0)
 
-            stat_interval = 500 if protocol in ("ftp", "http", "smtp", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6") else 10000
+            stat_interval = 500 if protocol in ("ftp", "http", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6") else 10000
             if fuzzer_state["iteration"] % stat_interval == 0:
                 elapsed = time.time() - fuzzer_state["start_time"] if fuzzer_state["start_time"] else 1
                 fuzzer_state["packets_per_sec"] = int(fuzzer_state["iteration"] / max(elapsed, 0.001))

@@ -556,6 +556,118 @@ def send_file_dcerpc(host, port, filename, data, on_packet=None, timeout=10):
     return result
 
 
+def send_file_ssh(host, port, filename, data, on_packet=None, timeout=5):
+    """Send a file over an SSH-framed TCP exchange.
+
+    A real SCP/SFTP transfer rides inside the SSH ENCRYPTED tunnel, which Snort's
+    ssh inspector cannot see. To keep the bytes inspectable (and avoid a full
+    crypto handshake), this wraps the file contents in the CLEARTEXT portion of
+    the SSH protocol that the inspector actually parses: a valid version banner,
+    a KEXINIT, then the raw file bytes carried inside SSH_MSG_IGNORE packets
+    (RFC 4253 §11.2 — opaque 'string' payload). The filename is carried in an
+    SSH_MSG_DEBUG message so it shows up in the handshake too.
+    """
+    import struct as _st
+
+    result = {"file": filename, "ok": False, "detail": "", "sent_bytes": 0, "response": None}
+
+    def _u32(n):
+        return _st.pack("!I", n & 0xFFFFFFFF)
+
+    def _string(b):
+        return _u32(len(b)) + b
+
+    def _ssh_packet(payload):
+        # Pre-encryption binary packet: no MAC. Pad to an 8-byte block, pad >= 4.
+        block = 8
+        unpadded = 1 + len(payload)
+        pad_len = block - ((4 + unpadded) % block)
+        if pad_len < 4:
+            pad_len += block
+        packet_length = 1 + len(payload) + pad_len
+        return _u32(packet_length) + bytes([pad_len]) + payload + (b"\x00" * pad_len)
+
+    version = b"SSH-2.0-FuzzFileSender_1.0\r\n"
+
+    # Minimal KEXINIT (msg 20) so the inspector engages the SSH parser.
+    import random as _rnd
+    cookie = bytes(_rnd.choices(range(256), k=16))
+
+    def _namelist(names):
+        joined = b",".join(names)
+        return _u32(len(joined)) + joined
+
+    kexinit = bytes([20]) + cookie
+    for nl in ([b"diffie-hellman-group14-sha1"], [b"ssh-rsa"],
+               [b"aes128-ctr"], [b"aes128-ctr"], [b"hmac-sha2-256"],
+               [b"hmac-sha2-256"], [b"none"], [b"none"], [], []):
+        kexinit += _namelist(nl)
+    kexinit += b"\x00" + _u32(0)
+
+    # Filename in an SSH_MSG_DEBUG (msg 4): always_display + message + lang.
+    safe_name = filename.encode("utf-8", errors="replace")
+    debug = bytes([4]) + b"\x01" + _string(b"file: " + safe_name) + _string(b"en")
+
+    wire = bytearray()
+    wire += version
+    wire += _ssh_packet(kexinit)
+    wire += _ssh_packet(debug)
+
+    # File bytes carried in SSH_MSG_IGNORE (msg 2) packets, chunked to stay
+    # within a single segment per packet.
+    file_packets = []
+    offset = 0
+    while offset < len(data):
+        chunk = data[offset:offset + 16000]
+        file_packets.append(_ssh_packet(bytes([2]) + _string(chunk)))
+        offset += 16000
+    if not file_packets:  # empty file
+        file_packets.append(_ssh_packet(bytes([2]) + _string(b"")))
+    for fp in file_packets:
+        wire += fp
+
+    wire = bytes(wire)
+
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout) as s:
+            s.settimeout(timeout)
+            s.sendall(wire)
+            _emit(on_packet, "tx", "SSH version banner", version)
+            _emit(on_packet, "tx", "SSH KEXINIT", _ssh_packet(kexinit))
+            _emit(on_packet, "tx", "SSH DEBUG (filename)", _ssh_packet(debug))
+            _emit(on_packet, "tx", "SSH IGNORE packets (file payload)",
+                  b"".join(file_packets))
+            result["sent_bytes"] = len(wire)
+            try:
+                s.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+            chunks = []
+            try:
+                while True:
+                    b = s.recv(4096)
+                    if not b:
+                        break
+                    chunks.append(b)
+                    _emit(on_packet, "rx", "SSH response", b)
+                    if sum(len(c) for c in chunks) > 8192:
+                        break
+            except socket.timeout:
+                pass
+        resp = b"".join(chunks)
+        result["ok"] = True
+        if resp:
+            result["response"] = f"received {len(resp)} bytes"
+            result["detail"] = (f"sent {len(wire)} bytes as SSH banner+KEXINIT+IGNORE "
+                                f"(file payload), {len(resp)} bytes back")
+        else:
+            result["detail"] = (f"sent {len(wire)} bytes as SSH banner+KEXINIT+IGNORE "
+                                f"(file payload) (no response)")
+    except Exception as e:
+        result["detail"] = f"{type(e).__name__}: {e}"
+    return result
+
+
 def send_file_dhcp(host, port, filename, data, on_packet=None, timeout=5):
     """Send a file as a DHCP packet over UDP.
 
@@ -682,6 +794,196 @@ def send_file_dhcpv6(host, port, filename, data, on_packet=None, timeout=5):
                 pass
         result["ok"] = True
         result["detail"] = f"sent {len(pkt)} bytes as DHCPv6 Information-Request on UDP/{port}"
+    except Exception as e:
+        result["detail"] = f"{type(e).__name__}: {e}"
+    return result
+
+
+def send_file_snmp(host, port, filename, data, on_packet=None, timeout=5):
+    """Send a file as one or more SNMPv2c SetRequest packets over UDP.
+
+    Wraps the file contents inside varbind OCTET STRING values (community
+    'public') so that Snort's SNMP rules / any BER decoder inspect the payload.
+    The filename goes in the first varbind; the file bytes are chunked across
+    subsequent varbinds, each datagram kept inside a single UDP packet.
+    """
+    from protocol.snmp import (_sequence, _integer, _octet_string, _oid,
+                               _varbind, _varbindlist, _std_pdu, _message_v1v2c,
+                               _PDU_SET, _rid)
+
+    result = {"file": filename, "ok": False, "detail": "", "sent_bytes": 0, "response": None}
+
+    # Base OID for embedded file data (under enterprises.fuzzer experimental arc)
+    base_oid = [1, 3, 6, 1, 4, 1, 99999, 1]
+    community = b"public"
+    # Per-datagram budget: keep each BER message well under the OS UDP
+    # send limit (SO_SNDBUF / EMSGSIZE) so real-socket sends never fail.
+    CHUNK = 512
+    MAX_VARBINDS = 8  # ~4 KB of file per SetRequest
+
+    try:
+        total_sent = 0
+        total_resp = 0
+        # First packet carries the filename varbind.
+        safe_name = filename.encode("utf-8", errors="replace")
+        offset = 0
+        pkt_index = 0
+        first = True
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(timeout)
+            try:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
+            except OSError:
+                pass
+            while offset < len(data) or first:
+                varbinds = []
+                if first:
+                    varbinds.append(_varbind(base_oid + [0], _octet_string(safe_name)))
+                    first = False
+                while len(varbinds) < MAX_VARBINDS and offset < len(data):
+                    chunk = data[offset:offset + CHUNK]
+                    varbinds.append(_varbind(base_oid + [1, pkt_index, len(varbinds)],
+                                             _octet_string(chunk)))
+                    offset += CHUNK
+                pdu = _std_pdu(_PDU_SET, _varbindlist(varbinds), request_id=_rid())
+                pkt = _message_v1v2c(1, community, pdu)
+                s.sendto(pkt, (host, int(port)))
+                _emit(on_packet, "tx", f"SNMP SetRequest #{pkt_index} (file payload)", pkt)
+                total_sent += len(pkt)
+                pkt_index += 1
+                try:
+                    resp, _ = s.recvfrom(4096)
+                    _emit(on_packet, "rx", "SNMP response", resp)
+                    total_resp += len(resp)
+                except socket.timeout:
+                    pass
+                if offset >= len(data):
+                    break
+        result["sent_bytes"] = total_sent
+        result["ok"] = True
+        if total_resp:
+            result["response"] = f"received {total_resp} bytes"
+        result["detail"] = (f"sent {total_sent} bytes across {pkt_index} SNMP "
+                            f"SetRequest packet(s) on UDP/{port}")
+    except Exception as e:
+        result["detail"] = f"{type(e).__name__}: {e}"
+    return result
+
+
+def send_file_icmp(host, port, filename, data, on_packet=None, timeout=5):
+    """Send a file as ICMP Echo Request payloads via raw socket.
+
+    The file bytes are chunked across successive Echo Request packets (type 8,
+    code 0) with a proper ICMP checksum. Requires root / CAP_NET_RAW.
+    The *port* argument is unused (ICMP has no ports) but accepted for API
+    consistency with other send_file_* functions.
+    """
+    result = {"file": filename, "ok": False, "detail": "", "sent_bytes": 0, "response": None}
+
+    CHUNK = 1400  # stay well under typical MTU
+    icmp_id = struct.pack("!H", hash(filename) & 0xFFFF)
+
+    def _icmp_cksum(msg: bytes) -> int:
+        if len(msg) % 2:
+            msg += b'\x00'
+        s = sum(struct.unpack("!%dH" % (len(msg) // 2), msg))
+        while s >> 16:
+            s = (s & 0xFFFF) + (s >> 16)
+        return ~s & 0xFFFF
+
+    try:
+        total_sent = 0
+        total_resp = 0
+        offset = 0
+        seq = 0
+        with socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP) as s:
+            s.settimeout(timeout)
+            while offset < len(data) or seq == 0:
+                chunk = data[offset:offset + CHUNK]
+                offset += len(chunk)
+                seq_bytes = struct.pack("!H", seq & 0xFFFF)
+                # type=8 (Echo Request), code=0, checksum placeholder, id, seq
+                hdr = b'\x08\x00\x00\x00' + icmp_id + seq_bytes
+                pkt_raw = hdr + chunk
+                cs = _icmp_cksum(pkt_raw)
+                pkt = pkt_raw[:2] + struct.pack("!H", cs) + pkt_raw[4:]
+
+                s.sendto(pkt, (host, 0))
+                _emit(on_packet, "tx", f"ICMP Echo Request seq={seq} ({len(chunk)}B payload)", pkt)
+                total_sent += len(pkt)
+                seq += 1
+
+                try:
+                    resp, _ = s.recvfrom(4096)
+                    _emit(on_packet, "rx", "ICMP Echo Reply", resp)
+                    total_resp += len(resp)
+                except socket.timeout:
+                    pass
+
+                if offset >= len(data):
+                    break
+
+        result["sent_bytes"] = total_sent
+        result["ok"] = True
+        if total_resp:
+            result["response"] = f"received {total_resp} bytes"
+        result["detail"] = (f"sent {total_sent} bytes across {seq} ICMP Echo Request "
+                            f"packet(s) to {host}")
+    except Exception as e:
+        result["detail"] = f"{type(e).__name__}: {e}"
+    return result
+
+
+def send_file_icmpv6(host, port, filename, data, on_packet=None, timeout=5):
+    """Send a file as ICMPv6 Echo Request payloads via raw socket.
+
+    The file bytes are chunked across successive Echo Request packets (type 128,
+    code 0).  The kernel computes the ICMPv6 pseudo-header checksum automatically
+    for IPPROTO_ICMPV6 raw sockets.  Requires root / CAP_NET_RAW.
+    The *port* argument is unused (ICMPv6 has no ports) but accepted for API
+    consistency with other send_file_* functions.
+    """
+    result = {"file": filename, "ok": False, "detail": "", "sent_bytes": 0, "response": None}
+
+    CHUNK = 1400  # stay well under typical MTU
+    icmpv6_id = struct.pack("!H", hash(filename) & 0xFFFF)
+
+    try:
+        total_sent = 0
+        total_resp = 0
+        offset = 0
+        seq = 0
+        with socket.socket(socket.AF_INET6, socket.SOCK_RAW, 58) as s:
+            s.settimeout(timeout)
+            while offset < len(data) or seq == 0:
+                chunk = data[offset:offset + CHUNK]
+                offset += len(chunk)
+                seq_bytes = struct.pack("!H", seq & 0xFFFF)
+                # type=128 (Echo Request), code=0, checksum=0 (kernel fills), id, seq
+                hdr = b'\x80\x00\x00\x00' + icmpv6_id + seq_bytes
+                pkt = hdr + chunk
+
+                s.sendto(pkt, (host, 0, 0, 0))
+                _emit(on_packet, "tx", f"ICMPv6 Echo Request seq={seq} ({len(chunk)}B payload)", pkt)
+                total_sent += len(pkt)
+                seq += 1
+
+                try:
+                    resp, _ = s.recvfrom(4096)
+                    _emit(on_packet, "rx", "ICMPv6 Echo Reply", resp)
+                    total_resp += len(resp)
+                except socket.timeout:
+                    pass
+
+                if offset >= len(data):
+                    break
+
+        result["sent_bytes"] = total_sent
+        result["ok"] = True
+        if total_resp:
+            result["response"] = f"received {total_resp} bytes"
+        result["detail"] = (f"sent {total_sent} bytes across {seq} ICMPv6 Echo Request "
+                            f"packet(s) to {host}")
     except Exception as e:
         result["detail"] = f"{type(e).__name__}: {e}"
     return result
