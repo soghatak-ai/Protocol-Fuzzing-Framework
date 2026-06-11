@@ -10,6 +10,7 @@ MIME attachment) and send it.
 Used by the dashboard "File Send" section.
 """
 import io
+import os
 import socket
 import struct
 import ftplib
@@ -984,6 +985,424 @@ def send_file_icmpv6(host, port, filename, data, on_packet=None, timeout=5):
             result["response"] = f"received {total_resp} bytes"
         result["detail"] = (f"sent {total_sent} bytes across {seq} ICMPv6 Echo Request "
                             f"packet(s) to {host}")
+    except Exception as e:
+        result["detail"] = f"{type(e).__name__}: {e}"
+    return result
+
+
+def send_file_sip(host, port, filename, data, on_packet=None, timeout=5):
+    """Send a file as a SIP MESSAGE over UDP.
+
+    Wraps the file contents as the body of a SIP MESSAGE request
+    (Content-Type: application/octet-stream) so that Snort's SIP inspector
+    (gid 140) will parse the headers and body.
+    """
+    import random as _rnd
+
+    result = {"file": filename, "ok": False, "detail": "", "sent_bytes": 0, "response": None}
+
+    branch = "z9hG4bK" + "".join(_rnd.choices("abcdefghijklmnopqrstuvwxyz0123456789", k=16))
+    tag = "".join(_rnd.choices("abcdefghijklmnopqrstuvwxyz0123456789", k=12))
+    callid = "".join(_rnd.choices("abcdefghijklmnopqrstuvwxyz0123456789", k=24)) + "@filesend"
+    cseq = _rnd.randint(1, 999999)
+    uri = f"sip:target@{host}:{port}"
+
+    headers = (
+        f"MESSAGE {uri} SIP/2.0\r\n"
+        f"Via: SIP/2.0/UDP {host}:{port};branch={branch}\r\n"
+        f"From: <sip:fuzzer@filesend.local>;tag={tag}\r\n"
+        f"To: <{uri}>\r\n"
+        f"Call-ID: {callid}\r\n"
+        f"CSeq: {cseq} MESSAGE\r\n"
+        f"Max-Forwards: 70\r\n"
+        f"Content-Type: application/octet-stream\r\n"
+        f"Content-Length: {len(data)}\r\n"
+        f"\r\n"
+    ).encode("utf-8")
+
+    pkt = headers + data
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(timeout)
+            s.sendto(pkt, (host, int(port)))
+            _emit(on_packet, "tx", "SIP MESSAGE (file payload)", pkt)
+            result["sent_bytes"] = len(pkt)
+            try:
+                resp, _ = s.recvfrom(4096)
+                _emit(on_packet, "rx", "SIP response", resp)
+                result["response"] = f"received {len(resp)} bytes"
+            except socket.timeout:
+                pass
+        result["ok"] = True
+        result["detail"] = f"sent {len(pkt)} bytes as SIP MESSAGE on UDP/{port}"
+    except Exception as e:
+        result["detail"] = f"{type(e).__name__}: {e}"
+    return result
+
+
+def send_file_mgcp(host, port, filename, data, on_packet=None, timeout=5):
+    """Send a file as an MGCP NTFY message over UDP.
+
+    Wraps the file contents as the body of an MGCP NTFY (Notify) command
+    so that IDS text rules on UDP 2427/2727 will parse the MGCP headers
+    and body.  The file bytes are placed as SDP-like payload after
+    the blank-line separator.
+    """
+    import random as _rnd
+
+    result = {"file": filename, "ok": False, "detail": "", "sent_bytes": 0, "response": None}
+
+    txid = str(_rnd.randint(1, 999999999))
+    req_id = ''.join(_rnd.choices("0123456789ABCDEF", k=16))
+    endpoint = f"aaln/{_rnd.randint(1, 24)}@{host}"
+
+    headers = (
+        f"NTFY {txid} {endpoint} MGCP 1.0\r\n"
+        f"N: ca@{host}:{port}\r\n"
+        f"X: {req_id}\r\n"
+        f"O: L/hd\r\n"
+        f"\r\n"
+    ).encode("utf-8")
+
+    pkt = headers + data
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(timeout)
+            s.sendto(pkt, (host, int(port)))
+            _emit(on_packet, "tx", "MGCP NTFY (file payload)", pkt)
+            result["sent_bytes"] = len(pkt)
+            try:
+                resp, _ = s.recvfrom(4096)
+                _emit(on_packet, "rx", "MGCP response", resp)
+                result["response"] = f"received {len(resp)} bytes"
+            except socket.timeout:
+                pass
+        result["ok"] = True
+        result["detail"] = f"sent {len(pkt)} bytes as MGCP NTFY on UDP/{port}"
+    except Exception as e:
+        result["detail"] = f"{type(e).__name__}: {e}"
+    return result
+
+
+def send_file_rtsp(host, port, filename, data, on_packet=None, timeout=5):
+    """Send a file as an RTSP SET_PARAMETER request over TCP.
+
+    Wraps the file contents as the body of an RTSP SET_PARAMETER request
+    (Content-Type: application/octet-stream) so that Snort's generic
+    text rules on TCP 554 will parse the RTSP headers and body.
+    RTSP uses TCP (unlike SIP/MGCP which use UDP).
+    """
+    import random as _rnd
+
+    result = {"file": filename, "ok": False, "detail": "", "sent_bytes": 0, "response": None}
+
+    cseq = _rnd.randint(1, 999999)
+    session_id = "".join(_rnd.choices("abcdefghijklmnopqrstuvwxyz0123456789", k=16))
+    uri = f"rtsp://{host}:{port}/filesend"
+
+    headers = (
+        f"SET_PARAMETER {uri} RTSP/1.0\r\n"
+        f"CSeq: {cseq}\r\n"
+        f"Session: {session_id}\r\n"
+        f"Content-Type: application/octet-stream\r\n"
+        f"Content-Length: {len(data)}\r\n"
+        f"\r\n"
+    ).encode("utf-8")
+
+    pkt = headers + data
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect((host, int(port)))
+            s.sendall(pkt)
+            _emit(on_packet, "tx", "RTSP SET_PARAMETER (file payload)", pkt)
+            result["sent_bytes"] = len(pkt)
+            try:
+                resp = s.recv(4096)
+                _emit(on_packet, "rx", "RTSP response", resp)
+                result["response"] = f"received {len(resp)} bytes"
+            except socket.timeout:
+                pass
+        result["ok"] = True
+        result["detail"] = f"sent {len(pkt)} bytes as RTSP SET_PARAMETER on TCP/{port}"
+    except Exception as e:
+        result["detail"] = f"{type(e).__name__}: {e}"
+    return result
+
+
+def send_file_tacacs(host, port, filename, data, on_packet=None, timeout=5):
+    """Send a file as a TACACS+ Authentication START packet over TCP.
+
+    Wraps the file contents inside the data field of a TACACS+ Authentication
+    START body (cleartext / UNENCRYPTED_FLAG set) so that any TACACS+ content
+    rules on TCP 49 will parse the header and body.  The filename is carried
+    in the user field.  Uses the standard TACACS+ binary packet format with a
+    12-byte header (version 0xC0, type=AUTHEN, seq_no=1, flags=0x01
+    TAC_PLUS_UNENCRYPTED_FLAG, random session_id).
+    """
+    import random as _rnd
+
+    result = {"file": filename, "ok": False, "detail": "", "sent_bytes": 0, "response": None}
+
+    try:
+        total_sent = 0
+        safe_name = filename.encode("utf-8", errors="replace")[:255]
+        session_id = _rnd.randint(0, 0xFFFFFFFF)
+
+        # Build Authentication START body (RFC 8907 §5.1)
+        # action=LOGIN(1), priv_lvl=USER(1), authen_type=ASCII(1),
+        # authen_service=LOGIN(1)
+        user = safe_name
+        port_field = b"filesend"
+        rem_addr = b"127.0.0.1"
+        data_field = data
+
+        user_len = min(len(user), 255)
+        port_len = min(len(port_field), 255)
+        rem_len = min(len(rem_addr), 255)
+        data_len = len(data_field) & 0xFF  # 8-bit, wraps for large files
+
+        body = struct.pack("!BBBBBBBB",
+                           0x01, 0x01, 0x01, 0x01,
+                           user_len, port_len, rem_len, data_len)
+        body += user[:user_len] + port_field[:port_len] + rem_addr[:rem_len]
+
+        # Chunk data into segments that fit in a single TCP send
+        CHUNK = 4096
+        offset = 0
+        pkt_index = 0
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect((host, int(port)))
+
+            while offset < len(data_field) or pkt_index == 0:
+                chunk = data_field[offset:offset + CHUNK]
+                if pkt_index == 0:
+                    pkt_body = body + chunk
+                else:
+                    # Subsequent chunks as CONTINUE bodies
+                    # user_msg_len(2) + data_len(2) + flags(1) + data
+                    pkt_body = struct.pack("!HHB", 0, len(chunk), 0) + chunk
+
+                # Build 12-byte header
+                version = 0xC1 if pkt_index == 0 else 0xC0
+                pkt_type = 0x01  # AUTHEN
+                seq_no = (pkt_index * 2 + 1) & 0xFF  # odd: 1, 3, 5, ...
+                flags = 0x01  # TAC_PLUS_UNENCRYPTED_FLAG
+                hdr = struct.pack("!BBBBI", version, pkt_type, seq_no, flags,
+                                  session_id) + struct.pack("!I", len(pkt_body))
+                pkt = hdr + pkt_body
+
+                s.sendall(pkt)
+                _emit(on_packet, "tx",
+                      f"TACACS+ Auth {'START' if pkt_index == 0 else 'CONTINUE'} "
+                      f"#{pkt_index} (file payload)", pkt)
+                total_sent += len(pkt)
+                pkt_index += 1
+                offset += CHUNK
+
+                try:
+                    resp = s.recv(4096)
+                    _emit(on_packet, "rx", "TACACS+ response", resp)
+                    result["response"] = f"received {len(resp)} bytes"
+                except socket.timeout:
+                    pass
+
+                if offset >= len(data_field) and pkt_index > 0:
+                    break
+
+        result["sent_bytes"] = total_sent
+        result["ok"] = True
+        result["detail"] = (f"sent {total_sent} bytes across {pkt_index} TACACS+ "
+                            f"packet(s) on TCP/{port}")
+    except Exception as e:
+        result["detail"] = f"{type(e).__name__}: {e}"
+    return result
+
+
+def send_file_radius(host, port, filename, data, on_packet=None, timeout=5):
+    """Send a file as one or more RADIUS Access-Request packets over UDP.
+
+    Wraps the file contents inside User-Password attribute values so that
+    Snort's RADIUS content rules inspect the payload.  The filename is
+    carried in a Proxy-State attribute in the first packet; file bytes are
+    chunked across subsequent packets (each kept inside a single UDP
+    datagram).  Uses the standard RADIUS binary packet format (Code 1 =
+    Access-Request, random Identifier, random Authenticator).
+    """
+    import hashlib as _hl
+
+    result = {"file": filename, "ok": False, "detail": "", "sent_bytes": 0, "response": None}
+
+    # Per-datagram budget: keep well within UDP send limit.
+    CHUNK = 128  # max User-Password value per RFC 2865 is 128 bytes
+    # Attribute helpers (inline to avoid importing the full radius module)
+    def _tlv(t, v):
+        ln = 2 + len(v)
+        if ln > 255:
+            v = v[:253]
+            ln = 255
+        return bytes([t, ln]) + v
+
+    try:
+        total_sent = 0
+        total_resp = 0
+        safe_name = filename.encode("utf-8", errors="replace")
+        offset = 0
+        pkt_index = 0
+        first = True
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(timeout)
+            try:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
+            except OSError:
+                pass
+            while offset < len(data) or first:
+                import os as _os, struct as _st, random as _rnd
+                ident = _rnd.randint(0, 255)
+                auth = _os.urandom(16)
+                attrs = []
+                # User-Name
+                attrs.append(_tlv(1, b"filesend@fuzzer"))
+                # NAS-IP-Address
+                attrs.append(_tlv(4, _st.pack("!I", 0xC0A80101)))
+                if first:
+                    # Carry filename in Proxy-State
+                    attrs.append(_tlv(33, safe_name[:253]))
+                    first = False
+                # File data chunk in User-Password attribute (type 2)
+                chunk = data[offset:offset + CHUNK]
+                if chunk:
+                    attrs.append(_tlv(2, chunk))
+                    offset += CHUNK
+                attrs_bytes = b"".join(attrs)
+                length = 20 + len(attrs_bytes)
+                header = _st.pack("!BBH", 1, ident, length)
+                pkt = header + auth + attrs_bytes
+                s.sendto(pkt, (host, int(port)))
+                _emit(on_packet, "tx", f"RADIUS Access-Request #{pkt_index} (file payload)", pkt)
+                total_sent += len(pkt)
+                pkt_index += 1
+                try:
+                    resp, _ = s.recvfrom(4096)
+                    _emit(on_packet, "rx", "RADIUS response", resp)
+                    total_resp += len(resp)
+                except socket.timeout:
+                    pass
+                if offset >= len(data) and not first:
+                    break
+        result["sent_bytes"] = total_sent
+        result["ok"] = True
+        if total_resp:
+            result["response"] = f"received {total_resp} bytes"
+        result["detail"] = (f"sent {total_sent} bytes across {pkt_index} RADIUS "
+                            f"Access-Request packet(s) on UDP/{port}")
+    except Exception as e:
+        result["detail"] = f"{type(e).__name__}: {e}"
+    return result
+
+
+def send_file_ldap(host, port, filename, data, on_packet=None, timeout=5):
+    """Send a file as one or more LDAP BindRequest messages over TCP.
+
+    Wraps the file contents inside the password (simple authentication)
+    field of an LDAP BindRequest so that any Snort content rules on
+    TCP 389 will see well-formed LDAP BER traffic.  The filename is
+    carried in the DN (bindDN) field.  Each chunk produces a separate
+    LDAPMessage SEQUENCE with an incrementing messageID.
+    """
+
+    result = {"file": filename, "ok": False, "detail": "", "sent_bytes": 0, "response": None}
+
+    # ---- Inline BER helpers (avoids importing the full ldap module) ----
+    def _ber_len(length):
+        if length < 0x80:
+            return bytes([length])
+        elif length < 0x100:
+            return bytes([0x81, length])
+        elif length < 0x10000:
+            return bytes([0x82, (length >> 8) & 0xFF, length & 0xFF])
+        else:
+            return bytes([0x84,
+                          (length >> 24) & 0xFF, (length >> 16) & 0xFF,
+                          (length >> 8) & 0xFF, length & 0xFF])
+
+    def _ber_int(value, tag=0x02):
+        """Encode an ASN.1 INTEGER."""
+        if value == 0:
+            payload = b'\x00'
+        elif value > 0:
+            raw = value.to_bytes((value.bit_length() + 8) // 8, 'big')
+            payload = raw
+        else:
+            payload = value.to_bytes((value.bit_length() + 9) // 8, 'big', signed=True)
+        return bytes([tag]) + _ber_len(len(payload)) + payload
+
+    def _ber_str(value, tag=0x04):
+        """Encode an ASN.1 OCTET STRING."""
+        return bytes([tag]) + _ber_len(len(value)) + value
+
+    def _ber_seq(contents, tag=0x30):
+        """Encode an ASN.1 SEQUENCE / constructed wrapper."""
+        return bytes([tag]) + _ber_len(len(contents)) + contents
+
+    CHUNK = 4000  # keep each BindRequest body well under TCP segment limit
+
+    try:
+        total_sent = 0
+        safe_name = filename.encode("utf-8", errors="replace")[:1024]
+        offset = 0
+        pkt_index = 0
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect((host, int(port)))
+
+            while offset < len(data) or pkt_index == 0:
+                msg_id = (pkt_index + 1) & 0x7FFFFFFF
+                chunk = data[offset:offset + CHUNK]
+
+                # BindRequest ::= [APPLICATION 0] SEQUENCE {
+                #   version  INTEGER (3),
+                #   name     LDAPDN (OCTET STRING),
+                #   authentication CHOICE { simple [0] OCTET STRING }
+                # }
+                version = _ber_int(3)
+                dn = _ber_str(safe_name)
+                # simple auth: context-specific [0] primitive
+                auth = _ber_str(chunk, tag=0x80)
+
+                bind_body = version + dn + auth
+                bind_req = _ber_seq(bind_body, tag=0x60)  # APPLICATION 0 constructed
+
+                ldap_msg = _ber_int(msg_id) + bind_req
+                pkt = _ber_seq(ldap_msg)  # outer LDAPMessage SEQUENCE
+
+                s.sendall(pkt)
+                _emit(on_packet, "tx",
+                      f"LDAP BindRequest #{pkt_index} (file payload)", pkt)
+                total_sent += len(pkt)
+                pkt_index += 1
+                offset += CHUNK
+
+                try:
+                    resp = s.recv(4096)
+                    _emit(on_packet, "rx", "LDAP BindResponse", resp)
+                    result["response"] = f"received {len(resp)} bytes"
+                except socket.timeout:
+                    pass
+
+                if offset >= len(data) and pkt_index > 0:
+                    break
+
+        result["sent_bytes"] = total_sent
+        result["ok"] = True
+        result["detail"] = (f"sent {total_sent} bytes across {pkt_index} LDAP "
+                            f"BindRequest(s) on TCP/{port}")
     except Exception as e:
         result["detail"] = f"{type(e).__name__}: {e}"
     return result

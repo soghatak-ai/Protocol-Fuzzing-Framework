@@ -32,9 +32,16 @@ from main import (fuzzer_state, event_log, reset_state, run_fuzzer, run_fuzzer_l
                   SNMP_STRATEGY_NAMES, SNMP_DEFAULT_WEIGHTS,
                   ICMP_STRATEGY_NAMES, ICMP_DEFAULT_WEIGHTS,
                   ICMPV6_STRATEGY_NAMES, ICMPV6_DEFAULT_WEIGHTS,
+                  SIP_STRATEGY_NAMES, SIP_DEFAULT_WEIGHTS,
+                  MGCP_STRATEGY_NAMES, MGCP_DEFAULT_WEIGHTS,
+                  RTSP_STRATEGY_NAMES, RTSP_DEFAULT_WEIGHTS,
+                  RADIUS_STRATEGY_NAMES, RADIUS_DEFAULT_WEIGHTS,
+                  TACACS_STRATEGY_NAMES, TACACS_DEFAULT_WEIGHTS,
+                  LDAP_STRATEGY_NAMES, LDAP_DEFAULT_WEIGHTS,
                   dns_bandit, ftp_bandit, http_bandit, smtp_bandit, ssh_bandit,
                   smb2_bandit, smb3_bandit, http2_bandit, dcerpc_bandit, dhcp_bandit,
-                  dhcpv6_bandit, snmp_bandit, icmp_bandit, icmpv6_bandit)
+                  dhcpv6_bandit, snmp_bandit, icmp_bandit, icmpv6_bandit, sip_bandit,
+                  mgcp_bandit, rtsp_bandit, radius_bandit, tacacs_bandit, ldap_bandit)
 from protocol.ftp import FTP_STRATEGY_LABELS
 from protocol.http import HTTP_STRATEGY_LABELS
 from protocol.smtp import SMTP_STRATEGY_LABELS
@@ -47,10 +54,16 @@ from protocol.dhcpv6 import DHCPV6_STRATEGY_LABELS
 from protocol.snmp import SNMP_STRATEGY_LABELS
 from protocol.icmp import ICMP_STRATEGY_LABELS
 from protocol.icmpv6 import ICMPV6_STRATEGY_LABELS
+from protocol.sip import SIP_STRATEGY_LABELS
+from protocol.mgcp import MGCP_STRATEGY_LABELS
+from protocol.rtsp import RTSP_STRATEGY_LABELS
+from protocol.radius import RADIUS_STRATEGY_LABELS
+from protocol.tacacs import TACACS_STRATEGY_LABELS
+from protocol.ldap import LDAP_STRATEGY_LABELS
 from engine.code_collector import (collect_to_dict, collect_to_single_text, VALID_EXTENSIONS,
                                     minify_code, hotspot_filter, extract_repo_map,
                                     build_optimized_context, estimate_tokens)
-from transport.file_sender import send_file_http, send_file_ftp, send_file_smtp, send_file_ssh, send_file_smb, send_file_http2, send_file_dcerpc, send_file_dhcp, send_file_dhcpv6, send_file_snmp, send_file_icmp, send_file_icmpv6
+from transport.file_sender import send_file_http, send_file_ftp, send_file_smtp, send_file_ssh, send_file_smb, send_file_http2, send_file_dcerpc, send_file_dhcp, send_file_dhcpv6, send_file_snmp, send_file_icmp, send_file_icmpv6, send_file_sip, send_file_mgcp, send_file_rtsp, send_file_radius, send_file_tacacs, send_file_ldap
 from engine.semantic_search import index_codebase, get_all_chunks
 from engine.orchestrator import generate_tasks
 from engine.explorers import run_explorers
@@ -103,6 +116,18 @@ def _labels_for(protocol):
         return ICMP_STRATEGY_LABELS
     if protocol == "icmpv6":
         return ICMPV6_STRATEGY_LABELS
+    if protocol == "sip":
+        return SIP_STRATEGY_LABELS
+    if protocol == "mgcp":
+        return MGCP_STRATEGY_LABELS
+    if protocol == "rtsp":
+        return RTSP_STRATEGY_LABELS
+    if protocol == "radius":
+        return RADIUS_STRATEGY_LABELS
+    if protocol == "tacacs":
+        return TACACS_STRATEGY_LABELS
+    if protocol == "ldap":
+        return LDAP_STRATEGY_LABELS
     return DNS_STRATEGY_LABELS
 
 
@@ -133,6 +158,18 @@ def _bandit_for_proto(protocol):
         return icmp_bandit
     if protocol == "icmpv6":
         return icmpv6_bandit
+    if protocol == "sip":
+        return sip_bandit
+    if protocol == "mgcp":
+        return mgcp_bandit
+    if protocol == "rtsp":
+        return rtsp_bandit
+    if protocol == "radius":
+        return radius_bandit
+    if protocol == "tacacs":
+        return tacacs_bandit
+    if protocol == "ldap":
+        return ldap_bandit
     return dns_bandit
 
 
@@ -527,6 +564,102 @@ ICMPv6 STRATEGIES (used when fuzzing ICMPv6 processing — IP protocol 58, Snort
 - dest_unreachable_state_exhaustion: ICMPv6 Destination Unreachable (type 1) flood with unique embedded 5-tuples — each message references different src/dst IPv6 + ports + NH, forcing IDS to look up/create state entries for non-existent flows, mixed codes (no-route/admin-prohibited/beyond-scope/addr-unreachable/port-unreachable/src-addr-failed/reject-route), burst of 500+ unique entries. Targets connection tracking state table. Triggers: memory-exhaustion, state-corruption, dos
 - hop_limit_manipulation: IPv6 Hop Limit field abuse — hop_limit=0 (should be discarded), hop_limit=1 (link-local only), hop_limit=255 (NDP requirement, valid for on-link), ICMPv6 messages with wrong hop limit for their type (Echo with HL=1, RA with HL≠255), Time Exceeded (type 3) generation trigger, mixed hop limits in fragment chain. Targets hop limit validation and time-exceeded generation. Triggers: evasion, state-corruption
 - rpl_dao_dis_attack: RPL (Routing Protocol for Low-Power Networks, RFC 6550) ICMPv6 message abuse — RPL DIS (type 155 code 0) flood, DAO (code 2) with crafted RPL Instance ID and DODAG ID, oversized RPL options, RPL messages outside LLN context (sent to general IPv6 infrastructure), DIO (code 1) with conflicting rank/version, Security section with invalid algorithm. Targets RPL-aware IDS parsers processing ICMPv6 type 155. Triggers: state-corruption, oob-read, evasion, crash
+
+SIP STRATEGIES (used when fuzzing SIP inspectors, e.g. Snort 3 sip inspector gid 140 — text-based, UDP 5060, RFC 3261 core + RFC 4566 SDP body):
+- comment_recursion_bomb: CVE-2023-32887 (MediaTek) pattern — deeply nested parenthesized comments (500-2000 levels) in Via/From/Contact/display-name headers. RFC 3261 BNF allows recursive comments: comment = LPAREN *(ctext / quoted-pair / comment) RPAREN. Each '(' pushes ~0x30 bytes on the stack in recursive-descent parsers. Variants: single-header deep nesting, multi-header compound, incremental depth sweep to find exact crash threshold. Targets comment parser recursion. Triggers: stack-overflow, crash, dos
+- content_length_overflow: OpenSIPS GHSA-c6j5-f4h4-2xrq — Content-Length integer overflow when number = number*10 + digit wraps negative/huge. Values: 2^31, 2^63, 2^64-1, negative (-1, -2147483648), non-numeric ("AAAA", "0x1000", "1e10"), leading zeros (200 zero digits), whitespace-padded, multiple conflicting Content-Length headers. Targets CL parser arithmetic and body boundary detection. Triggers: integer-overflow, oob-read, heap-overflow
+- oversized_header_overflow: sngrep PR#480 (stack buffer overflow in Call-ID/Warning) — headers with 20-50KB values: giant Call-ID, oversized Via branch parameter, Contact URI with huge userinfo, Warning text, display-name, tag parameter, Reason header text, or multiple oversized headers simultaneously. Targets fixed-size buffer copies. Triggers: buffer-overflow, oob-write, heap-overflow
+- invite_flood_dos: Asterisk PJSIP INVITE flood DoS — rapid INVITE with unique branch/CSeq/Call-ID creating distinct transactions (unique_dialog), or re-INVITE storm sharing same Call-ID (same_dialog), REGISTER flood, OPTIONS flood, mixed-method flood, CANCEL race (INVITE+immediate CANCEL), ACK storm for non-existent dialogs, out-of-dialog BYE flood. Targets connection/dialog/transaction state exhaustion. Triggers: memory-exhaustion, state-corruption, dos
+- compact_form_desync: IDS evasion via SIP compact header forms — RFC 3261 defines compact alternatives: Via=v, From=f, To=t, Call-ID=i, Contact=m, Content-Type=c, Content-Length=l, Subject=s, Supported=k. Send same header in both long and compact form with conflicting values (Via:safe + v:evil). IDS keys on one form, UA reads the other. Variants: all-compact message, mixed same-header duplicates, CL/l conflict for body desync. Targets header normalization. Triggers: evasion, state-corruption
+- hcolon_whitespace_evasion: RFC 3261 HCOLON = *(SP/HTAB) ":" SWS — whitespace before colon is legal but most IDS signatures match "Via:" without whitespace. Inject space/tab/multiple-whitespace before colon on all mandatory headers ("Via : ...", "From\t: ...", extreme 2000-char whitespace padding). Also test \x0b/\x0c (VT/FF) as whitespace variants. Targets signature-based detection. Triggers: evasion, state-corruption
+- line_folding_obfuscation: RFC 3261 header continuation — lines beginning with SP/HTAB fold into previous header value as single SP. Split Via value, From URI, Call-ID, branch parameter across continuation lines to break contiguous-string signature matching. Variants: single fold, multi-fold (20+ continuation lines), fold mid-branch to hide z9hG4bK magic cookie, fold Content-Length to confuse body boundary, every header using folding. Targets header reassembly. Triggers: evasion, oob-read, state-corruption
+- content_length_smuggling: Content-Length vs actual body desync for request smuggling — CL shorter than body (IDS stops reading, UA sees all), CL longer (IDS reads into next message), CL=0 with body present, safe SDP + hidden evil SDP appended past CL boundary, no CL on UDP (body goes to datagram end), two SIP messages concatenated in one datagram, NUL bytes in body truncating IDS string matching. Targets body boundary detection. Triggers: evasion, oob-read, state-corruption
+- uri_escape_injection: Request-URI manipulation — %00 (null byte) in URI, %0d%0a (CRLF injection for header injection), oversized userinfo (5-20KB), malformed IPv6reference ([::1 missing bracket, oversized [FFF...]), embedded ?headers in URI (?Route=<evil>), transport= parameter confusion (tls/sctp/ws/unknown/\x00), hundreds of semicolon-delimited URI parameters, double percent-encoding (%2540). Targets URI parser. Triggers: oob-read, header-injection, buffer-overflow
+- multipart_mime_wrap: Hide payload inside MIME structures — multipart/mixed with SDP + hidden text/plain part, message/sipfrag containing inner INVITE, deeply nested boundaries (multipart inside multipart), boundary with special characters ('/"/=), missing closing boundary (parser reads past), oversized boundary (500-2000 chars), Content-Type says application/sdp but body is multipart, fake S/MIME application/pkcs7-mime envelope. Targets body content-type dispatch. Triggers: evasion, oob-read, state-corruption
+- malformed_startline: Request-Line / Status-Line malformation — bad SIP-Version (SIP/9.9, sip/2.0, SIP/2.0foo, HTTP/1.1, empty), method case manipulation (invite, InViTe), lines terminated with bare LF or bare CR instead of CRLF, leading CRLF flood (10-500), extra spaces between method/URI/version, missing URI, oversized method token (5-20KB), malformed status lines (code 999/0, missing reason, double space). Targets start-line parser. Triggers: state-corruption, oob-read, evasion
+- mandatory_header_omission: Missing or duplicated mandatory headers — drop Via/From/To/Call-ID/CSeq/Max-Forwards individually, CSeq method mismatch with Request-Line method (INVITE line but CSeq says BYE), duplicate Call-ID with different values, Max-Forwards=0 (loop), all mandatory headers missing (only start-line + Content-Length). Targets header validation and state machine. Triggers: state-corruption, null-deref, evasion
+- sdp_body_malformation: RFC 4566 SDP body torture — out-of-order lines violating required v/o/s/c/t/m order, missing required fields (v=, s=, o=), bad port in m= line (-1, 0, 99999, 4294967296, non-numeric), oversized o= origin username (5-20KB), malformed c= connection address (invalid IP, c=XX YY, TTL>255, oversized), NUL bytes in SDP values (illegal per byte-string BNF), m= line with 256 format types, huge a= attributes (5-20KB). Targets SDP parser. Triggers: oob-read, buffer-overflow, integer-overflow
+- digest_auth_state_desync: Malformed Digest auth + SIP state machine attacks — broken Authorization (oversized nonce 10-30KB, algorithm confusion SHA-512/UNKNOWN/empty, HTTP Basic instead of Digest, comma-only field list), out-of-dialog BYE flood (random To-tag referencing non-existent dialogs), 1xx provisional response flood (50-200 rapid 100/180/183), retransmit storm (same INVITE 50-200 times with identical branch = same transaction), REGISTER hijack (forged Contact for victim AOR), ACK for non-INVITE (CSeq method mismatch). Targets auth parser and transaction state machine. Triggers: state-corruption, oob-read, auth-bypass, dos
+
+MGCP STRATEGIES (used when fuzzing MGCP — text-based, UDP 2427/2727, RFC 3435 Media Gateway Control Protocol; Snort 3 has NO dedicated MGCP inspector, detection via text rules + appid):
+- verb_line_overflow: Command line buffer overflow — oversized verb (5-50KB), oversized transaction-id (>9 digits, 10-50KB digits), oversized endpoint name (deep 100-500 level "/" hierarchy, domain >255 chars), missing components (no txid/endpoint/version), null bytes in fields, extra junk after MGCP version. Grounded in CVE-2007-4293 (Cisco IOS MGCP crash on abnormal messages) and CSCej20505 (hang on oversized packets). Targets command line parser fixed buffers. Triggers: buffer-overflow, crash, hang
+- transaction_id_desync: Transaction state machine confusion — integer boundary values (0, 2^31, 2^32, 2^63), duplicate txid with different commands (violates 3-min reuse rule), response for unknown txid, non-numeric txid, leading zeros mass (100-10000 zeros), txid=0 (outside valid 1..999999999 range), negative txid, response-before-request race. Targets T-HIST ~30s cache and integer parsing. Triggers: state-corruption, integer-overflow, crash
+- endpoint_wildcard_abuse: Wildcard and endpoint naming attacks — double wildcard *@*, $ wildcard in wrong commands (NTFY), deep wildcard hierarchy (50-200 levels mixing * and literals), range wildcard overflow ([0-4294967296], 500-item ranges, non-numeric), mixed wildcards (*/$/ range), null bytes in endpoint, missing/duplicate @ separator, IPv6 endpoint host forms (oversized brackets). Targets wildcard expansion engine and resource allocation. Triggers: dos-amplification, oob-read, resource-exhaustion
+- parameter_injection: Single-letter parameter abuse — CRLF injection in param value (fake command injection via C: value), oversized hex IDs (CallId/ConnectionId/RequestIdentifier >32 hex, up to 50KB), unknown parameter codes (Y,W,V,J), duplicate params with conflicting values, empty values (no data after colon), hundreds of parameter lines (200-500), non-hex in hex fields, X+/X- vendor extension critical/non-critical forcing error 511/525. Targets parameter parser and value validation. Triggers: header-injection, buffer-overflow, state-corruption
+- digit_map_bomb: DigitMap regex compiler exploitation — exponential backtracking (ReDoS) via pathological patterns like (x|xx|xxx|xxxx)*, deeply nested parentheses (500-2000 levels causing stack overflow), oversized map (10-50KB, well over 2048 byte recommendation), unbalanced brackets/parens, null bytes in map, all 20 extension letters (force error 537), empty alternatives (||), huge range lists ([0,1,...,5000]). Targets egrep-like DigitMap compiler/interpreter. Triggers: stack-overflow, ReDoS, crash
+- local_connection_opts_overflow: LocalConnectionOptions (L: parameter) manipulation — codec list overflow (a: with 500-2000 codecs), bandwidth integer overflow (b: at 2^32/negative), packetization period overflow (p:0, p:2^32), encryption key abuse (k:clear: with 5-30KB key, k:uri: with huge URL), unknown LCO keys, duplicate keys with conflicting values, malformed ToS bits, all fields oversized simultaneously. Targets LCO parser, codec negotiation, integer arithmetic. Triggers: integer-overflow, buffer-overflow, crash
+- sdp_mgcp_body_mismatch: SDP body framing abuse — MGCP has NO Content-Length header (unlike SIP), body framing relies on packet end or piggyback dot separator. Variants: no blank line before SDP, binary data instead of SDP, double SDP bodies (local+remote), SDP containing piggyback dot ".\r\n" (message boundary confusion), oversized SDP (>4000 bytes forcing IP fragmentation), SDP with null bytes, truncated SDP, connection address mismatch with endpoint. Targets SDP parser in MGCP body-framing context. Triggers: body-smuggling, oob-read, crash
+- event_package_overflow: Event/signal package abuse — massive event list (500-2000 events in single R: line), deeply nested embedded RQNT E(R(...),S(...),D(...)) chains (20-100 levels of recursion), unknown package names, oversized action parameters (5-20KB), wildcard connection events (@*/@ $/@huge-id), observed events flood (200-1000 events in NTFY O: line), infinite-duration signals, nested E() inside E(). Targets event parser recursion and memory allocation. Triggers: stack-overflow, memory-exhaustion, crash
+- piggyback_smuggling: Message boundary parser attacks — legitimate AUEP + malicious DLCX piggybacked via "." separator, command+response in same datagram (protocol confusion), mass piggyback (100-300 messages), dot separator variations (bare ".\n", ". \r\n", "..\r\n", ".\x00\r\n"), dot inside SDP body confusing message boundary, no dot between commands (boundary confusion), dot-only datagram, response-then-command reversed order. Unique to MGCP among VoIP protocols. Triggers: evasion, state-corruption, parser-confusion
+- provisional_response_flood: Response processing abuse — flood of 50-200 provisional responses (100/101) for same txid, return codes outside valid range (0, -1, 999, 1000, 2^31), oversized commentary string (20-50KB), multiple final responses for same txid (200 then 500 then 200), ResponseAck (K:) with huge ranges (1-999999999 = ack ALL transactions), package-specific 8xx codes with/without /packageName. Targets response state machine and T-HIST cache. Triggers: memory-exhaustion, state-corruption, integer-overflow
+- version_protocol_confusion: Protocol identification attacks — bad MGCP version (2.0, 0.1, 99.99, -1.0), SIP INVITE sent to MGCP port 2427 (cross-protocol confusion for appid), HTTP request on MGCP port, verb case manipulation (mgcp/Mgcp/mGcP — case-insensitive per RFC), NCS/TGCP/MEGACO variant identifiers, missing MGCP keyword entirely, extra fields after version string, mixed MGCP+SIP in piggybacked datagram. No dedicated Snort MGCP inspector makes this especially effective. Triggers: appid-confusion, evasion, parser-error
+- notified_entity_hijack: N: parameter spoofing — redirect notifications to attacker address, oversized domain (5-20KB), port number overflow (99999, -1, 2^32), empty N: (disables DNS failover per RFC), multiple N: parameters (which wins?), IPv6 forms (missing bracket, oversized), null bytes in entity, CRLF injection in N: value to inject fake DLCX command. No built-in auth means any source can redefine the controlling Call Agent. Triggers: notification-hijack, buffer-overflow, command-injection
+- quarantine_handling_abuse: Quarantine state machine manipulation — Q:loop causing infinite event notification cycle, unknown quarantine methods, quarantine buffer flood (100-500 rapid NTFY piggybacked), conflicting Q: values (process+discard+loop simultaneously), Q:loop + embedded RQNT (complex state interaction), rapid RQNT commands racing each other with different Q: values. Targets quarantine event buffer management. Triggers: infinite-loop, memory-exhaustion, state-corruption
+- restart_cascade_dos: RSIP restart manipulation DoS — RSIP with RM:forced on wildcard endpoint * (all endpoints restart), RestartDelay integer overflow (RD: at 2^32/-1), rapid restart/cancel-graceful oscillation (state machine confusion), one RSIP per restart method (graceful/forced/restart/disconnected/cancel-graceful), RSIP with all reason codes including undefined ones, mass RSIP from many spoofed gateway addresses. Targets restart state machine and resource cleanup. Triggers: dos, state-corruption, resource-exhaustion
+
+RTSP STRATEGIES (used when fuzzing RTSP — text-based, TCP 554, RFC 2326/7826 Real Time Streaming Protocol; Snort 3 has NO dedicated RTSP inspector, detection via AppID + generic text content rules):
+- request_line_malformation: CVE-2013-6933/6934 (Live555) pattern — leading space/tab before method causes infinite loop writing to stack in parseRTSPRequestString, missing/oversized method token (20KB), bad RTSP version (RTSP/9.9, HTTP/1.1, empty, lowercase rtsp/1.0), malformed URI with path traversal (../../etc/passwd), oversized URI path (>4KB), extra spaces between request-line fields. Targets request-line parser fixed buffers. Triggers: stack-overflow, crash, infinite-loop, buffer-overflow
+- content_length_smuggling: HTTP CL.0/CL.TE adapted for RTSP — Content-Length shorter than body (IDS stops reading, server sees all), CL longer than body (server reads into next request), CL=0 with body present, huge CL (2^31/2^63 trigger allocation), negative CL (-1, -2147483648), multiple conflicting CL headers, non-numeric CL (AAAA, 0x1000, 1e10), CL on bodyless methods (OPTIONS). Targets body boundary detection. Triggers: evasion, oob-read, integer-overflow, state-corruption
+- transport_header_overflow: SETUP Transport header abuse — conflicting unicast+multicast, bad port ranges (0-0, 99999, -1, 65536), huge TTL (>255), interleaved channel overlap, unknown lower-transport (SCTP/QUIC/unknown), oversized ssrc (>8 hex, up to 5000), many conflicting parameters simultaneously, oversized transport header (>4KB with vendor extension params). Targets Transport header parser. Triggers: buffer-overflow, integer-overflow, state-corruption
+- interleaved_binary_injection: RTSP-unique $ (0x24) framing — interleaved binary: $ + 1-byte channel + 2-byte length (big-endian) + data. Bad channel IDs (200-255), huge length field (0xFFFF with small data), $ injected mid-RTSP-header, interleaved data without prior SETUP, nested $ frames ($ inside $ data payload), zero-length frames, rapid frame flood (100-500), $ frame mixed with partial RTSP request. Targets interleaved binary framing parser. Triggers: oob-read, buffer-overflow, state-corruption, crash
+- session_state_confusion: CVE-2019-15232 (duplicate session ID UAF), CVE-2019-7314 (UAF on stream termination) — PLAY without prior SETUP (Init state, should fail 455), wrong/invalid session ID, duplicate session IDs in consecutive SETUPs, rapid create/teardown cycles (20-100 SETUP+TEARDOWN), PAUSE in Init state, RECORD without SETUP, TEARDOWN with empty session, SETUP flood (50-200 rapid SETUPs for resource exhaustion). Targets session state machine. Triggers: use-after-free, state-corruption, memory-exhaustion, dos
+- http_tunneling_abuse: CVE-2018-4013 (stack BOF in lookForHeader), CVE-2019-6256 (crash in handleHTTPCmd_TunnelingPOST) — oversized HTTP GET/POST headers for RTSP-over-HTTP tunneling (5-30KB), x-sessioncookie manipulation (oversized/empty/null-bytes/path-traversal/header-injection), Content-Base injection with malicious URI, HTTP POST with base64-encoded RTSP body, oversized POST body, many HTTP headers (50-200), mixed HTTP+RTSP in same connection, HTTP CONNECT tunnel attempt. Targets HTTP tunneling parser. Triggers: stack-overflow, crash, buffer-overflow, header-injection
+- sdp_body_malformation: RFC 4566 SDP body torture — out-of-order SDP lines violating v/o/s/c/t/m order, missing mandatory SDP fields (no v=/s=/o=), oversized m= line (256 format types), CL vs SDP body size mismatch, null bytes in SDP values, oversized SDP (>10KB with huge a=fmtp attributes), bad port in m= line (-1/0/99999/4294967296), malformed c= connection address (XX YY, 999.999.999.999, oversized). Targets SDP parser. Triggers: oob-read, buffer-overflow, integer-overflow, crash
+- oversized_header_overflow: SSD Advisory (URI suffix concatenation BOF) — oversized CSeq (non-numeric 5-30KB), oversized Session ID (500-5000 chars, RFC says ≥8), oversized Range header (10KB of 9s), many headers simultaneously (200-400 X-Fuzz headers), single header >64KB, oversized User-Agent (10-50KB), URI suffix overflow (5-20KB path), all headers oversized simultaneously. Targets fixed-size buffer copies. Triggers: buffer-overflow, oob-write, heap-overflow
+- cseq_pipelining_abuse: CSeq integer wrap (2^31/2^32/2^63), duplicate CSeq in same request, non-numeric CSeq (abc/-1/1.5/empty), missing CSeq entirely, huge pipelined request burst (100-500 OPTIONS), pipelined PLAY with overlapping time ranges, CSeq=0 boundary value, CSeq with embedded method name (SIP-style "1 OPTIONS" vs RTSP integer-only). Targets CSeq parser and pipelining state machine. Triggers: integer-overflow, state-corruption, memory-exhaustion
+- method_verb_fuzzing: IoTFuzzSentry pattern — RTSP methods are CASE-SENSITIVE (unlike SIP/MGCP): case mutations (describe, Describe, dESCRIBE), HTTP methods as RTSP (GET/POST/PUT/DELETE/HEAD), empty method, null bytes in method (DES\x00CRIBE), oversized method token (1-10KB), unknown extension methods (XPLAY/SUBSCRIBE/NOTIFY), methods with special characters (PLAY;/DESCRIBE\t/OPTIONS\r), mixed valid+invalid in pipelined requests. Targets method dispatch. Triggers: state-corruption, evasion, crash
+- uri_encoding_evasion: Percent-encoding of path components (%6D%65%64%69%61 = media), double-encoding (%252e%252e = %2e%2e = ..), mixed case URI scheme (RtSp://rTsP://), null bytes in path (%00), path traversal with encoding (%2e%2e/), overlong UTF-8 encoding of / (C0 AF / E0 80 AF), fragment identifiers (undefined in RTSP), oversized percent-encoded URI (2000-5000 encoded chars). No Snort RTSP inspector means encoding evasion is especially effective. Triggers: evasion, path-traversal, oob-read
+- crlf_header_injection: CRLF (\r\n) injection in header values to inject extra headers, CRLF to inject fake RTSP response (response splitting), Unicode line separators (U+2028/U+2029/U+0085), bare LF without CR, bare CR without LF, header folding with continuation lines (SP/HTAB), percent-encoded CRLF in URI (%0d%0a), multiple injection points across different headers. Targets header parser line termination. Triggers: header-injection, evasion, response-splitting
+- tcp_segmentation_evasion: Ptacek & Newsham IDS evasion — full RTSP message designed for tiny TCP segments (1-byte), split at method/URI boundary, split mid-header-name, large payload requiring many segments (5-20KB padding), interleaved binary between RTSP headers, duplicate request (overlap simulation), null bytes between headers (segment boundary marker), very small request (under minimum segment check). NOTE: payload delivered as one block; actual TCP segmentation handled by transport layer. Triggers: evasion, framing-confusion
+- range_time_format_abuse: NPT overflow (50-digit numbers, 99999999999999999, -1, inf), SMPTE overflow (99:99:99:99.99, negative, 20-digit hours), UTC clock overflow (99999999T999999Z), negative range (end before start, npt=100-50), mixed formats in same Range header (npt + smpte), unsupported format (bytes=, frames=, unknown=), Range on wrong method (OPTIONS), multiple Range headers in single request. Targets time range parser. Triggers: integer-overflow, state-corruption, crash
+
+RADIUS STRATEGIES (used when fuzzing RADIUS — binary, UDP 1812 auth / 1813 acct / 3799 CoA; RFC 2865/2866/3579/5176/6929; Snort 3 has NO dedicated RADIUS inspector, detection via generic byte_test/content rules + AppID):
+- authenticator_manipulation: CVE-2024-3596 BlastRADIUS surface — all-zero Authenticator, repeated-byte patterns, all-0xFF, correct MD5 hash then flipped bit, Request Authenticator copied from a previous response, random entropy. Targets MD5-based authentication model. Triggers: auth-bypass, state-corruption, evasion
+- attribute_tlv_overflow: Attribute Type-Length-Value parser abuse — length=2 (zero-value, minimum), length=1 (underflow), length=0xFF (oversize), length exceeding remaining packet, 200 tiny attributes stressing loop, unknown type codes (192-255), duplicate attributes with conflicting values, attribute chain exactly filling 4096-byte packet. Targets attribute parser. Triggers: oob-read, buffer-overflow, integer-overflow
+- user_password_encryption_abuse: User-Password (attr 2) MD5 XOR chain abuse (RFC 2865 §5.2) — max 128-byte password, zero-length password, 129-byte overflow, all-zero cipher blocks, repeating plaintext forcing identical cipher blocks, non-16-aligned length, shared-secret="" (empty key). Targets the encrypt/decrypt XOR chain. Triggers: oob-read, buffer-overflow, crypto-weakness
+- vendor_specific_overflow: Vendor-Specific (type 26) attribute abuse (RFC 2865 §5.26) — vendor-id=0/0xFFFFFFFF/Cisco(9)/Microsoft(311), oversized vendor-data (253 bytes), vendor-type=0/0xFF, vendor-length mismatch, multiple VSAs in single attribute, 50-VSA flood, nested vendor TLVs. Targets vendor attribute dispatch. Triggers: oob-read, buffer-overflow, integer-overflow
+- wimax_continuation_attack: WiMAX continuation attribute attack (CVE-2017-10984/10985) — Vendor-Id 24757 with continuation flag set, zero-length continuation (infinite loop), oversized continuation chain (50KB across 200+ attributes), continuation flag on non-WiMAX vendor, alternating continuation/non-continuation, truncated mid-continuation. Targets WiMAX continuation coalescing. Triggers: infinite-loop, heap-overflow, oob-write, crash
+- eap_message_fragmentation: EAP-Message (attr 79) fragmentation abuse (RFC 3579) — 20KB EAP split across 80+ attributes, single oversized EAP-Message (253 bytes), EAP with no Message-Authenticator (RFC violation), conflicting EAP Code/Identifier across fragments, EAP-TLS with 10KB certificate blob, zero-length EAP-Message, out-of-order fragment reassembly. Targets EAP reassembly. Triggers: heap-overflow, oob-read, state-corruption
+- message_authenticator_malform: Message-Authenticator (attr 80) malformation (RFC 3579 §3.2) — wrong length (not 18 bytes), all-zero HMAC, truncated (8 bytes), oversized (24 bytes), correct HMAC then bit-flipped, duplicate Message-Authenticator attributes, Message-Authenticator without EAP-Message. Targets HMAC-MD5 verification. Triggers: auth-bypass, oob-read, state-corruption
+- extended_attribute_abuse: Extended attribute abuse (RFC 6929) — Extended-Type (241-244) with oversized data, Long-Extended-Type (245-246) with More flag chaining (50 fragments), nested TLV inside extended, Extended Vendor-Specific (EVS) with unknown vendor, truncated extended attribute, zero-length extended data, More flag without continuation. Targets extended attribute parser. Triggers: oob-read, buffer-overflow, state-corruption
+- length_field_desync: Packet Length field desynchronization — Length < 20 (below minimum), Length > actual UDP payload (OOB read), Length = 20 (header only, no attributes), Length = 4096 (max), Length = 0xFFFF, Length contradicting attribute chain total, off-by-one length. Targets packet boundary detection. Triggers: oob-read, integer-overflow, buffer-overflow
+- code_confusion: RADIUS Code / packet type confusion — undefined codes (14-39, 50-252), Code=0 (invalid), Code=255, server-only codes from client (Access-Accept/Reject/Challenge), Status-Server/Status-Client probes, rapid code cycling. Targets code dispatch and validation. Triggers: state-corruption, oob-read, null-deref
+- proxy_state_injection: Proxy-State (attr 33) injection (BlastRADIUS attack vector) — 200 Proxy-State attributes consuming packet space, oversized Proxy-State (253 bytes), Proxy-State carrying chosen-prefix collision data, empty Proxy-State, Proxy-State with embedded NUL/control bytes, duplicate Proxy-State chain. MUST be forwarded unmodified by proxies. Triggers: auth-bypass, buffer-overflow, evasion
+- coa_disconnect_abuse: CoA / Disconnect abuse (RFC 5176, port 3799) — CoA-Request with unknown attributes, Disconnect-Request with conflicting session identifiers, CoA with oversized Event-Timestamp, Disconnect-NAK spoofing, rapid CoA flood (100+), CoA with empty Authenticator, Disconnect with all error-cause codes (401-603). Targets dynamic authorization. Triggers: state-corruption, dos, auth-bypass
+- accounting_desync: Accounting protocol desynchronization (port 1813) — Acct-Status-Type cycling (Start/Stop/Interim-Update/On/Off), Acct-Session-Id reuse across different NAS-IP, Acct-Delay-Time = 0xFFFFFFFF (huge backlog), duplicate Accounting-Request with different Acct-Status, missing mandatory attributes, Acct-Input/Output-Gigawords overflow, rapid accounting flood. Targets accounting state machine. Triggers: state-corruption, integer-overflow, dos
+- nas_filter_rule_crash: NAS-Filter-Rule (attr 92) pre-auth crash — 253-byte oversized filter rule (FreeRADIUS 2026 vulnerability), 100+ NAS-Filter-Rule attributes, NAS-Filter-Rule with embedded NUL bytes, filter rule with format string characters (%n%s), empty filter rule, filter rule in Access-Request (pre-auth, no authentication needed). Targets filter rule parsing. Triggers: buffer-overflow, crash, format-string
+
+TACACS+ STRATEGIES (used when fuzzing TACACS+ — binary, TCP 49; RFC 8907; 12-byte cleartext header + MD5 XOR pad obfuscated body; Snort 3 has NO dedicated TACACS+ inspector, detection via generic byte_test/content rules):
+- header_manipulation: TACACS+ 12-byte header abuse — invalid major/minor version nibbles (0x00, 0xFF, 0xD0), undefined packet types (0x00, 0x04-0xFF), seq_no=0 (invalid), seq_no=even (server-only), flags field manipulation (TAC_PLUS_UNENCRYPTED_FLAG toggling, undefined flag bits 0xFE), session_id=0/0xFFFFFFFF, body_length=0xFFFFFFFF vs actual body. Targets header parser and version/type dispatch. Triggers: oob-read, integer-overflow, state-corruption
+- length_field_overflow: Body length field desynchronization — declared length > actual body (OOB read into next packet), declared length=0 with non-empty body, declared length=0xFFFFFFFF (4GB allocation attempt), off-by-one length, length < minimum body size for packet type, length contradicting TCP segment boundary. Targets body length validation and buffer allocation. Triggers: heap-overflow, oob-read, integer-overflow, dos
+- obfuscation_confusion: MD5 XOR pad obfuscation abuse (RFC 8907 §4.6) — empty shared secret (cleartext fallback), all-zero pseudo_pad forcing, key/body alignment mismatch, obfuscated body with TAC_PLUS_UNENCRYPTED_FLAG set (contradiction), cleartext body without flag, truncated pseudo_pad chain, key rotation mid-session. Targets encrypt/decrypt XOR chain. Triggers: auth-bypass, crypto-weakness, state-corruption
+- authentication_start_fuzz: Authentication START body abuse — invalid action codes (0x00, 0x05-0xFF), invalid authen_type (0x00, 0x07-0xFF beyond ASCII/PAP/CHAP/MSCHAP/MSCHAPv2/ARAP), invalid authen_service (0x00, 0x09-0xFF), user_len=255 with short user, port_len/rem_addr_len/data_len mismatches, oversized user field (255 bytes), empty user for authorization bypass, data field with embedded NUL. Targets authentication START parser. Triggers: oob-read, buffer-overflow, auth-bypass
+- authentication_continue_fuzz: Authentication CONTINUE body abuse — user_msg_len=0xFFFF with short data, data_len=0xFFFF, TAC_PLUS_CONTINUE_FLAG_ABORT set with valid data, abort flag without flag, oversized user_msg (65535 bytes), empty continue (zero-length both fields), continue without prior START (state violation). Targets authentication CONTINUE parser and state machine. Triggers: oob-read, state-corruption, integer-overflow
+- authorization_arg_overflow: Authorization REQUEST argument overflow — arg_cnt=255 with 255 arg_len bytes, individual arg_len=255, total args exceeding body length, zero-length args, arg containing embedded NUL/newline, duplicate service/cmd/protocol args with conflicting values, oversized authen_method/priv_lvl/authen_type/authen_service fields. Targets authorization argument parser and loop. Triggers: heap-overflow, oob-read, integer-overflow
+- accounting_flag_confusion: Accounting REQUEST flag abuse — undefined flag combinations (all bits set 0x1E), TAC_PLUS_ACCT_FLAG_START|STOP simultaneously, WATCHDOG without START, WATCHDOG|STOP simultaneously, flags=0x00 (no flag), rapid flag cycling across packets in same session. Targets accounting state machine and flag validation. Triggers: state-corruption, logic-error, dos
+- session_state_desync: Session state machine desynchronization — CONTINUE without START, REPLY without REQUEST, seq_no regression (5→3), seq_no gap (1→5 skipping 3), response on client seq_no (even), request on server seq_no (odd from server perspective), session_id reuse after completion, interleaved sessions on single TCP connection. Targets session tracking and state machine. Triggers: state-corruption, use-after-free, auth-bypass
+- single_connection_abuse: TAC_PLUS_SINGLE_CONNECT_FLAG abuse — flag set in first packet then ignored, flag toggling mid-connection, multiplexed sessions exceeding implementation limits (100+ concurrent), rapid session creation/teardown, single-connect with connection reset mid-body. Targets connection multiplexing. Triggers: dos, state-corruption, resource-exhaustion
+- bit_flip_attack: Targeted bit-flip mutations — single-bit flips in header version/type/flags fields, bit flips in body length field (especially MSB), bit flips in obfuscation pseudo_pad alignment bytes, bit flips in authentication status codes, systematic walking-ones pattern across first 24 bytes (header + body start). Targets parser edge cases and error handling. Triggers: crash, state-corruption, oob-read
+- session_id_collision_replay: Session-ID collision and replay — reuse completed session_id with new seq_no=1, two simultaneous sessions with same session_id, session_id=0 (potentially special-cased), session_id from captured traffic replayed with modified body, session_id brute-force (sequential IDs), collision with server-originated session. Targets session lookup and disambiguation. Triggers: auth-bypass, state-corruption, use-after-free
+- follow_status_abuse: FOLLOW status response exploitation — crafted REPLY with status=TAC_PLUS_AUTHEN_STATUS_FOLLOW (0x04) containing malicious server_msg with redirect data, FOLLOW with oversized data field, FOLLOW chain loop (redirect to self), FOLLOW with invalid server address format, multiple FOLLOW in sequence (chain depth). Targets FOLLOW redirect handling. Triggers: ssrf, infinite-loop, oob-read
+- oversized_field_bomb: Oversized field and packet bombs — single packet at TCP segment max (~64KB body), 100+ small packets in rapid succession, body filled with repeated 0xFF pattern (worst-case obfuscation), authentication START with all variable fields at max (user=255, port=255, rem_addr=255, data=255), total packet exceeding 65535 bytes via multiple TCP segments. Targets memory allocation and processing limits. Triggers: dos, heap-overflow, resource-exhaustion
+- tcp_segmentation_evasion: TCP segmentation for IDS evasion — split 12-byte header across two TCP segments (6+6), split at header/body boundary (12 + body), single-byte TCP segments for entire packet, out-of-order TCP segments, overlapping TCP segments with conflicting header bytes, PSH flag manipulation, TCP urgent pointer overlapping TACACS+ header. Targets TCP reassembly and TACACS+ parser interaction. Triggers: evasion, oob-read, state-corruption
+
+LDAP STRATEGIES (used when fuzzing LDAP — binary ASN.1 BER, TCP 389; RFC 4511; Snort 3 has NO dedicated LDAP inspector, detection via generic content rules on port 389/636):
+- ber_length_overflow: BER length-field overflow (CVE-2015-6908 pattern) — 4GB outer SEQUENCE length (0x84 0xFF 0xFF 0xFF 0xFF), 5-octet illegal length form (0x85), declared length >> actual body, messageID with huge length, DN octet string with 2GB length, bind body length lie, address-wrapping length offset, exact CVE-2015-6908 PoC bytes. Targets ber_get_next and length-parsing arithmetic. Triggers: heap-overflow, oob-read, assert-crash, integer-overflow
+- ber_nonminimal_encoding: Non-minimal BER length encoding for Snort content-rule bypass — same logical BindRequest encoded with 0x81 (1-byte long form), 0x84 (4-byte long form), leading-zero long form (0x83 0x00 0x00 N), all elements non-minimal, messageID non-minimal, mixed minimal/non-minimal. Snort content patterns match specific byte offsets; non-minimal encoding shifts all subsequent bytes. Triggers: evasion, parser-desync
+- ber_indefinite_constructed: BER constructs forbidden by RFC 4511 S5.1 — indefinite-form length (0x80 + 0x00 0x00 EOC) on outer SEQUENCE, indefinite on BindRequest body, constructed OCTET STRING (0x24) for DN, non-standard boolean values (0x01/0x7F/0x80 instead of 0xFF), multi-byte tag encoding for single-byte tags, injected EOC markers. Targets parsers that accept full BER but violate LDAP restrictions. Triggers: state-corruption, evasion, parser-confusion
+- truncated_tlv: Declared BER length exceeds available bytes — outer message truncated at 50%, DN claims 200 bytes but only 3 present, BindRequest body claims 127 bytes with none following, SearchRequest filter claims 64 bytes, cut in middle of multi-byte length field, single SEQUENCE tag byte alone, BindRequest with version but no DN/password. Targets ber_get_next style readers. Triggers: oob-read, assert-crash, null-deref
+- bind_auth_confusion: Malformed BindRequests — version=0, negative version (0xFF), version=0x7FFFFFFF, empty DN with non-empty password (RFC 4513 violation), SASL with unknown/empty/NUL-embedded mechanism, SASL credentials >64KB, reserved context-specific auth tags ([1]/[2]/[4]), non-minimal version INTEGER encoding. Targets bind authentication dispatch and version validation. Triggers: auth-bypass, oob-read, buffer-overflow, state-corruption
+- search_filter_bomb: CVE-2020-12243 pattern — deeply nested AND filters (100-500 levels), alternating OR/NOT nesting (80-300 levels), SubstringFilter with 20-100 wildcard components, AND/OR with zero children (empty SET), undefined filter context-specific tags (0xAA-0xBF), SubstringFilter with 10KB initial+final values, attribute description >10KB. Targets filter parser recursion and evaluation. Triggers: stack-overflow, dos, crash, infinite-loop
+- search_request_malform: Invalid SearchRequest fields — scope values 3/127/255 (only 0-2 valid), derefAliases 4/127/255 (only 0-3 valid), sizeLimit/timeLimit as negative integers (0xFFFFFFFF), sizeLimit/timeLimit as INT_MAX, oversized baseDN (8KB+ with random RDN components), 1500 attributes in attribute list, embedded NUL bytes in baseDN. Targets search parameter validation. Triggers: integer-overflow, dos, oob-read
+- message_id_confusion: Boundary and illegal messageID values — ID=0 (reserved for unsolicited notifications), negative ID (-1 as 0xFFFFFFFF), ID=INT_MAX (0x7FFFFFFF), non-minimal encoding (5 leading zero bytes), two pipelined requests with same ID, 9-byte integer >2^31, zero-length INTEGER for messageID. Targets IDS correlation and server session tracking. Triggers: state-corruption, evasion, oob-read
+- modify_add_dn_overflow: Oversized DNs and attribute values — 60KB DN in ModifyRequest/AddRequest/DeleteRequest, 500-component deep RDN nesting, NUL bytes in DN, invalid UTF-8 sequences in DN (0xFF 0xFE 0x80 0xC0 0xAF), 50KB attribute values in Modify replace, circular ModDN (newSuperior = self). Targets DN parsing, UTF-8 validation, and memory allocation. Triggers: buffer-overflow, dos, heap-overflow
+- extended_starttls_abuse: ExtendedRequest manipulation — StartTLS followed immediately by plaintext BindRequest, double StartTLS, unknown OIDs with 50KB random values, malformed OID strings (empty, double-dot, negative, NUL-embedded, non-numeric), ExtendedRequest with missing requestName, StartTLS with 60KB unexpected value, Who Am I? with 40KB payload. Targets extended operation dispatch and TLS state machine. Triggers: state-corruption, oob-read, dos
+- control_injection: LDAP control manipulation — unknown OIDs with critical=TRUE and random values, paged results with pageSize=0 (known crash vector), paged results with negative pageSize, 200 controls on single message, garbage BER in paged results control value, triplicate paged results controls, controls attached to UnbindRequest. Targets control processing and server-side pagination. Triggers: crash, dos, state-corruption, infinite-loop
+- nested_sequence_bomb: Deep BER SEQUENCE nesting for stack exhaustion — 1500 levels SEQUENCE nesting in BindRequest DN field, 800 levels packed inside DN octet string value, alternating SEQUENCE/SET 600 levels, 1000 levels inside control value. Targets recursive BER decoders in both IDS and LDAP servers. Triggers: stack-overflow, dos, crash
+- tcp_segment_evasion: TCP segmentation for IDS evasion — split outer SEQUENCE tag+length across TCP segments, split DN value across segments, split filter across segments, single-byte TCP segments for entire message, split inside non-minimal multi-byte length field, PSH flag at TLV boundaries, 10 pipelined LDAP messages to overwhelm reassembly. Snort has no LDAP-aware reassembly. Triggers: evasion, parser-desync
+- version_pdu_tag_confusion: Wrong/swapped APPLICATION-class tags — BindRequest tag (0x60) wrapping SearchRequest body, private-class tags (0xE0-0xFF) where application-class expected, LDAPv2 version with v3-only operations, multi-byte APPLICATION tag encoding, primitive/constructed bit flip (0x40 instead of 0x60), undefined APPLICATION tag numbers (30), SearchRequest tag on DeleteRequest body. Targets protocol operation dispatch and tag validation. Triggers: state-corruption, crash, evasion
 """
 
 # ---------------------------------------------------------------------------
@@ -546,7 +679,11 @@ For each vulnerability found, provide:
   - The severity: critical | high | medium | low
     (critical = RCE/arbitrary write; high = crash/DoS; medium = info leak; low = minor)
   - Protocol and port the payload should be sent on
-  - Which mutation strategy from the list below BEST triggers this vulnerability
+  - Which mutation strategy from the list below BEST triggers this vulnerability (matched_strategy)
+  - strategy_protocol: the protocol family that the matched strategy belongs to — EXACTLY one of:
+    dns, ftp, http, smtp, ssh, smb2, smb3, http2, dcerpc, dhcp, dhcpv6, snmp, icmp, icmpv6, sip, mgcp, rtsp, radius, tacacs, ldap
+    (this disambiguates strategy names shared by multiple protocols, e.g. cmd_overflow, version_confusion)
+  - confidence: an integer 0-100 — how confident you are this is a REAL, triggerable bug (not theoretical)
 
 Be thorough but precise:
 - Do NOT report theoretical bugs guarded by runtime checks
@@ -574,6 +711,8 @@ Respond in valid JSON:
       "port": 31337,
       "preconditions": "Setup needed",
       "matched_strategy": "back_orifice",
+      "strategy_protocol": "dns",
+      "confidence": 90,
       "strategy_reasoning": "Why this strategy triggers it"
     }
   ],
@@ -641,7 +780,7 @@ SEVERITY_MULTIPLIERS = {
 
 def compute_weights_from_vulns(verified_vulns):
     """Deterministic weight computation from verified vulnerabilities.
-    Returns (dns_weights, ftp_weights, http_weights, smtp_weights, ssh_weights, smb2_weights, smb3_weights, http2_weights, dcerpc_weights, dhcp_weights, dhcpv6_weights, snmp_weights, icmp_weights, icmpv6_weights, reasoning_str)."""
+    Returns (dns_weights, ftp_weights, http_weights, smtp_weights, ssh_weights, smb2_weights, smb3_weights, http2_weights, dcerpc_weights, dhcp_weights, dhcpv6_weights, snmp_weights, icmp_weights, icmpv6_weights, sip_weights, mgcp_weights, rtsp_weights, radius_weights, tacacs_weights, ldap_weights, reasoning_str)."""
 
     # Start with default weights
     dns_w = dict(zip(DNS_STRATEGY_NAMES, DNS_DEFAULT_WEIGHTS))
@@ -658,9 +797,49 @@ def compute_weights_from_vulns(verified_vulns):
     snmp_w = dict(zip(SNMP_STRATEGY_NAMES, SNMP_DEFAULT_WEIGHTS))
     icmp_w = dict(zip(ICMP_STRATEGY_NAMES, ICMP_DEFAULT_WEIGHTS))
     icmpv6_w = dict(zip(ICMPV6_STRATEGY_NAMES, ICMPV6_DEFAULT_WEIGHTS))
+    sip_w = dict(zip(SIP_STRATEGY_NAMES, SIP_DEFAULT_WEIGHTS))
+    mgcp_w = dict(zip(MGCP_STRATEGY_NAMES, MGCP_DEFAULT_WEIGHTS))
+    rtsp_w = dict(zip(RTSP_STRATEGY_NAMES, RTSP_DEFAULT_WEIGHTS))
+    radius_w = dict(zip(RADIUS_STRATEGY_NAMES, RADIUS_DEFAULT_WEIGHTS))
+    tacacs_w = dict(zip(TACACS_STRATEGY_NAMES, TACACS_DEFAULT_WEIGHTS))
+    ldap_w = dict(zip(LDAP_STRATEGY_NAMES, LDAP_DEFAULT_WEIGHTS))
 
     reasoning_lines = ["Weight computation (deterministic formula):"]
     reasoning_lines.append(f"  Starting from default weights. {len(verified_vulns)} verified vulnerabilities.")
+
+    # Registry of protocol weight dicts. Order = deterministic first-match
+    # fallback (matches the legacy if/elif precedence). Each entry is
+    # (protocol_key, weight_dict, display_label, decimal_places).
+    _weight_dicts = [
+        ("dns", dns_w, "DNS", 4),
+        ("ftp", ftp_w, "FTP", 1),
+        ("http", http_w, "HTTP", 1),
+        ("smtp", smtp_w, "SMTP", 1),
+        ("ssh", ssh_w, "SSH", 1),
+        ("smb2", smb2_w, "SMB2", 1),
+        ("smb3", smb3_w, "SMB3", 1),
+        ("http2", http2_w, "HTTP2", 1),
+        ("dcerpc", dcerpc_w, "DCERPC", 1),
+        ("dhcp", dhcp_w, "DHCP", 1),
+        ("dhcpv6", dhcpv6_w, "DHCPv6", 1),
+        ("snmp", snmp_w, "SNMP", 1),
+        ("icmp", icmp_w, "ICMP", 1),
+        ("icmpv6", icmpv6_w, "ICMPv6", 1),
+        ("sip", sip_w, "SIP", 1),
+        ("mgcp", mgcp_w, "MGCP", 1),
+        ("rtsp", rtsp_w, "RTSP", 1),
+        ("radius", radius_w, "RADIUS", 1),
+        ("tacacs", tacacs_w, "TACACS+", 1),
+        ("ldap", ldap_w, "LDAP", 1),
+    ]
+    _by_key = {k: (wd, disp, dec) for k, wd, disp, dec in _weight_dicts}
+    # strategy name -> list of protocol keys that define it (in registry order)
+    _name_index = {}
+    for k, wd, _disp, _dec in _weight_dicts:
+        for s in wd:
+            _name_index.setdefault(s, []).append(k)
+    # Common ways the model may spell a protocol family hint.
+    _hint_aliases = {"smb": "smb2", "icmpv4": "icmp", "dhcp6": "dhcpv6", "tacacs+": "tacacs", "ldap+": "ldap"}
 
     # Apply multipliers
     for v in verified_vulns:
@@ -672,95 +851,36 @@ def compute_weights_from_vulns(verified_vulns):
         effective_mult = 1.0 + (mult - 1.0) * conf
         func = v.get("function", "?")
 
-        if strat in dns_w:
-            old = dns_w[strat]
-            dns_w[strat] = old * effective_mult
-            reasoning_lines.append(
-                f"  DNS/{strat}: {old:.4f} × {effective_mult:.2f} "
-                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {dns_w[strat]:.4f}")
-        elif strat in ftp_w:
-            old = ftp_w[strat]
-            ftp_w[strat] = old * effective_mult
-            reasoning_lines.append(
-                f"  FTP/{strat}: {old:.1f} × {effective_mult:.2f} "
-                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {ftp_w[strat]:.1f}")
-        elif strat in http_w:
-            old = http_w[strat]
-            http_w[strat] = old * effective_mult
-            reasoning_lines.append(
-                f"  HTTP/{strat}: {old:.1f} × {effective_mult:.2f} "
-                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {http_w[strat]:.1f}")
-        elif strat in smtp_w:
-            old = smtp_w[strat]
-            smtp_w[strat] = old * effective_mult
-            reasoning_lines.append(
-                f"  SMTP/{strat}: {old:.1f} × {effective_mult:.2f} "
-                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {smtp_w[strat]:.1f}")
-        elif strat in ssh_w:
-            old = ssh_w[strat]
-            ssh_w[strat] = old * effective_mult
-            reasoning_lines.append(
-                f"  SSH/{strat}: {old:.1f} × {effective_mult:.2f} "
-                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {ssh_w[strat]:.1f}")
-        elif strat in smb2_w:
-            old = smb2_w[strat]
-            smb2_w[strat] = old * effective_mult
-            reasoning_lines.append(
-                f"  SMB2/{strat}: {old:.1f} × {effective_mult:.2f} "
-                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {smb2_w[strat]:.1f}")
-            if strat in smb3_w:
-                old3 = smb3_w[strat]
-                smb3_w[strat] = old3 * effective_mult
-        elif strat in smb3_w:
-            old = smb3_w[strat]
-            smb3_w[strat] = old * effective_mult
-            reasoning_lines.append(
-                f"  SMB3/{strat}: {old:.1f} × {effective_mult:.2f} "
-                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {smb3_w[strat]:.1f}")
-        elif strat in http2_w:
-            old = http2_w[strat]
-            http2_w[strat] = old * effective_mult
-            reasoning_lines.append(
-                f"  HTTP2/{strat}: {old:.1f} × {effective_mult:.2f} "
-                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {http2_w[strat]:.1f}")
-        elif strat in dcerpc_w:
-            old = dcerpc_w[strat]
-            dcerpc_w[strat] = old * effective_mult
-            reasoning_lines.append(
-                f"  DCERPC/{strat}: {old:.1f} × {effective_mult:.2f} "
-                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {dcerpc_w[strat]:.1f}")
-        elif strat in dhcp_w:
-            old = dhcp_w[strat]
-            dhcp_w[strat] = old * effective_mult
-            reasoning_lines.append(
-                f"  DHCP/{strat}: {old:.1f} × {effective_mult:.2f} "
-                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {dhcp_w[strat]:.1f}")
-        elif strat in dhcpv6_w:
-            old = dhcpv6_w[strat]
-            dhcpv6_w[strat] = old * effective_mult
-            reasoning_lines.append(
-                f"  DHCPv6/{strat}: {old:.1f} × {effective_mult:.2f} "
-                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {dhcpv6_w[strat]:.1f}")
-        elif strat in snmp_w:
-            old = snmp_w[strat]
-            snmp_w[strat] = old * effective_mult
-            reasoning_lines.append(
-                f"  SNMP/{strat}: {old:.1f} × {effective_mult:.2f} "
-                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {snmp_w[strat]:.1f}")
-        elif strat in icmp_w:
-            old = icmp_w[strat]
-            icmp_w[strat] = old * effective_mult
-            reasoning_lines.append(
-                f"  ICMP/{strat}: {old:.1f} × {effective_mult:.2f} "
-                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {icmp_w[strat]:.1f}")
-        elif strat in icmpv6_w:
-            old = icmpv6_w[strat]
-            icmpv6_w[strat] = old * effective_mult
-            reasoning_lines.append(
-                f"  ICMPv6/{strat}: {old:.1f} × {effective_mult:.2f} "
-                f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {icmpv6_w[strat]:.1f}")
-        else:
+        candidates = _name_index.get(strat, [])
+        if not candidates:
             reasoning_lines.append(f"  WARNING: strategy '{strat}' not recognized, skipping")
+            continue
+
+        # Disambiguate strategy names shared across protocols (e.g. cmd_overflow
+        # in FTP+SMTP, version_confusion in HTTP+SSH) using the model-provided
+        # strategy_protocol hint. Falls back to deterministic first-match.
+        hint = (v.get("strategy_protocol") or "").strip().lower()
+        hint = _hint_aliases.get(hint, hint)
+        if hint in candidates:
+            target = hint
+        elif len(candidates) == 1:
+            target = candidates[0]
+        else:
+            target = candidates[0]  # deterministic first-match fallback
+            reasoning_lines.append(
+                f"  NOTE: '{strat}' is ambiguous across {candidates}; "
+                f"strategy_protocol hint '{hint or 'none'}' invalid → defaulting to {_by_key[target][1]}")
+
+        wd, disp, dec = _by_key[target]
+        old = wd[strat]
+        wd[strat] = old * effective_mult
+        reasoning_lines.append(
+            f"  {disp}/{strat}: {old:.{dec}f} × {effective_mult:.2f} "
+            f"(sev={sev}, conf={v.get('confidence',80)}%, func={func}) = {wd[strat]:.{dec}f}")
+        # SMB2 and SMB3 share strategy names — bump the SMB3 twin too
+        # (preserves prior behavior when a vuln matches an SMB2 strategy).
+        if target == "smb2" and strat in smb3_w:
+            smb3_w[strat] = smb3_w[strat] * effective_mult
 
     # Normalize DNS to sum=1.0
     dns_total = sum(dns_w.values())
@@ -846,7 +966,43 @@ def compute_weights_from_vulns(verified_vulns):
         icmpv6_w = {s: round(v / icmpv6_total * 100, 1) for s, v in icmpv6_w.items()}
     reasoning_lines.append(f"  ICMPv6 normalized (sum was {icmpv6_total:.1f})")
 
-    return dns_w, ftp_w, http_w, smtp_w, ssh_w, smb2_w, smb3_w, http2_w, dcerpc_w, dhcp_w, dhcpv6_w, snmp_w, icmp_w, icmpv6_w, "\n".join(reasoning_lines)
+    # Normalize SIP to sum=100
+    sip_total = sum(sip_w.values())
+    if sip_total > 0:
+        sip_w = {s: round(v / sip_total * 100, 1) for s, v in sip_w.items()}
+    reasoning_lines.append(f"  SIP normalized (sum was {sip_total:.1f})")
+
+    # Normalize MGCP to sum=100
+    mgcp_total = sum(mgcp_w.values())
+    if mgcp_total > 0:
+        mgcp_w = {s: round(v / mgcp_total * 100, 1) for s, v in mgcp_w.items()}
+    reasoning_lines.append(f"  MGCP normalized (sum was {mgcp_total:.1f})")
+
+    # Normalize RTSP to sum=100
+    rtsp_total = sum(rtsp_w.values())
+    if rtsp_total > 0:
+        rtsp_w = {s: round(v / rtsp_total * 100, 1) for s, v in rtsp_w.items()}
+    reasoning_lines.append(f"  RTSP normalized (sum was {rtsp_total:.1f})")
+
+    # Normalize RADIUS to sum=100
+    radius_total = sum(radius_w.values())
+    if radius_total > 0:
+        radius_w = {s: round(v / radius_total * 100, 1) for s, v in radius_w.items()}
+    reasoning_lines.append(f"  RADIUS normalized (sum was {radius_total:.1f})")
+
+    # Normalize TACACS+ to sum=100
+    tacacs_total = sum(tacacs_w.values())
+    if tacacs_total > 0:
+        tacacs_w = {s: round(v / tacacs_total * 100, 1) for s, v in tacacs_w.items()}
+    reasoning_lines.append(f"  TACACS+ normalized (sum was {tacacs_total:.1f})")
+
+    # Normalize LDAP to sum=100
+    ldap_total = sum(ldap_w.values())
+    if ldap_total > 0:
+        ldap_w = {s: round(v / ldap_total * 100, 1) for s, v in ldap_w.items()}
+    reasoning_lines.append(f"  LDAP normalized (sum was {ldap_total:.1f})")
+
+    return dns_w, ftp_w, http_w, smtp_w, ssh_w, smb2_w, smb3_w, http2_w, dcerpc_w, dhcp_w, dhcpv6_w, snmp_w, icmp_w, icmpv6_w, sip_w, mgcp_w, rtsp_w, radius_w, tacacs_w, ldap_w, "\n".join(reasoning_lines)
 
 # AI analysis state
 analysis_state = {
@@ -973,7 +1129,7 @@ def api_start():
 
     body = request.json or {}
     protocol = body.get("protocol", "dns").lower()
-    if protocol not in ("dns", "ftp", "http", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6"):
+    if protocol not in ("dns", "ftp", "http", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6", "sip", "mgcp", "rtsp", "radius", "tacacs", "ldap"):
         protocol = "dns"
     mode = body.get("mode", "pipe").lower()
     live_config = body.get("live_config", {})
@@ -1088,14 +1244,14 @@ def api_filesend_send():
         return jsonify({"error": "No files provided"}), 400
 
     protocol = (request.form.get("protocol") or "http").lower().strip()
-    if protocol not in ("http", "ftp", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp"):
-        return jsonify({"error": "protocol must be 'http', 'ftp', 'smtp', 'ssh', 'smb2', 'smb3', 'http2', 'dcerpc', 'dhcp', 'dhcpv6', 'snmp', or 'icmp'"}), 400
+    if protocol not in ("http", "ftp", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6", "sip", "mgcp", "rtsp", "radius", "tacacs", "ldap"):
+        return jsonify({"error": "protocol must be 'http', 'ftp', 'smtp', 'ssh', 'smb2', 'smb3', 'http2', 'dcerpc', 'dhcp', 'dhcpv6', 'snmp', 'icmp', 'icmpv6', 'sip', 'mgcp', 'rtsp', 'radius', 'tacacs', or 'ldap'"}), 400
 
     host = (request.form.get("host") or "").strip()
     if not host:
         return jsonify({"error": "Target host is required"}), 400
 
-    default_port = {"http": 80, "ftp": 21, "smtp": 25, "ssh": 22, "smb2": 445, "smb3": 445, "http2": 80, "dcerpc": 135, "dhcp": 67, "dhcpv6": 547, "snmp": 161, "icmp": 0}[protocol]
+    default_port = {"http": 80, "ftp": 21, "smtp": 25, "ssh": 22, "smb2": 445, "smb3": 445, "http2": 80, "dcerpc": 135, "dhcp": 67, "dhcpv6": 547, "snmp": 161, "icmp": 0, "icmpv6": 0, "sip": 5060, "mgcp": 2427, "rtsp": 554, "radius": 1812, "tacacs": 49, "ldap": 389}[protocol]
     try:
         port = int(request.form.get("port") or default_port)
     except ValueError:
@@ -1159,6 +1315,34 @@ def api_filesend_send():
             res = send_file_icmp(
                 host, port, f.filename, data,
             )
+        elif protocol == "icmpv6":
+            res = send_file_icmpv6(
+                host, port, f.filename, data,
+            )
+        elif protocol == "sip":
+            res = send_file_sip(
+                host, port, f.filename, data,
+            )
+        elif protocol == "mgcp":
+            res = send_file_mgcp(
+                host, port, f.filename, data,
+            )
+        elif protocol == "rtsp":
+            res = send_file_rtsp(
+                host, port, f.filename, data,
+            )
+        elif protocol == "radius":
+            res = send_file_radius(
+                host, port, f.filename, data,
+            )
+        elif protocol == "tacacs":
+            res = send_file_tacacs(
+                host, port, f.filename, data,
+            )
+        elif protocol == "ldap":
+            res = send_file_ldap(
+                host, port, f.filename, data,
+            )
         else:
             res = send_file_ftp(
                 host, port, f.filename, data,
@@ -1203,14 +1387,14 @@ def api_filesend_stream():
         return jsonify({"error": "No files provided"}), 400
 
     protocol = (request.form.get("protocol") or "http").lower().strip()
-    if protocol not in ("http", "ftp", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp"):
-        return jsonify({"error": "protocol must be 'http', 'ftp', 'smtp', 'ssh', 'smb2', 'smb3', 'http2', 'dcerpc', 'dhcp', 'dhcpv6', 'snmp', or 'icmp'"}), 400
+    if protocol not in ("http", "ftp", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6", "sip", "mgcp", "rtsp", "radius", "tacacs", "ldap"):
+        return jsonify({"error": "protocol must be 'http', 'ftp', 'smtp', 'ssh', 'smb2', 'smb3', 'http2', 'dcerpc', 'dhcp', 'dhcpv6', 'snmp', 'icmp', 'icmpv6', 'sip', 'mgcp', 'rtsp', 'radius', 'tacacs', or 'ldap'"}), 400
 
     host = (request.form.get("host") or "").strip()
     if not host:
         return jsonify({"error": "Target host is required"}), 400
 
-    default_port = {"http": 80, "ftp": 21, "smtp": 25, "ssh": 22, "smb2": 445, "smb3": 445, "http2": 80, "dcerpc": 135, "dhcp": 67, "dhcpv6": 547, "snmp": 161, "icmp": 0}[protocol]
+    default_port = {"http": 80, "ftp": 21, "smtp": 25, "ssh": 22, "smb2": 445, "smb3": 445, "http2": 80, "dcerpc": 135, "dhcp": 67, "dhcpv6": 547, "snmp": 161, "icmp": 0, "icmpv6": 0, "sip": 5060, "mgcp": 2427, "rtsp": 554, "radius": 1812, "tacacs": 49, "ldap": 389}[protocol]
     try:
         port = int(request.form.get("port") or default_port)
     except ValueError:
@@ -1298,6 +1482,24 @@ def api_filesend_stream():
                 elif protocol == "icmpv6":
                     res = send_file_icmpv6(host, port, fname, data,
                                            on_packet=on_packet)
+                elif protocol == "sip":
+                    res = send_file_sip(host, port, fname, data,
+                                       on_packet=on_packet)
+                elif protocol == "mgcp":
+                    res = send_file_mgcp(host, port, fname, data,
+                                        on_packet=on_packet)
+                elif protocol == "rtsp":
+                    res = send_file_rtsp(host, port, fname, data,
+                                        on_packet=on_packet)
+                elif protocol == "radius":
+                    res = send_file_radius(host, port, fname, data,
+                                          on_packet=on_packet)
+                elif protocol == "tacacs":
+                    res = send_file_tacacs(host, port, fname, data,
+                                          on_packet=on_packet)
+                elif protocol == "ldap":
+                    res = send_file_ldap(host, port, fname, data,
+                                        on_packet=on_packet)
                 else:
                     res = send_file_ftp(host, port, fname, data,
                                         user=opts["ftp_user"], password=opts["ftp_pass"],
@@ -1597,7 +1799,7 @@ For each vulnerability, provide a concrete byte-level payload that would trigger
 
         # ── WEIGHER: DETERMINISTIC PYTHON ─────────────────────────
         print("[AI] ══ Computing weights (Python) ══")
-        dns_w, ftp_w, http_w, smtp_w, ssh_w, smb2_w, smb3_w, http2_w, dcerpc_w, dhcp_w, dhcpv6_w, snmp_w, icmp_w, icmpv6_w, reasoning = compute_weights_from_vulns(raw_vulns)
+        dns_w, ftp_w, http_w, smtp_w, ssh_w, smb2_w, smb3_w, http2_w, dcerpc_w, dhcp_w, dhcpv6_w, snmp_w, icmp_w, icmpv6_w, sip_w, mgcp_w, rtsp_w, radius_w, tacacs_w, ldap_w, reasoning = compute_weights_from_vulns(raw_vulns)
         print(f"[AI] Weights computed deterministically.")
 
         # Assemble final results
@@ -1621,6 +1823,12 @@ For each vulnerability, provide a concrete byte-level payload that would trigger
                 "snmp": snmp_w,
                 "icmp": icmp_w,
                 "icmpv6": icmpv6_w,
+                "sip": sip_w,
+                "mgcp": mgcp_w,
+                "rtsp": rtsp_w,
+                "radius": radius_w,
+                "tacacs": tacacs_w,
+                "ldap": ldap_w,
                 "weight_reasoning": reasoning,
             },
             "model_used": model_used,
@@ -1918,6 +2126,12 @@ def ai_get_weights():
     snmp_default = dict(zip(SNMP_STRATEGY_NAMES, SNMP_DEFAULT_WEIGHTS))
     icmp_default = dict(zip(ICMP_STRATEGY_NAMES, ICMP_DEFAULT_WEIGHTS))
     icmpv6_default = dict(zip(ICMPV6_STRATEGY_NAMES, ICMPV6_DEFAULT_WEIGHTS))
+    sip_default = dict(zip(SIP_STRATEGY_NAMES, SIP_DEFAULT_WEIGHTS))
+    mgcp_default = dict(zip(MGCP_STRATEGY_NAMES, MGCP_DEFAULT_WEIGHTS))
+    rtsp_default = dict(zip(RTSP_STRATEGY_NAMES, RTSP_DEFAULT_WEIGHTS))
+    radius_default = dict(zip(RADIUS_STRATEGY_NAMES, RADIUS_DEFAULT_WEIGHTS))
+    tacacs_default = dict(zip(TACACS_STRATEGY_NAMES, TACACS_DEFAULT_WEIGHTS))
+    ldap_default = dict(zip(LDAP_STRATEGY_NAMES, LDAP_DEFAULT_WEIGHTS))
     return jsonify({
         "source": ai_weights.get("source", "default"),
         "dns": ai_weights.get("dns", dns_default),
@@ -1934,6 +2148,12 @@ def ai_get_weights():
         "snmp": ai_weights.get("snmp", snmp_default),
         "icmp": ai_weights.get("icmp", icmp_default),
         "icmpv6": ai_weights.get("icmpv6", icmpv6_default),
+        "sip": ai_weights.get("sip", sip_default),
+        "mgcp": ai_weights.get("mgcp", mgcp_default),
+        "rtsp": ai_weights.get("rtsp", rtsp_default),
+        "radius": ai_weights.get("radius", radius_default),
+        "tacacs": ai_weights.get("tacacs", tacacs_default),
+        "ldap": ai_weights.get("ldap", ldap_default),
         "reasoning": ai_weights.get("reasoning", ""),
         "dns_default": dns_default,
         "ftp_default": ftp_default,
@@ -1949,6 +2169,12 @@ def ai_get_weights():
         "snmp_default": snmp_default,
         "icmp_default": icmp_default,
         "icmpv6_default": icmpv6_default,
+        "sip_default": sip_default,
+        "mgcp_default": mgcp_default,
+        "rtsp_default": rtsp_default,
+        "radius_default": radius_default,
+        "tacacs_default": tacacs_default,
+        "ldap_default": ldap_default,
     })
 
 
@@ -1989,6 +2215,12 @@ def ai_apply_weights():
     snmp_raw = rec.get("snmp", {})
     icmp_raw = rec.get("icmp", {})
     icmpv6_raw = rec.get("icmpv6", {})
+    sip_raw = rec.get("sip", {})
+    mgcp_raw = rec.get("mgcp", {})
+    rtsp_raw = rec.get("rtsp", {})
+    radius_raw = rec.get("radius", {})
+    tacacs_raw = rec.get("tacacs", {})
+    ldap_raw = rec.get("ldap", {})
 
     # Normalize DNS weights
     dns_total = sum(dns_raw.get(s, 0) for s in DNS_STRATEGY_NAMES)
@@ -2060,6 +2292,36 @@ def ai_apply_weights():
     if icmpv6_total > 0:
         ai_weights["icmpv6"] = {s: round(icmpv6_raw.get(s, 0) / icmpv6_total * 100, 1) for s in ICMPV6_STRATEGY_NAMES}
 
+    # Normalize SIP weights
+    sip_total = sum(sip_raw.get(s, 0) for s in SIP_STRATEGY_NAMES)
+    if sip_total > 0:
+        ai_weights["sip"] = {s: round(sip_raw.get(s, 0) / sip_total * 100, 1) for s in SIP_STRATEGY_NAMES}
+
+    # Normalize MGCP weights
+    mgcp_total = sum(mgcp_raw.get(s, 0) for s in MGCP_STRATEGY_NAMES)
+    if mgcp_total > 0:
+        ai_weights["mgcp"] = {s: round(mgcp_raw.get(s, 0) / mgcp_total * 100, 1) for s in MGCP_STRATEGY_NAMES}
+
+    # Normalize RTSP weights
+    rtsp_total = sum(rtsp_raw.get(s, 0) for s in RTSP_STRATEGY_NAMES)
+    if rtsp_total > 0:
+        ai_weights["rtsp"] = {s: round(rtsp_raw.get(s, 0) / rtsp_total * 100, 1) for s in RTSP_STRATEGY_NAMES}
+
+    # Normalize RADIUS weights
+    radius_total = sum(radius_raw.get(s, 0) for s in RADIUS_STRATEGY_NAMES)
+    if radius_total > 0:
+        ai_weights["radius"] = {s: round(radius_raw.get(s, 0) / radius_total * 100, 1) for s in RADIUS_STRATEGY_NAMES}
+
+    # Normalize TACACS+ weights
+    tacacs_total = sum(tacacs_raw.get(s, 0) for s in TACACS_STRATEGY_NAMES)
+    if tacacs_total > 0:
+        ai_weights["tacacs"] = {s: round(tacacs_raw.get(s, 0) / tacacs_total * 100, 1) for s in TACACS_STRATEGY_NAMES}
+
+    # Normalize LDAP weights
+    ldap_total = sum(ldap_raw.get(s, 0) for s in LDAP_STRATEGY_NAMES)
+    if ldap_total > 0:
+        ai_weights["ldap"] = {s: round(ldap_raw.get(s, 0) / ldap_total * 100, 1) for s in LDAP_STRATEGY_NAMES}
+
     ai_weights["source"] = "ai"
     ai_weights["reasoning"] = rec.get("weight_reasoning", "")
 
@@ -2077,6 +2339,12 @@ def ai_apply_weights():
     snmp_bandit.reset()
     icmp_bandit.reset()
     icmpv6_bandit.reset()
+    sip_bandit.reset()
+    mgcp_bandit.reset()
+    rtsp_bandit.reset()
+    radius_bandit.reset()
+    tacacs_bandit.reset()
+    ldap_bandit.reset()
 
     log_event("INFO", f"AI weights applied — source: {results.get('model_used', 'unknown')}, RL bandits reset")
     print(f"[AI] Weights applied: DNS={ai_weights['dns']}")
@@ -2092,8 +2360,14 @@ def ai_apply_weights():
     print(f"[AI] Weights applied: SNMP={ai_weights['snmp']}")
     print(f"[AI] Weights applied: ICMP={ai_weights.get('icmp', {})}")
     print(f"[AI] Weights applied: ICMPv6={ai_weights.get('icmpv6', {})}")
+    print(f"[AI] Weights applied: SIP={ai_weights.get('sip', {})}")
+    print(f"[AI] Weights applied: MGCP={ai_weights.get('mgcp', {})}")
+    print(f"[AI] Weights applied: RTSP={ai_weights.get('rtsp', {})}")
+    print(f"[AI] Weights applied: RADIUS={ai_weights.get('radius', {})}")
+    print(f"[AI] Weights applied: TACACS+={ai_weights.get('tacacs', {})}")
+    print(f"[AI] Weights applied: LDAP={ai_weights.get('ldap', {})}")
 
-    return jsonify({"status": "applied", "dns": ai_weights["dns"], "ftp": ai_weights["ftp"], "http": ai_weights["http"], "smtp": ai_weights["smtp"], "ssh": ai_weights["ssh"], "smb2": ai_weights["smb2"], "smb3": ai_weights["smb3"], "http2": ai_weights["http2"], "dcerpc": ai_weights["dcerpc"], "dhcp": ai_weights["dhcp"], "dhcpv6": ai_weights["dhcpv6"], "snmp": ai_weights["snmp"], "icmp": ai_weights.get("icmp", {}), "icmpv6": ai_weights.get("icmpv6", {})})
+    return jsonify({"status": "applied", "dns": ai_weights["dns"], "ftp": ai_weights["ftp"], "http": ai_weights["http"], "smtp": ai_weights["smtp"], "ssh": ai_weights["ssh"], "smb2": ai_weights["smb2"], "smb3": ai_weights["smb3"], "http2": ai_weights["http2"], "dcerpc": ai_weights["dcerpc"], "dhcp": ai_weights["dhcp"], "dhcpv6": ai_weights["dhcpv6"], "snmp": ai_weights["snmp"], "icmp": ai_weights.get("icmp", {}), "icmpv6": ai_weights.get("icmpv6", {}), "sip": ai_weights.get("sip", {}), "mgcp": ai_weights.get("mgcp", {}), "rtsp": ai_weights.get("rtsp", {}), "radius": ai_weights.get("radius", {}), "tacacs": ai_weights.get("tacacs", {}), "ldap": ai_weights.get("ldap", {})})
 
 
 @app.route("/api/ai/reset_weights", methods=["POST"])
@@ -2113,6 +2387,12 @@ def ai_reset_weights():
     ai_weights["snmp"] = dict(zip(SNMP_STRATEGY_NAMES, SNMP_DEFAULT_WEIGHTS))
     ai_weights["icmp"] = dict(zip(ICMP_STRATEGY_NAMES, ICMP_DEFAULT_WEIGHTS))
     ai_weights["icmpv6"] = dict(zip(ICMPV6_STRATEGY_NAMES, ICMPV6_DEFAULT_WEIGHTS))
+    ai_weights["sip"] = dict(zip(SIP_STRATEGY_NAMES, SIP_DEFAULT_WEIGHTS))
+    ai_weights["mgcp"] = dict(zip(MGCP_STRATEGY_NAMES, MGCP_DEFAULT_WEIGHTS))
+    ai_weights["rtsp"] = dict(zip(RTSP_STRATEGY_NAMES, RTSP_DEFAULT_WEIGHTS))
+    ai_weights["radius"] = dict(zip(RADIUS_STRATEGY_NAMES, RADIUS_DEFAULT_WEIGHTS))
+    ai_weights["tacacs"] = dict(zip(TACACS_STRATEGY_NAMES, TACACS_DEFAULT_WEIGHTS))
+    ai_weights["ldap"] = dict(zip(LDAP_STRATEGY_NAMES, LDAP_DEFAULT_WEIGHTS))
     ai_weights["source"] = "default"
     ai_weights["reasoning"] = ""
 
@@ -2130,6 +2410,12 @@ def ai_reset_weights():
     snmp_bandit.reset()
     icmp_bandit.reset()
     icmpv6_bandit.reset()
+    sip_bandit.reset()
+    mgcp_bandit.reset()
+    rtsp_bandit.reset()
+    radius_bandit.reset()
+    tacacs_bandit.reset()
+    ldap_bandit.reset()
 
     log_event("INFO", "Strategy weights reset to defaults, RL bandits reset")
     return jsonify({"status": "reset"})
@@ -2253,11 +2539,11 @@ def ai_analyze_v2():
 
         # Compute weights from merged vulns
         if raw_vulns:
-            dns_w, ftp_w, http_w, smtp_w, ssh_w, smb2_w, smb3_w, http2_w, dcerpc_w, dhcp_w, dhcpv6_w, snmp_w, icmp_w, icmpv6_w, reasoning = compute_weights_from_vulns(raw_vulns)
+            dns_w, ftp_w, http_w, smtp_w, ssh_w, smb2_w, smb3_w, http2_w, dcerpc_w, dhcp_w, dhcpv6_w, snmp_w, icmp_w, icmpv6_w, sip_w, mgcp_w, rtsp_w, radius_w, tacacs_w, ldap_w, reasoning = compute_weights_from_vulns(raw_vulns)
             recommended_weights = {
                 "dns": dns_w, "ftp": ftp_w, "http": http_w, "smtp": smtp_w, "ssh": ssh_w,
                 "smb2": smb2_w, "smb3": smb3_w, "http2": http2_w, "dcerpc": dcerpc_w,
-                "dhcp": dhcp_w, "dhcpv6": dhcpv6_w, "snmp": snmp_w, "icmp": icmp_w, "icmpv6": icmpv6_w, "weight_reasoning": reasoning,
+                "dhcp": dhcp_w, "dhcpv6": dhcpv6_w, "snmp": snmp_w, "icmp": icmp_w, "icmpv6": icmpv6_w, "sip": sip_w, "mgcp": mgcp_w, "rtsp": rtsp_w, "radius": radius_w, "tacacs": tacacs_w, "ldap": ldap_w, "weight_reasoning": reasoning,
             }
         else:
             recommended_weights = None

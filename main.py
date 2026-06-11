@@ -47,6 +47,24 @@ from protocol.icmp import (IcmpMutator, ICMP_STRATEGY_LABELS,
 from protocol.icmpv6 import (Icmpv6Mutator, ICMPV6_STRATEGY_LABELS,
                              ICMPV6_STRATEGIES as ICMPV6_STRATEGY_NAMES,
                              ICMPV6_WEIGHTS as ICMPV6_DEFAULT_WEIGHTS)
+from protocol.sip import (SipMutator, SIP_STRATEGY_LABELS,
+                          SIP_STRATEGIES as SIP_STRATEGY_NAMES,
+                          SIP_WEIGHTS as SIP_DEFAULT_WEIGHTS)
+from protocol.mgcp import (MgcpMutator, MGCP_STRATEGY_LABELS,
+                           MGCP_STRATEGIES as MGCP_STRATEGY_NAMES,
+                           MGCP_WEIGHTS as MGCP_DEFAULT_WEIGHTS)
+from protocol.rtsp import (RtspMutator, RTSP_STRATEGY_LABELS,
+                           RTSP_STRATEGIES as RTSP_STRATEGY_NAMES,
+                           RTSP_WEIGHTS as RTSP_DEFAULT_WEIGHTS)
+from protocol.radius import (RadiusMutator, RADIUS_STRATEGY_LABELS,
+                              RADIUS_STRATEGIES as RADIUS_STRATEGY_NAMES,
+                              RADIUS_WEIGHTS as RADIUS_DEFAULT_WEIGHTS)
+from protocol.tacacs import (TacacsMutator, TACACS_STRATEGY_LABELS,
+                             TACACS_STRATEGIES as TACACS_STRATEGY_NAMES,
+                             TACACS_WEIGHTS as TACACS_DEFAULT_WEIGHTS)
+from protocol.ldap import (LdapMutator, LDAP_STRATEGY_LABELS,
+                           LDAP_STRATEGIES as LDAP_STRATEGY_NAMES,
+                           LDAP_WEIGHTS as LDAP_DEFAULT_WEIGHTS)
 from engine.mutator import (SmartDNSMutator, ByteMutator, CompressionLoopMutator,
                             LabelComplexityMutator, ResponseMutator,
                             EDNSExploitMutator, DNSSECRecordMutator, TCPDNSSegmentMutator,
@@ -93,6 +111,12 @@ ai_weights = {
     "dhcp": dict(zip(DHCP_STRATEGY_NAMES, DHCP_DEFAULT_WEIGHTS)),
     "dhcpv6": dict(zip(DHCPV6_STRATEGY_NAMES, DHCPV6_DEFAULT_WEIGHTS)),
     "snmp": dict(zip(SNMP_STRATEGY_NAMES, SNMP_DEFAULT_WEIGHTS)),
+    "sip": dict(zip(SIP_STRATEGY_NAMES, SIP_DEFAULT_WEIGHTS)),
+    "mgcp": dict(zip(MGCP_STRATEGY_NAMES, MGCP_DEFAULT_WEIGHTS)),
+    "rtsp": dict(zip(RTSP_STRATEGY_NAMES, RTSP_DEFAULT_WEIGHTS)),
+    "radius": dict(zip(RADIUS_STRATEGY_NAMES, RADIUS_DEFAULT_WEIGHTS)),
+    "tacacs": dict(zip(TACACS_STRATEGY_NAMES, TACACS_DEFAULT_WEIGHTS)),
+    "ldap": dict(zip(LDAP_STRATEGY_NAMES, LDAP_DEFAULT_WEIGHTS)),
     "reasoning": "",
 }
 
@@ -111,6 +135,12 @@ dhcpv6_bandit = UCB1Bandit(DHCPV6_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.
 snmp_bandit = UCB1Bandit(SNMP_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 icmp_bandit = UCB1Bandit(ICMP_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 icmpv6_bandit = UCB1Bandit(ICMPV6_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
+sip_bandit = UCB1Bandit(SIP_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
+mgcp_bandit = UCB1Bandit(MGCP_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
+rtsp_bandit = UCB1Bandit(RTSP_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
+radius_bandit = UCB1Bandit(RADIUS_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
+tacacs_bandit = UCB1Bandit(TACACS_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
+ldap_bandit = UCB1Bandit(LDAP_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 
 
 def _bandit_for(protocol):
@@ -140,6 +170,18 @@ def _bandit_for(protocol):
         return icmp_bandit
     if protocol == "icmpv6":
         return icmpv6_bandit
+    if protocol == "sip":
+        return sip_bandit
+    if protocol == "mgcp":
+        return mgcp_bandit
+    if protocol == "rtsp":
+        return rtsp_bandit
+    if protocol == "radius":
+        return radius_bandit
+    if protocol == "tacacs":
+        return tacacs_bandit
+    if protocol == "ldap":
+        return ldap_bandit
     return dns_bandit
 
 fuzzer_state = {
@@ -541,6 +583,54 @@ def run_fuzzer(build_dir: str):
         smb_mutator = None
         icmpv6_mutator = Icmpv6Mutator(external_weights=ai_weights.get("icmpv6"), bandit=icmpv6_bandit)
         seed_message = None
+    elif protocol == "sip":
+        transport = StreamTransport(target_port=5060)
+        ftp_mutator = None
+        http_mutator = None
+        smtp_mutator = None
+        smb_mutator = None
+        sip_mutator = SipMutator(external_weights=ai_weights.get("sip"), bandit=sip_bandit)
+        seed_message = None
+    elif protocol == "mgcp":
+        transport = StreamTransport(target_port=2427)
+        ftp_mutator = None
+        http_mutator = None
+        smtp_mutator = None
+        smb_mutator = None
+        mgcp_mutator = MgcpMutator(external_weights=ai_weights.get("mgcp"), bandit=mgcp_bandit)
+        seed_message = None
+    elif protocol == "rtsp":
+        transport = StreamTransport(target_port=554)
+        ftp_mutator = None
+        http_mutator = None
+        smtp_mutator = None
+        smb_mutator = None
+        rtsp_mutator = RtspMutator(external_weights=ai_weights.get("rtsp"), bandit=rtsp_bandit)
+        seed_message = None
+    elif protocol == "radius":
+        transport = StreamTransport(target_port=1812)
+        ftp_mutator = None
+        http_mutator = None
+        smtp_mutator = None
+        smb_mutator = None
+        radius_mutator = RadiusMutator(external_weights=ai_weights.get("radius"), bandit=radius_bandit)
+        seed_message = None
+    elif protocol == "tacacs":
+        transport = StreamTransport(target_port=49)
+        ftp_mutator = None
+        http_mutator = None
+        smtp_mutator = None
+        smb_mutator = None
+        tacacs_mutator = TacacsMutator(external_weights=ai_weights.get("tacacs"), bandit=tacacs_bandit)
+        seed_message = None
+    elif protocol == "ldap":
+        transport = StreamTransport(target_port=389)
+        ftp_mutator = None
+        http_mutator = None
+        smtp_mutator = None
+        smb_mutator = None
+        ldap_mutator = LdapMutator(external_weights=ai_weights.get("ldap"), bandit=ldap_bandit)
+        seed_message = None
     else:
         transport = StreamTransport(target_port=53)
         ftp_mutator = None
@@ -712,6 +802,70 @@ def run_fuzzer(build_dir: str):
                         pipe.write(transport.wrap_raw_ipv6_packet(_v6_data))
                     else:
                         pipe.write(transport.wrap_icmpv6(_v6_data, _v6_src, _v6_dst))
+                elif protocol == "sip":
+                    if iteration == 1 or (iteration - 1) % 50 == 0:
+                        _sip_payload, _sip_strategy, _sip_dst_port = sip_mutator.mutate()
+                    payload, strategy = _sip_payload, _sip_strategy
+                    fuzzer_state["current_strategy"] = strategy
+                    fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                    src_ip = random.randint(0x01000001, 0xFEFFFFFF)
+                    src_port = random.randint(1025, 65534)
+                    pipe.write(transport.wrap_udp_to_port(payload, _sip_dst_port,
+                                                          src_ip=src_ip, src_port=src_port))
+                elif protocol == "mgcp":
+                    if iteration == 1 or (iteration - 1) % 50 == 0:
+                        _mgcp_payload, _mgcp_strategy, _mgcp_dst_port = mgcp_mutator.mutate()
+                    payload, strategy = _mgcp_payload, _mgcp_strategy
+                    fuzzer_state["current_strategy"] = strategy
+                    fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                    src_ip = random.randint(0x01000001, 0xFEFFFFFF)
+                    src_port = random.randint(1025, 65534)
+                    pipe.write(transport.wrap_udp_to_port(payload, _mgcp_dst_port,
+                                                          src_ip=src_ip, src_port=src_port))
+                elif protocol == "rtsp":
+                    if iteration == 1 or (iteration - 1) % 50 == 0:
+                        _rtsp_payload, _rtsp_strategy, _rtsp_dst_port = rtsp_mutator.mutate()
+                    payload, strategy = _rtsp_payload, _rtsp_strategy
+                    fuzzer_state["current_strategy"] = strategy
+                    fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                    src_ip = random.randint(0x01000001, 0xFEFFFFFF)
+                    src_port = random.randint(1025, 65534)
+                    pipe.write(transport.wrap_tcp_session_to_port(payload, _rtsp_dst_port,
+                                                                src_ip=src_ip))
+                elif protocol == "radius":
+                    if iteration == 1 or (iteration - 1) % 50 == 0:
+                        _radius_payload, _radius_strategy, _radius_dst_port = radius_mutator.mutate()
+                    payload, strategy = _radius_payload, _radius_strategy
+                    fuzzer_state["current_strategy"] = strategy
+                    fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                    src_ip = random.randint(0x01000001, 0xFEFFFFFF)
+                    src_port = random.randint(1025, 65534)
+                    pipe.write(transport.wrap_udp_to_port(payload, _radius_dst_port,
+                                                          src_ip=src_ip, src_port=src_port))
+                elif protocol == "tacacs":
+                    if iteration == 1 or (iteration - 1) % 50 == 0:
+                        _tacacs_payload, _tacacs_strategy, _tacacs_dst_port = tacacs_mutator.mutate()
+                    payload, strategy = _tacacs_payload, _tacacs_strategy
+                    fuzzer_state["current_strategy"] = strategy
+                    fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                    src_port = random.randint(1025, 65534)
+                    pipe.write(transport.wrap_tcp_session_to_port(payload, _tacacs_dst_port,
+                                                                src_ip=random.randint(0x01000001, 0xFEFFFFFF)))
+                    fuzzer_state["iteration"] += 4
+                elif protocol == "ldap":
+                    if iteration == 1 or (iteration - 1) % 50 == 0:
+                        _ldap_payload, _ldap_strategy, _ldap_dst_port = ldap_mutator.mutate()
+                    payload, strategy = _ldap_payload, _ldap_strategy
+                    fuzzer_state["current_strategy"] = strategy
+                    fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                    src_port = random.randint(1025, 65534)
+                    src_ip = random.randint(0x01000001, 0xFEFFFFFF)
+                    if strategy == "tcp_segment_evasion":
+                        split_at = random.choice([1, 2, 3, max(1, len(payload) // 3), max(1, len(payload) // 2)])
+                        pipe.write(transport.wrap_split_tcp_session(payload, split_at=split_at, src_ip=src_ip))
+                    else:
+                        pipe.write(transport.wrap_tcp_session_to_port(payload, _ldap_dst_port, src_ip=src_ip))
+                    fuzzer_state["iteration"] += 4
                 else:
                     dns_w = ai_weights.get("dns", {})
                     strategy = dns_bandit.select_with_weights(dns_w)
@@ -749,7 +903,7 @@ def run_fuzzer(build_dir: str):
                 active_bandit = _bandit_for(protocol)
                 active_bandit.update(strategy, 0.0)
 
-                stat_interval = 500 if protocol in ("ftp", "http", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6") else 10000
+                stat_interval = 500 if protocol in ("ftp", "http", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6", "sip", "mgcp", "radius", "tacacs", "ldap") else 10000
                 if fuzzer_state["iteration"] % stat_interval == 0:
                     elapsed = time.time() - fuzzer_state["start_time"] if fuzzer_state["start_time"] else 1
                     fuzzer_state["packets_per_sec"] = int(fuzzer_state["iteration"] / max(elapsed, 0.001))
@@ -918,6 +1072,48 @@ def run_fuzzer_live(config: dict):
         smb_mutator_inst = None
         icmpv6_mutator_inst = Icmpv6Mutator(external_weights=ai_weights.get("icmpv6"), bandit=icmpv6_bandit)
         seed_message = None
+    elif protocol == "sip":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        sip_mutator_inst = SipMutator(external_weights=ai_weights.get("sip"), bandit=sip_bandit)
+        seed_message = None
+    elif protocol == "mgcp":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        mgcp_mutator_inst = MgcpMutator(external_weights=ai_weights.get("mgcp"), bandit=mgcp_bandit)
+        seed_message = None
+    elif protocol == "rtsp":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        rtsp_mutator_inst = RtspMutator(external_weights=ai_weights.get("rtsp"), bandit=rtsp_bandit)
+        seed_message = None
+    elif protocol == "radius":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        radius_mutator_inst = RadiusMutator(external_weights=ai_weights.get("radius"), bandit=radius_bandit)
+        seed_message = None
+    elif protocol == "tacacs":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        tacacs_mutator_inst = TacacsMutator(external_weights=ai_weights.get("tacacs"), bandit=tacacs_bandit)
+        seed_message = None
+    elif protocol == "ldap":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        ldap_mutator_inst = LdapMutator(external_weights=ai_weights.get("ldap"), bandit=ldap_bandit)
+        seed_message = None
     else:
         ftp_mutator_inst = None
         http_mutator_inst = None
@@ -961,6 +1157,11 @@ def run_fuzzer_live(config: dict):
     _snmp_payload, _snmp_strategy, _snmp_dst_port = None, None, None
     _icmp_data, _icmp_strategy, _icmp_pkt_type = None, None, None
     _v6_data, _v6_strategy, _v6_pkt_type, _v6_src, _v6_dst = None, None, None, None, None
+    _sip_payload, _sip_strategy, _sip_dst_port = None, None, None
+    _rtsp_payload, _rtsp_strategy, _rtsp_dst_port = None, None, None
+    _radius_payload, _radius_strategy, _radius_dst_port = None, None, None
+    _tacacs_payload, _tacacs_strategy, _tacacs_dst_port = None, None, None
+    _ldap_payload, _ldap_strategy, _ldap_dst_port = None, None, None
 
     try:
         while fuzzer_state["running"] and not fuzzer_state["anomaly_detected"]:
@@ -1081,6 +1282,54 @@ def run_fuzzer_live(config: dict):
                 else:
                     live_transport.send_icmpv6(_v6_data, dst_ipv6=server_ip)
                 fuzzer_state["iteration"] += 1
+            elif protocol == "sip":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _sip_payload, _sip_strategy, _sip_dst_port = sip_mutator_inst.mutate()
+                strategy = _sip_strategy
+                fuzzer_state["current_strategy"] = strategy
+                fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_udp(_sip_payload, port=_sip_dst_port)
+                fuzzer_state["iteration"] += 1
+            elif protocol == "mgcp":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _mgcp_payload, _mgcp_strategy, _mgcp_dst_port = mgcp_mutator_inst.mutate()
+                strategy = _mgcp_strategy
+                fuzzer_state["current_strategy"] = strategy
+                fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_udp(_mgcp_payload, port=_mgcp_dst_port)
+                fuzzer_state["iteration"] += 1
+            elif protocol == "rtsp":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _rtsp_payload, _rtsp_strategy, _rtsp_dst_port = rtsp_mutator_inst.mutate()
+                strategy = _rtsp_strategy
+                fuzzer_state["current_strategy"] = strategy
+                fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_tcp(_rtsp_payload, port=_rtsp_dst_port)
+                fuzzer_state["iteration"] += 1
+            elif protocol == "radius":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _radius_payload, _radius_strategy, _radius_dst_port = radius_mutator_inst.mutate()
+                strategy = _radius_strategy
+                fuzzer_state["current_strategy"] = strategy
+                fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_udp(_radius_payload, port=_radius_dst_port)
+                fuzzer_state["iteration"] += 1
+            elif protocol == "tacacs":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _tacacs_payload, _tacacs_strategy, _tacacs_dst_port = tacacs_mutator_inst.mutate()
+                strategy = _tacacs_strategy
+                fuzzer_state["current_strategy"] = strategy
+                fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_tcp(_tacacs_payload, port=_tacacs_dst_port)
+                fuzzer_state["iteration"] += 1
+            elif protocol == "ldap":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _ldap_payload, _ldap_strategy, _ldap_dst_port = ldap_mutator_inst.mutate()
+                strategy = _ldap_strategy
+                fuzzer_state["current_strategy"] = strategy
+                fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_tcp(_ldap_payload, port=_ldap_dst_port)
+                fuzzer_state["iteration"] += 1
             else:
                 dns_w = ai_weights.get("dns", {})
                 strategy = dns_bandit.select_with_weights(dns_w)
@@ -1111,7 +1360,7 @@ def run_fuzzer_live(config: dict):
             active_bandit = _bandit_for(protocol)
             active_bandit.update(strategy, 0.0)
 
-            stat_interval = 500 if protocol in ("ftp", "http", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6") else 10000
+            stat_interval = 500 if protocol in ("ftp", "http", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6", "sip", "mgcp", "radius", "tacacs", "ldap") else 10000
             if fuzzer_state["iteration"] % stat_interval == 0:
                 elapsed = time.time() - fuzzer_state["start_time"] if fuzzer_state["start_time"] else 1
                 fuzzer_state["packets_per_sec"] = int(fuzzer_state["iteration"] / max(elapsed, 0.001))
