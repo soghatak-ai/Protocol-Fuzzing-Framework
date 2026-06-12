@@ -65,6 +65,18 @@ from protocol.tacacs import (TacacsMutator, TACACS_STRATEGY_LABELS,
 from protocol.ldap import (LdapMutator, LDAP_STRATEGY_LABELS,
                            LDAP_STRATEGIES as LDAP_STRATEGY_NAMES,
                            LDAP_WEIGHTS as LDAP_DEFAULT_WEIGHTS)
+from protocol.cifs import (CifsMutator, CIFS_STRATEGY_LABELS,
+                           CIFS_STRATEGIES as CIFS_STRATEGY_NAMES,
+                           CIFS_WEIGHTS as CIFS_DEFAULT_WEIGHTS)
+from protocol.sunrpc import (SunrpcMutator, SUNRPC_STRATEGY_LABELS,
+                             SUNRPC_STRATEGIES as SUNRPC_STRATEGY_NAMES,
+                             SUNRPC_WEIGHTS as SUNRPC_DEFAULT_WEIGHTS)
+from protocol.telnet import (TelnetMutator, TELNET_STRATEGY_LABELS,
+                             TELNET_STRATEGIES as TELNET_STRATEGY_NAMES,
+                             TELNET_WEIGHTS as TELNET_DEFAULT_WEIGHTS)
+from protocol.tftp import (TftpMutator, TFTP_STRATEGY_LABELS,
+                           TFTP_STRATEGIES as TFTP_STRATEGY_NAMES,
+                           TFTP_WEIGHTS as TFTP_DEFAULT_WEIGHTS)
 from engine.mutator import (SmartDNSMutator, ByteMutator, CompressionLoopMutator,
                             LabelComplexityMutator, ResponseMutator,
                             EDNSExploitMutator, DNSSECRecordMutator, TCPDNSSegmentMutator,
@@ -117,6 +129,9 @@ ai_weights = {
     "radius": dict(zip(RADIUS_STRATEGY_NAMES, RADIUS_DEFAULT_WEIGHTS)),
     "tacacs": dict(zip(TACACS_STRATEGY_NAMES, TACACS_DEFAULT_WEIGHTS)),
     "ldap": dict(zip(LDAP_STRATEGY_NAMES, LDAP_DEFAULT_WEIGHTS)),
+    "cifs": dict(zip(CIFS_STRATEGY_NAMES, CIFS_DEFAULT_WEIGHTS)),
+    "telnet": dict(zip(TELNET_STRATEGY_NAMES, TELNET_DEFAULT_WEIGHTS)),
+    "tftp": dict(zip(TFTP_STRATEGY_NAMES, TFTP_DEFAULT_WEIGHTS)),
     "reasoning": "",
 }
 
@@ -141,6 +156,10 @@ rtsp_bandit = UCB1Bandit(RTSP_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 radius_bandit = UCB1Bandit(RADIUS_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 tacacs_bandit = UCB1Bandit(TACACS_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 ldap_bandit = UCB1Bandit(LDAP_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
+cifs_bandit = UCB1Bandit(CIFS_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
+sunrpc_bandit = UCB1Bandit(SUNRPC_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
+telnet_bandit = UCB1Bandit(TELNET_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
+tftp_bandit = UCB1Bandit(TFTP_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 
 
 def _bandit_for(protocol):
@@ -182,6 +201,14 @@ def _bandit_for(protocol):
         return tacacs_bandit
     if protocol == "ldap":
         return ldap_bandit
+    if protocol == "cifs":
+        return cifs_bandit
+    if protocol == "sunrpc":
+        return sunrpc_bandit
+    if protocol == "telnet":
+        return telnet_bandit
+    if protocol == "tftp":
+        return tftp_bandit
     return dns_bandit
 
 fuzzer_state = {
@@ -631,6 +658,38 @@ def run_fuzzer(build_dir: str):
         smb_mutator = None
         ldap_mutator = LdapMutator(external_weights=ai_weights.get("ldap"), bandit=ldap_bandit)
         seed_message = None
+    elif protocol == "cifs":
+        transport = StreamTransport(target_port=445)
+        ftp_mutator = None
+        http_mutator = None
+        smtp_mutator = None
+        smb_mutator = None
+        cifs_mutator = CifsMutator(external_weights=ai_weights.get("cifs"), bandit=cifs_bandit)
+        seed_message = None
+    elif protocol == "sunrpc":
+        transport = StreamTransport(target_port=111)
+        ftp_mutator = None
+        http_mutator = None
+        smtp_mutator = None
+        smb_mutator = None
+        sunrpc_mutator = SunrpcMutator(external_weights=ai_weights.get("sunrpc"), bandit=sunrpc_bandit)
+        seed_message = None
+    elif protocol == "telnet":
+        transport = StreamTransport(target_port=23)
+        ftp_mutator = None
+        http_mutator = None
+        smtp_mutator = None
+        smb_mutator = None
+        telnet_mutator = TelnetMutator(external_weights=ai_weights.get("telnet"), bandit=telnet_bandit)
+        seed_message = None
+    elif protocol == "tftp":
+        transport = StreamTransport(target_port=69)
+        ftp_mutator = None
+        http_mutator = None
+        smtp_mutator = None
+        smb_mutator = None
+        tftp_mutator = TftpMutator(external_weights=ai_weights.get("tftp"), bandit=tftp_bandit)
+        seed_message = None
     else:
         transport = StreamTransport(target_port=53)
         ftp_mutator = None
@@ -866,6 +925,63 @@ def run_fuzzer(build_dir: str):
                     else:
                         pipe.write(transport.wrap_tcp_session_to_port(payload, _ldap_dst_port, src_ip=src_ip))
                     fuzzer_state["iteration"] += 4
+                elif protocol == "cifs":
+                    if iteration == 1 or (iteration - 1) % 50 == 0:
+                        _cifs_payload, _cifs_strategy, _cifs_dst_port = cifs_mutator.mutate()
+                    payload, strategy = _cifs_payload, _cifs_strategy
+                    fuzzer_state["current_strategy"] = strategy
+                    fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                    src_ip = random.randint(0x01000001, 0xFEFFFFFF)
+                    if strategy == "tcp_segmentation_evasion":
+                        split_at = random.choice([1, 2, 3, max(1, len(payload) // 3), max(1, len(payload) // 2)])
+                        pipe.write(transport.wrap_split_tcp_session(payload, split_at=split_at, src_ip=src_ip))
+                    else:
+                        pipe.write(transport.wrap_tcp_session_to_port(payload, _cifs_dst_port, src_ip=src_ip))
+                    fuzzer_state["iteration"] += 4
+                elif protocol == "sunrpc":
+                    if iteration == 1 or (iteration - 1) % 50 == 0:
+                        _sunrpc_payload, _sunrpc_strategy, _sunrpc_dst_port = sunrpc_mutator.mutate()
+                    payload, strategy = _sunrpc_payload, _sunrpc_strategy
+                    fuzzer_state["current_strategy"] = strategy
+                    fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                    src_ip = random.randint(0x01000001, 0xFEFFFFFF)
+                    src_port = random.randint(1025, 65534)
+                    # TCP-oriented strategies (RM framing, segmentation, NFS COMPOUND)
+                    _tcp_strategies = ("record_marking_abuse", "tcp_segmentation_evasion",
+                                       "nfs_compound_overflow")
+                    if strategy in _tcp_strategies:
+                        if strategy == "tcp_segmentation_evasion":
+                            split_at = random.choice([2, 4, 8, max(1, len(payload) // 3)])
+                            pipe.write(transport.wrap_split_tcp_session(payload, split_at=split_at, src_ip=src_ip))
+                        else:
+                            pipe.write(transport.wrap_tcp_session_to_port(payload, _sunrpc_dst_port, src_ip=src_ip))
+                        fuzzer_state["iteration"] += 4
+                    else:
+                        pipe.write(transport.wrap_udp_to_port(payload, _sunrpc_dst_port,
+                                                              src_ip=src_ip, src_port=src_port))
+                elif protocol == "telnet":
+                    if iteration == 1 or (iteration - 1) % 50 == 0:
+                        _telnet_payload, _telnet_strategy, _telnet_dst_port = telnet_mutator.mutate()
+                    payload, strategy = _telnet_payload, _telnet_strategy
+                    fuzzer_state["current_strategy"] = strategy
+                    fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                    src_ip = random.randint(0x01000001, 0xFEFFFFFF)
+                    if strategy == "tcp_segmentation_evasion":
+                        split_at = random.choice([1, 2, 3, max(1, len(payload) // 3), max(1, len(payload) // 2)])
+                        pipe.write(transport.wrap_split_tcp_session(payload, split_at=split_at, src_ip=src_ip))
+                    else:
+                        pipe.write(transport.wrap_tcp_session_to_port(payload, _telnet_dst_port, src_ip=src_ip))
+                    fuzzer_state["iteration"] += 4
+                elif protocol == "tftp":
+                    if iteration == 1 or (iteration - 1) % 50 == 0:
+                        _tftp_payload, _tftp_strategy, _tftp_dst_port = tftp_mutator.mutate()
+                    payload, strategy = _tftp_payload, _tftp_strategy
+                    fuzzer_state["current_strategy"] = strategy
+                    fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                    src_ip = random.randint(0x01000001, 0xFEFFFFFF)
+                    src_port = random.randint(1025, 65534)
+                    pipe.write(transport.wrap_udp_to_port(payload, _tftp_dst_port,
+                                                          src_ip=src_ip, src_port=src_port))
                 else:
                     dns_w = ai_weights.get("dns", {})
                     strategy = dns_bandit.select_with_weights(dns_w)
@@ -903,7 +1019,7 @@ def run_fuzzer(build_dir: str):
                 active_bandit = _bandit_for(protocol)
                 active_bandit.update(strategy, 0.0)
 
-                stat_interval = 500 if protocol in ("ftp", "http", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6", "sip", "mgcp", "radius", "tacacs", "ldap") else 10000
+                stat_interval = 500 if protocol in ("ftp", "http", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6", "sip", "mgcp", "radius", "tacacs", "ldap", "cifs", "sunrpc", "telnet", "tftp") else 10000
                 if fuzzer_state["iteration"] % stat_interval == 0:
                     elapsed = time.time() - fuzzer_state["start_time"] if fuzzer_state["start_time"] else 1
                     fuzzer_state["packets_per_sec"] = int(fuzzer_state["iteration"] / max(elapsed, 0.001))
@@ -1114,6 +1230,34 @@ def run_fuzzer_live(config: dict):
         smb_mutator_inst = None
         ldap_mutator_inst = LdapMutator(external_weights=ai_weights.get("ldap"), bandit=ldap_bandit)
         seed_message = None
+    elif protocol == "cifs":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        cifs_mutator_inst = CifsMutator(external_weights=ai_weights.get("cifs"), bandit=cifs_bandit)
+        seed_message = None
+    elif protocol == "sunrpc":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        sunrpc_mutator_inst = SunrpcMutator(external_weights=ai_weights.get("sunrpc"), bandit=sunrpc_bandit)
+        seed_message = None
+    elif protocol == "telnet":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        telnet_mutator_inst = TelnetMutator(external_weights=ai_weights.get("telnet"), bandit=telnet_bandit)
+        seed_message = None
+    elif protocol == "tftp":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        tftp_mutator_inst = TftpMutator(external_weights=ai_weights.get("tftp"), bandit=tftp_bandit)
+        seed_message = None
     else:
         ftp_mutator_inst = None
         http_mutator_inst = None
@@ -1162,6 +1306,7 @@ def run_fuzzer_live(config: dict):
     _radius_payload, _radius_strategy, _radius_dst_port = None, None, None
     _tacacs_payload, _tacacs_strategy, _tacacs_dst_port = None, None, None
     _ldap_payload, _ldap_strategy, _ldap_dst_port = None, None, None
+    _telnet_payload, _telnet_strategy, _telnet_dst_port = None, None, None
 
     try:
         while fuzzer_state["running"] and not fuzzer_state["anomaly_detected"]:
@@ -1330,6 +1475,43 @@ def run_fuzzer_live(config: dict):
                 fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
                 live_transport.send_tcp(_ldap_payload, port=_ldap_dst_port)
                 fuzzer_state["iteration"] += 1
+            elif protocol == "cifs":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _cifs_payload, _cifs_strategy, _cifs_dst_port = cifs_mutator_inst.mutate()
+                strategy = _cifs_strategy
+                fuzzer_state["current_strategy"] = strategy
+                fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_tcp(_cifs_payload, port=_cifs_dst_port)
+                fuzzer_state["iteration"] += 1
+            elif protocol == "sunrpc":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _sunrpc_payload, _sunrpc_strategy, _sunrpc_dst_port = sunrpc_mutator_inst.mutate()
+                strategy = _sunrpc_strategy
+                fuzzer_state["current_strategy"] = strategy
+                fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                _tcp_strats = ("record_marking_abuse", "tcp_segmentation_evasion",
+                               "nfs_compound_overflow")
+                if strategy in _tcp_strats:
+                    live_transport.send_tcp(_sunrpc_payload, port=_sunrpc_dst_port)
+                else:
+                    live_transport.send_udp(_sunrpc_payload, port=_sunrpc_dst_port)
+                fuzzer_state["iteration"] += 1
+            elif protocol == "telnet":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _telnet_payload, _telnet_strategy, _telnet_dst_port = telnet_mutator_inst.mutate()
+                strategy = _telnet_strategy
+                fuzzer_state["current_strategy"] = strategy
+                fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_tcp(_telnet_payload, port=_telnet_dst_port)
+                fuzzer_state["iteration"] += 1
+            elif protocol == "tftp":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _tftp_payload, _tftp_strategy, _tftp_dst_port = tftp_mutator_inst.mutate()
+                strategy = _tftp_strategy
+                fuzzer_state["current_strategy"] = strategy
+                fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_udp(_tftp_payload, port=_tftp_dst_port)
+                fuzzer_state["iteration"] += 1
             else:
                 dns_w = ai_weights.get("dns", {})
                 strategy = dns_bandit.select_with_weights(dns_w)
@@ -1360,7 +1542,7 @@ def run_fuzzer_live(config: dict):
             active_bandit = _bandit_for(protocol)
             active_bandit.update(strategy, 0.0)
 
-            stat_interval = 500 if protocol in ("ftp", "http", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6", "sip", "mgcp", "radius", "tacacs", "ldap") else 10000
+            stat_interval = 500 if protocol in ("ftp", "http", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6", "sip", "mgcp", "radius", "tacacs", "ldap", "cifs", "sunrpc", "telnet", "tftp") else 10000
             if fuzzer_state["iteration"] % stat_interval == 0:
                 elapsed = time.time() - fuzzer_state["start_time"] if fuzzer_state["start_time"] else 1
                 fuzzer_state["packets_per_sec"] = int(fuzzer_state["iteration"] / max(elapsed, 0.001))

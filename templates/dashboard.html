@@ -1196,6 +1196,10 @@
                     <option value="radius">RADIUS</option>
                     <option value="tacacs">TACACS+</option>
                     <option value="ldap">LDAP</option>
+                    <option value="cifs">CIFS/SMB1</option>
+                    <option value="sunrpc">SUN RPC</option>
+                    <option value="telnet">Telnet</option>
+                    <option value="tftp">TFTP</option>
                 </select>
             </div>
             <div class="target-info">
@@ -1484,6 +1488,10 @@
                                 <option value="radius">RADIUS</option>
                                 <option value="tacacs">TACACS+</option>
                                 <option value="ldap">LDAP</option>
+                                <option value="cifs">CIFS/SMB1</option>
+                                <option value="sunrpc">SUN RPC</option>
+                                <option value="telnet">Telnet</option>
+                                <option value="tftp">TFTP</option>
                             </select>
                         </div>
                         <div class="config-grid" style="grid-template-columns:1fr 1fr;">
@@ -2412,7 +2420,11 @@
                 { key: 'rtsp', title: 'RTSP Strategy Weights', defKey: 'rtsp_default' },
                 { key: 'radius', title: 'RADIUS Strategy Weights', defKey: 'radius_default' },
                 { key: 'tacacs', title: 'TACACS+ Strategy Weights', defKey: 'tacacs_default' },
-                { key: 'ldap', title: 'LDAP Strategy Weights', defKey: 'ldap_default' }
+                { key: 'ldap', title: 'LDAP Strategy Weights', defKey: 'ldap_default' },
+                { key: 'cifs', title: 'CIFS/SMB1 Strategy Weights', defKey: 'cifs_default' },
+                { key: 'sunrpc', title: 'SUN RPC Strategy Weights', defKey: 'sunrpc_default' },
+                { key: 'telnet', title: 'Telnet Strategy Weights', defKey: 'telnet_default' },
+                { key: 'tftp', title: 'TFTP Strategy Weights', defKey: 'tftp_default' }
             ];
 
             const legend = `<div class="ai-w-legend">
@@ -2561,7 +2573,7 @@
         function formatWeightReasoning(raw) {
             if (!raw) return '';
             // Split on known line boundaries: "  DNS/", "  FTP/", etc. or "  WARNING"
-            const lines = raw.split(/(?=\s{2}(?:DNS|FTP|HTTP2?|SMTP|SSH|SMB[23]|DCERPC|DHCPv?6?|SNMP|ICMPv?6?|SIP|MGCP|RTSP|RADIUS|TACACS\+?|LDAP|WARNING|Weight))/g);
+            const lines = raw.split(/(?=\s{2}(?:DNS|FTP|HTTP2?|SMTP|SSH|SMB[23]|DCERPC|DHCPv?6?|SNMP|ICMPv?6?|SIP|MGCP|RTSP|RADIUS|TACACS\+?|LDAP|CIFS|SUNRPC|Telnet|TFTP|WARNING|Weight))/g);
             return lines.map(line => {
                 line = line.trim();
                 if (!line) return '';
@@ -2864,7 +2876,7 @@
             document.getElementById('fs-ftp-opts').style.display = proto === 'ftp' ? '' : 'none';
             document.getElementById('fs-smtp-opts').style.display = proto === 'smtp' ? '' : 'none';
             document.getElementById('fs-smb-opts').style.display = (proto === 'smb2' || proto === 'smb3') ? '' : 'none';
-            document.getElementById('fs-port').value = { http: 80, ftp: 21, smtp: 25, ssh: 22, smb2: 445, smb3: 445, http2: 80, dcerpc: 135, dhcp: 67, dhcpv6: 547, snmp: 161, icmp: 0, icmpv6: 0, sip: 5060, mgcp: 2427, rtsp: 554, radius: 1812, tacacs: 49, ldap: 389 }[proto] || 80;
+            document.getElementById('fs-port').value = { http: 80, ftp: 21, smtp: 25, ssh: 22, smb2: 445, smb3: 445, http2: 80, dcerpc: 135, dhcp: 67, dhcpv6: 547, snmp: 161, icmp: 0, icmpv6: 0, sip: 5060, mgcp: 2427, rtsp: 554, radius: 1812, tacacs: 49, ldap: 389, cifs: 445, sunrpc: 111, telnet: 23, tftp: 69 }[proto] || 80;
             const hostInput = document.getElementById('fs-host');
             hostInput.placeholder = (proto === 'dhcpv6' || proto === 'icmpv6') ? 'fe80::1 (IPv6 required)' : '172.21.0.2';
         }
@@ -2952,6 +2964,14 @@
                 // TACACS+ needs no extra options — Auth START wrapper is constructed server-side
             } else if (fsProto === 'ldap') {
                 // LDAP needs no extra options — BindRequest wrapper is constructed server-side
+            } else if (fsProto === 'cifs') {
+                // CIFS needs no extra options — NEGOTIATE+WRITE_ANDX wrapper is constructed server-side
+            } else if (fsProto === 'sunrpc') {
+                // SUNRPC needs no extra options — RPC CALL wrapper is constructed server-side
+            } else if (fsProto === 'telnet') {
+                // Telnet needs no extra options — IAC/NVT wrapper is constructed server-side
+            } else if (fsProto === 'tftp') {
+                // TFTP needs no extra options — WRQ/DATA wrapper is constructed server-side
             } else if (fsProto === 'smb2' || fsProto === 'smb3') {
                 fd.append('smb_share', document.getElementById('fs-smb-share').value || 'shared');
                 fd.append('smb_user', document.getElementById('fs-smb-user').value || '');

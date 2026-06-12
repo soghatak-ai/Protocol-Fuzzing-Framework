@@ -1406,3 +1406,368 @@ def send_file_ldap(host, port, filename, data, on_packet=None, timeout=5):
     except Exception as e:
         result["detail"] = f"{type(e).__name__}: {e}"
     return result
+
+
+def send_file_cifs(host, port, filename, data, on_packet=None, timeout=5):
+    """Send a file as SMB1/CIFS WRITE_ANDX packets over TCP.
+
+    Wraps the file contents inside SMB1 (CIFS / NT LM 0.12) WRITE_ANDX
+    command bodies so that Snort's dce_smb inspector (GID 133) will parse
+    the traffic as valid SMB1.  Sends a NEGOTIATE first, then chunks the
+    file data across sequential WRITE_ANDX messages, each preceded by a
+    4-byte NetBIOS session header.
+    """
+    import random as _rnd
+
+    result = {"file": filename, "ok": False, "detail": "", "sent_bytes": 0, "response": None}
+
+    SMB_MAGIC = b'\xffSMB'
+    NBT_SESSION = 0x00
+
+    def _nbt(payload):
+        """4-byte NetBIOS Session Message header."""
+        return bytes([NBT_SESSION]) + struct.pack("!I", len(payload))[1:]
+
+    def _smb1_hdr(cmd, tid=0, uid=0, mid=0, pid=None, flags=0x18, flags2=0xC803):
+        if pid is None:
+            pid = _rnd.randint(1, 0xFFFF)
+        hdr = SMB_MAGIC
+        hdr += struct.pack("<B", cmd)        # Command
+        hdr += struct.pack("<I", 0)          # NT_STATUS
+        hdr += struct.pack("<B", flags)
+        hdr += struct.pack("<H", flags2)
+        hdr += struct.pack("<H", 0)          # PIDHigh
+        hdr += b'\x00' * 8                  # Signature
+        hdr += struct.pack("<H", 0)          # Reserved
+        hdr += struct.pack("<H", tid)
+        hdr += struct.pack("<H", pid)
+        hdr += struct.pack("<H", uid)
+        hdr += struct.pack("<H", mid)
+        return hdr
+
+    CHUNK = 4096
+
+    try:
+        total_sent = 0
+        safe_name = filename.encode("utf-8", errors="replace")[:255]
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect((host, int(port)))
+
+            # 1) Send SMB_COM_NEGOTIATE (0x72)
+            neg_hdr = _smb1_hdr(0x72, mid=0)
+            neg_data = b'\x02NT LM 0.12\x00'
+            neg_body = struct.pack("<B", 0) + struct.pack("<H", len(neg_data)) + neg_data
+            neg_pkt = _nbt(neg_hdr + neg_body) + neg_hdr + neg_body
+            s.sendall(neg_pkt)
+            _emit(on_packet, "tx", "CIFS NEGOTIATE", neg_pkt)
+            total_sent += len(neg_pkt)
+
+            try:
+                resp = s.recv(4096)
+                _emit(on_packet, "rx", "CIFS NEGOTIATE response", resp)
+                result["response"] = f"received {len(resp)} bytes"
+            except socket.timeout:
+                pass
+
+            # 2) Chunk file data into WRITE_ANDX (0x2F) messages
+            offset = 0
+            pkt_index = 0
+            fid = 0xFFFF  # dummy FID
+
+            while offset < len(data) or pkt_index == 0:
+                chunk = data[offset:offset + CHUNK]
+                mid = (pkt_index + 1) & 0xFFFF
+
+                hdr = _smb1_hdr(0x2F, tid=1, uid=1, mid=mid)  # WRITE_ANDX
+
+                # WordCount=14 for WRITE_ANDX
+                words = struct.pack("<BBH", 0xFF, 0, 0)  # no further AndX
+                words += struct.pack("<H", fid)           # FID
+                words += struct.pack("<I", offset)        # Offset
+                words += struct.pack("<I", 0)             # Reserved
+                words += struct.pack("<H", 0x0008)        # WriteMode
+                words += struct.pack("<H", len(chunk))    # Remaining
+                words += struct.pack("<H", 0)             # DataLengthHigh
+                words += struct.pack("<H", len(chunk))    # DataLength
+                words += struct.pack("<H", 63)            # DataOffset
+                words += struct.pack("<I", 0)             # OffsetHigh
+
+                body = struct.pack("<B", 14) + words
+                body += struct.pack("<H", len(chunk)) + chunk
+
+                pkt = _nbt(hdr + body) + hdr + body
+                s.sendall(pkt)
+                _emit(on_packet, "tx",
+                      f"CIFS WRITE_ANDX #{pkt_index} (file payload)", pkt)
+                total_sent += len(pkt)
+                pkt_index += 1
+                offset += CHUNK
+
+                try:
+                    resp = s.recv(4096)
+                    _emit(on_packet, "rx", "CIFS WRITE response", resp)
+                    result["response"] = f"received {len(resp)} bytes"
+                except socket.timeout:
+                    pass
+
+                if offset >= len(data) and pkt_index > 0:
+                    break
+
+        result["sent_bytes"] = total_sent
+        result["ok"] = True
+        result["detail"] = (f"sent {total_sent} bytes across {pkt_index + 1} CIFS "
+                            f"packet(s) on TCP/{port}")
+    except Exception as e:
+        result["detail"] = f"{type(e).__name__}: {e}"
+    return result
+
+
+def send_file_sunrpc(host, port, filename, data, on_packet=None, timeout=5):
+    """Send a file as one or more ONC RPC CALL packets over UDP.
+
+    Wraps the file contents inside RPC CALL messages targeting the
+    portmapper NULL procedure (program 100000, version 2, procedure 0).
+    The file data is carried as the opaque call body following the RPC
+    header and AUTH_SYS credentials containing the sanitized filename
+    as the machinename.
+    """
+    import random as _rng
+
+    result = {
+        "ok": False,
+        "file": _sanitize_name(filename),
+        "sent_bytes": 0,
+        "detail": "",
+    }
+    try:
+        port = int(port or 111)
+        CHUNK = 1400  # stay well within UDP datagram limits
+        total_sent = 0
+        pkt_index = 0
+
+        fname_bytes = result["file"].encode("utf-8")[:255]
+        # pad machinename to 4-byte boundary
+        fname_padded = fname_bytes + b"\x00" * ((4 - len(fname_bytes) % 4) % 4)
+
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(timeout)
+            offset = 0
+            while offset < len(data) or pkt_index == 0:
+                chunk = data[offset:offset + CHUNK]
+                xid = _rng.randint(0, 0xFFFFFFFF)
+
+                # RPC CALL header (RFC 5531)
+                rpc_hdr = struct.pack(">I", xid)               # XID
+                rpc_hdr += struct.pack(">I", 0)                 # msg_type = CALL
+                rpc_hdr += struct.pack(">I", 2)                 # rpcvers = 2
+                rpc_hdr += struct.pack(">I", 100000)            # prog = portmapper
+                rpc_hdr += struct.pack(">I", 2)                 # vers = 2
+                rpc_hdr += struct.pack(">I", 0)                 # proc = NULL
+
+                # AUTH_SYS credential (carries filename as machinename)
+                stamp = _rng.randint(0, 0xFFFFFFFF)
+                auth_body = struct.pack(">I", stamp)
+                auth_body += struct.pack(">I", len(fname_bytes)) + fname_padded
+                auth_body += struct.pack(">I", 0)               # uid
+                auth_body += struct.pack(">I", 0)               # gid
+                auth_body += struct.pack(">I", 0)               # aux_gid count
+
+                cred = struct.pack(">I", 1)                     # AUTH_SYS
+                cred += struct.pack(">I", len(auth_body)) + auth_body
+
+                # AUTH_NONE verifier
+                verf = struct.pack(">I", 0) + struct.pack(">I", 0)
+
+                # Call body: opaque file chunk
+                chunk_padded = chunk + b"\x00" * ((4 - len(chunk) % 4) % 4)
+                call_body = struct.pack(">I", len(chunk)) + chunk_padded
+
+                pkt = rpc_hdr + cred + verf + call_body
+                s.sendto(pkt, (host, port))
+                _emit(on_packet, "tx",
+                      f"SUNRPC CALL #{pkt_index} (file payload)", pkt)
+                total_sent += len(pkt)
+                pkt_index += 1
+                offset += CHUNK
+
+                try:
+                    resp, _ = s.recvfrom(4096)
+                    _emit(on_packet, "rx", "SUNRPC reply", resp)
+                    result["response"] = f"received {len(resp)} bytes"
+                except socket.timeout:
+                    pass
+
+        result["sent_bytes"] = total_sent
+        result["ok"] = True
+        result["detail"] = (f"sent {total_sent} bytes across {pkt_index} SUNRPC "
+                            f"packet(s) on UDP/{port}")
+    except Exception as e:
+        result["detail"] = f"{type(e).__name__}: {e}"
+    return result
+
+
+def send_file_telnet(host, port, filename, data, on_packet=None, timeout=5):
+    """Send a file as Telnet NVT data over TCP port 23.
+
+    Wraps the file contents inside a minimal Telnet session: option negotiation
+    (WILL BINARY + WILL SGA) followed by a NEW-ENVIRON sub-negotiation carrying
+    the filename, then the raw file bytes with IAC escaping (0xFF → 0xFF 0xFF).
+    Uses a chunked send loop similar to send_file_tacacs.
+    """
+    result = {"file": filename, "ok": False, "detail": "", "sent_bytes": 0, "response": None}
+
+    _IAC  = 0xFF
+    _WILL = 0xFB
+    _SB   = 0xFA
+    _SE   = 0xF0
+    _OPT_BINARY  = 0x00
+    _OPT_SGA     = 0x03
+    _OPT_NEWENV  = 0x27
+    _NE_VAR      = 0x00
+    _NE_VALUE    = 0x01
+
+    try:
+        port = int(port or 23)
+        total_sent = 0
+        safe_name = filename.encode("utf-8", errors="replace")[:255]
+
+        # Build option negotiation preamble
+        preamble = bytes([_IAC, _WILL, _OPT_BINARY,
+                          _IAC, _WILL, _OPT_SGA])
+
+        # Carry filename as NEW-ENVIRON VAR
+        env_data = bytes([0x00,         # IS
+                          _NE_VAR]) + b"FILENAME" + bytes([_NE_VALUE]) + safe_name
+        env_sb = bytes([_IAC, _SB, _OPT_NEWENV]) + env_data + bytes([_IAC, _SE])
+
+        # Escape 0xFF bytes in file data (IAC doubling)
+        escaped = data.replace(b"\xff", b"\xff\xff")
+
+        CHUNK = 4096
+        offset = 0
+        pkt_index = 0
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect((host, port))
+
+            # Send preamble + env
+            header_pkt = preamble + env_sb
+            s.sendall(header_pkt)
+            _emit(on_packet, "tx", "Telnet WILL BINARY+SGA + NEW-ENVIRON", header_pkt)
+            total_sent += len(header_pkt)
+            pkt_index += 1
+
+            # Read any server response (option negotiation)
+            try:
+                resp = s.recv(4096)
+                _emit(on_packet, "rx", "Telnet negotiation response", resp)
+                result["response"] = f"received {len(resp)} bytes"
+            except socket.timeout:
+                pass
+
+            # Send file data in chunks
+            while offset < len(escaped):
+                chunk = escaped[offset:offset + CHUNK]
+                s.sendall(chunk)
+                _emit(on_packet, "tx",
+                      f"Telnet data chunk #{pkt_index} (file payload)", chunk)
+                total_sent += len(chunk)
+                pkt_index += 1
+                offset += CHUNK
+
+                try:
+                    resp = s.recv(4096)
+                    _emit(on_packet, "rx", "Telnet response", resp)
+                    result["response"] = f"received {len(resp)} bytes"
+                except socket.timeout:
+                    pass
+
+        result["sent_bytes"] = total_sent
+        result["ok"] = True
+        result["detail"] = (f"sent {total_sent} bytes across {pkt_index} "
+                            f"Telnet packet(s) on TCP/{port}")
+    except Exception as e:
+        result["detail"] = f"{type(e).__name__}: {e}"
+    return result
+
+
+def send_file_tftp(host, port, filename, data, on_packet=None, timeout=5):
+    """Send a file via TFTP WRQ (Write Request) over UDP.
+
+    Implements a minimal TFTP client: sends WRQ to port 69 (or specified port),
+    waits for ACK block#0, then sends DATA blocks in lock-step (512-byte default
+    blocksize) waiting for each ACK before sending the next block.
+    This exercises Snort's TFTP content-match rules on UDP port 69.
+    """
+    import struct as _struct
+
+    result = {"file": filename, "ok": False, "detail": "", "sent_bytes": 0, "response": None}
+
+    # Sanitise filename for the TFTP request
+    if isinstance(filename, str):
+        safe_name = filename.encode("ascii", errors="replace")
+    else:
+        safe_name = filename
+    # Strip path separators — TFTP filenames are flat
+    safe_name = safe_name.replace(b"/", b"_").replace(b"\\", b"_")
+    if not safe_name:
+        safe_name = b"upload.bin"
+
+    BLOCKSIZE = 512
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(timeout)
+            server_addr = (host, int(port))
+
+            # 1. Send WRQ: opcode(2) + filename\0 + "octet"\0
+            wrq = _struct.pack(">H", 2) + safe_name + b'\x00' + b'octet' + b'\x00'
+            s.sendto(wrq, server_addr)
+            _emit(on_packet, "tx", "TFTP WRQ", wrq)
+            total_sent = len(wrq)
+
+            # 2. Wait for ACK block#0 (or OACK) from server's new TID
+            try:
+                resp, tid_addr = s.recvfrom(4096)
+                _emit(on_packet, "rx", "TFTP ACK/OACK", resp)
+                result["response"] = f"received {len(resp)} bytes from {tid_addr}"
+            except socket.timeout:
+                # Even without server response, continue sending data
+                tid_addr = server_addr
+                resp = None
+
+            # 3. Send DATA blocks in lock-step
+            block_num = 1
+            offset = 0
+            while True:
+                chunk = data[offset:offset + BLOCKSIZE]
+                data_pkt = _struct.pack(">HH", 3, block_num) + chunk
+                s.sendto(data_pkt, tid_addr)
+                _emit(on_packet, "tx",
+                      f"TFTP DATA block #{block_num} ({len(chunk)} bytes)", data_pkt)
+                total_sent += len(data_pkt)
+
+                # Wait for ACK
+                try:
+                    ack_resp, _ = s.recvfrom(4096)
+                    _emit(on_packet, "rx", f"TFTP ACK block #{block_num}", ack_resp)
+                except socket.timeout:
+                    pass
+
+                # Last block: data < blocksize signals end of transfer
+                if len(chunk) < BLOCKSIZE:
+                    break
+
+                block_num = (block_num + 1) & 0xFFFF  # 16-bit wrap
+                offset += BLOCKSIZE
+
+        result["sent_bytes"] = total_sent
+        result["ok"] = True
+        result["detail"] = (f"sent {total_sent} bytes in {block_num} TFTP DATA "
+                            f"block(s) on UDP/{port}")
+    except Exception as e:
+        result["detail"] = f"{type(e).__name__}: {e}"
+    return result

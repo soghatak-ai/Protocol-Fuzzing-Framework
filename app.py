@@ -38,10 +38,15 @@ from main import (fuzzer_state, event_log, reset_state, run_fuzzer, run_fuzzer_l
                   RADIUS_STRATEGY_NAMES, RADIUS_DEFAULT_WEIGHTS,
                   TACACS_STRATEGY_NAMES, TACACS_DEFAULT_WEIGHTS,
                   LDAP_STRATEGY_NAMES, LDAP_DEFAULT_WEIGHTS,
+                  CIFS_STRATEGY_NAMES, CIFS_DEFAULT_WEIGHTS,
+                  SUNRPC_STRATEGY_NAMES, SUNRPC_DEFAULT_WEIGHTS,
+                  TELNET_STRATEGY_NAMES, TELNET_DEFAULT_WEIGHTS,
+                  TFTP_STRATEGY_NAMES, TFTP_DEFAULT_WEIGHTS,
                   dns_bandit, ftp_bandit, http_bandit, smtp_bandit, ssh_bandit,
                   smb2_bandit, smb3_bandit, http2_bandit, dcerpc_bandit, dhcp_bandit,
                   dhcpv6_bandit, snmp_bandit, icmp_bandit, icmpv6_bandit, sip_bandit,
-                  mgcp_bandit, rtsp_bandit, radius_bandit, tacacs_bandit, ldap_bandit)
+                  mgcp_bandit, rtsp_bandit, radius_bandit, tacacs_bandit, ldap_bandit,
+                  cifs_bandit, sunrpc_bandit, telnet_bandit, tftp_bandit)
 from protocol.ftp import FTP_STRATEGY_LABELS
 from protocol.http import HTTP_STRATEGY_LABELS
 from protocol.smtp import SMTP_STRATEGY_LABELS
@@ -60,10 +65,14 @@ from protocol.rtsp import RTSP_STRATEGY_LABELS
 from protocol.radius import RADIUS_STRATEGY_LABELS
 from protocol.tacacs import TACACS_STRATEGY_LABELS
 from protocol.ldap import LDAP_STRATEGY_LABELS
+from protocol.cifs import CIFS_STRATEGY_LABELS
+from protocol.sunrpc import SUNRPC_STRATEGY_LABELS
+from protocol.telnet import TELNET_STRATEGY_LABELS
+from protocol.tftp import TFTP_STRATEGY_LABELS
 from engine.code_collector import (collect_to_dict, collect_to_single_text, VALID_EXTENSIONS,
                                     minify_code, hotspot_filter, extract_repo_map,
                                     build_optimized_context, estimate_tokens)
-from transport.file_sender import send_file_http, send_file_ftp, send_file_smtp, send_file_ssh, send_file_smb, send_file_http2, send_file_dcerpc, send_file_dhcp, send_file_dhcpv6, send_file_snmp, send_file_icmp, send_file_icmpv6, send_file_sip, send_file_mgcp, send_file_rtsp, send_file_radius, send_file_tacacs, send_file_ldap
+from transport.file_sender import send_file_http, send_file_ftp, send_file_smtp, send_file_ssh, send_file_smb, send_file_http2, send_file_dcerpc, send_file_dhcp, send_file_dhcpv6, send_file_snmp, send_file_icmp, send_file_icmpv6, send_file_sip, send_file_mgcp, send_file_rtsp, send_file_radius, send_file_tacacs, send_file_ldap, send_file_cifs, send_file_sunrpc, send_file_telnet, send_file_tftp
 from engine.semantic_search import index_codebase, get_all_chunks
 from engine.orchestrator import generate_tasks
 from engine.explorers import run_explorers
@@ -128,6 +137,14 @@ def _labels_for(protocol):
         return TACACS_STRATEGY_LABELS
     if protocol == "ldap":
         return LDAP_STRATEGY_LABELS
+    if protocol == "cifs":
+        return CIFS_STRATEGY_LABELS
+    if protocol == "sunrpc":
+        return SUNRPC_STRATEGY_LABELS
+    if protocol == "telnet":
+        return TELNET_STRATEGY_LABELS
+    if protocol == "tftp":
+        return TFTP_STRATEGY_LABELS
     return DNS_STRATEGY_LABELS
 
 
@@ -170,6 +187,14 @@ def _bandit_for_proto(protocol):
         return tacacs_bandit
     if protocol == "ldap":
         return ldap_bandit
+    if protocol == "cifs":
+        return cifs_bandit
+    if protocol == "sunrpc":
+        return sunrpc_bandit
+    if protocol == "telnet":
+        return telnet_bandit
+    if protocol == "tftp":
+        return tftp_bandit
     return dns_bandit
 
 
@@ -660,6 +685,70 @@ LDAP STRATEGIES (used when fuzzing LDAP — binary ASN.1 BER, TCP 389; RFC 4511;
 - nested_sequence_bomb: Deep BER SEQUENCE nesting for stack exhaustion — 1500 levels SEQUENCE nesting in BindRequest DN field, 800 levels packed inside DN octet string value, alternating SEQUENCE/SET 600 levels, 1000 levels inside control value. Targets recursive BER decoders in both IDS and LDAP servers. Triggers: stack-overflow, dos, crash
 - tcp_segment_evasion: TCP segmentation for IDS evasion — split outer SEQUENCE tag+length across TCP segments, split DN value across segments, split filter across segments, single-byte TCP segments for entire message, split inside non-minimal multi-byte length field, PSH flag at TLV boundaries, 10 pipelined LDAP messages to overwhelm reassembly. Snort has no LDAP-aware reassembly. Triggers: evasion, parser-desync
 - version_pdu_tag_confusion: Wrong/swapped APPLICATION-class tags — BindRequest tag (0x60) wrapping SearchRequest body, private-class tags (0xE0-0xFF) where application-class expected, LDAPv2 version with v3-only operations, multi-byte APPLICATION tag encoding, primitive/constructed bit flip (0x40 instead of 0x60), undefined APPLICATION tag numbers (30), SearchRequest tag on DeleteRequest body. Targets protocol operation dispatch and tag validation. Triggers: state-corruption, crash, evasion
+
+CIFS/SMB1 STRATEGIES (used when fuzzing CIFS — binary SMB1/NT LM 0.12 over TCP 445/139; [MS-CIFS]; Snort 3 dce_smb inspector GID 133 with deep protocol-aware parsing):
+- dialect_negotiation: Dialect negotiation attacks — oversized dialect list (100+ entries), empty dialect strings, invalid/binary dialect names, duplicate NT LM 0.12 entries, multiple NEGOTIATE commands on single connection, zero dialects. Targets SMB_COM_NEGOTIATE parser and dialect selection. Triggers: crash, state-corruption, dos
+- header_manipulation: SMB1 header field manipulation — corrupted \xffSMB magic bytes, invalid command codes (0xFE/0xFF), FLAGS/FLAGS2 bit confusion (all bits set, contradictory flags), PID/TID/UID/MID boundary values (0x0000, 0xFFFF), PidHigh overflow, signature field corruption. Targets Snort dce_smb header validation (GID 133:3, 133:4). Triggers: evasion, crash, state-corruption
+- wordcount_bytecount_desync: WordCount/ByteCount mismatch — WordCount claims N words but provides different amount, ByteCount larger/smaller than actual data, zero WordCount with non-empty parameters, WordCount=127 (max) with minimal data. Targets Snort rules 133:5 (bad word count) and 133:6 (bad byte count). Triggers: oob-read, heap-overflow, crash
+- andx_chain_abuse: AndX command chaining abuse — chain 10+ commands exceeding Snort smb_max_chain=3, circular AndXOffset creating infinite loops, invalid AndXOffset pointing outside message, chained SESSION_SETUP+LOGOFF (login+immediate logout), mixed valid/invalid AndX commands. Targets Snort rule 133:20 (excessive chaining) and 133:21 (multiple chained login). Triggers: dos, infinite-loop, state-corruption
+- transaction_fragmentation: SMB transaction fragmentation — oversized TotalDataCount in TRANSACTION/TRANSACTION2/NT_TRANSACT, mismatched primary/secondary fragment sizes, NTtrans 32-bit field overflow, overlapping transaction fragments, zero-length transaction with non-zero TotalDataCount. Targets DCE/RPC defragmentation in Snort dce_smb inspector. Triggers: heap-overflow, integer-overflow, dos
+- named_pipe_mailslot: Named Pipe and Mailslot injection — pipe name buffer overflow (\\PIPE\\ + 64KB name), \\PIPE\\LANMAN RAP abuse, mailslot name overflow (\\MAILSLOT\\ + oversized), TRANSACTION with both pipe and mailslot setup flags, NUL-embedded pipe names. Targets named pipe handling in SMB transport layer. Triggers: buffer-overflow, injection, state-corruption
+- authentication_attack: SMB1 authentication manipulation — malformed LM/NTLM challenge responses (truncated, oversized, all-zero), SPNEGO token corruption (invalid ASN.1/DER), empty security blob with non-zero length, oversized NTLMv2 blob (64KB+ target info), anonymous login followed by privileged commands. Targets SESSION_SETUP_ANDX authentication dispatch. Triggers: auth-bypass, heap-overflow, crash
+- oplock_state_confusion: OpLock state manipulation — unsolicited OpLock break responses, invalid OpLock type values (0xFF), OpLock break on non-existent FID, batch OpLock request on already-open file, rapid OpLock acquire/release cycling. Targets OpLock state machine in SMB server. Triggers: state-corruption, race-condition, dos
+- dfs_referral_attack: DFS referral path manipulation — deeply recursive DFS paths (\\\\server\\share\\a\\b\\...\\z 100+ components), self-referential DFS referral, malformed Unicode in DFS path, TRANSACTION2 GET_DFS_REFERRAL with oversized path, DFS flag set without valid referral data. Targets DFS path resolution and referral processing. Triggers: infinite-loop, stack-overflow, dos
+- signing_bypass: SMB message signing bypass — corrupted 8-byte signature field, valid signature with altered message body, signature field all-zeros when signing required (FLAGS2 bit 2), signature with wrong session key, alternating signed/unsigned messages. Targets MAC verification in SMB security layer. Triggers: evasion, auth-bypass, state-corruption
+- nbt_session_layer: NetBIOS session layer attacks — invalid session type bytes (0x84 Retarget, 0x85 Keepalive, 0xFF undefined), oversized NetBIOS length (0x01FFFF, exceeding 17-bit max), zero-length session message, session request (0x81) on port 445 (direct SMB), NetBIOS length mismatch with actual payload. Targets Snort rule 133:2 (bad NetBIOS session type) and NBT framing. Triggers: crash, evasion, dos
+- file_attribute_ea_overflow: Extended Attributes and file attribute overflow — oversized EA list (64KB+ total), individual EA value > 65535 bytes, long filename (255+ Unicode chars), EA with NUL-embedded name, TRANS2_SET_FILE_INFORMATION with contradictory attributes. Targets EA parsing and file attribute handling. Triggers: heap-overflow, buffer-overflow, dos
+- deprecated_command_abuse: Deprecated/obsolete SMB command usage — SMB_COM_COPY (0x29), SMB_COM_MOVE (0x2A), SMB_COM_GET_PRINT_QUEUE (0xC3), PROCESS_EXIT (0x11), and other commands removed in modern implementations. Targets Snort rule 133:53 (deprecated command) and legacy code paths. Triggers: crash, state-corruption, evasion
+- tcp_segmentation_evasion: TCP segmentation for dce_smb inspector evasion — split 4-byte NetBIOS header across TCP segments, split \xffSMB magic across segments, single-byte TCP segments for entire SMB message, split at WordCount/ByteCount boundary, interleaved PSH flags at non-message boundaries. Targets TCP reassembly interaction with Snort dce_smb desegmentation. Triggers: evasion, parser-desync
+
+SUN RPC / ONC RPC STRATEGIES (used when fuzzing SUN RPC — binary, UDP/TCP 111 portmapper + 2049 NFS; RFC 5531/4506/1833; Snort 3 GID 106 sunrpc inspector + gid 1 protocol-rpc rules):
+- xdr_string_overflow: XDR string length field abuse — rpcbomb-style CVE-2017-8779 (huge length, tiny data), string length > remaining packet, length 0xFFFFFFFF integer overflow, non-NUL-terminated strings, embedded NUL bytes. Targets XDR decode_string in libtirpc/glibc. Triggers: heap-overflow, dos, oob-read
+- xdr_array_overflow: XDR array element count overflow — CVE-2003-0028 element_count × element_size integer wrap (calloc(n,s) → small alloc), array count 0xFFFFFFFF, array count mismatch with data length, nested array-of-array recursion. Targets XDR decode_array. Triggers: integer-overflow, heap-overflow, oob-write
+- record_marking_abuse: TCP Record Marking framing attacks — Snort 106:1-5 surface. Fragment bit confusion (last=0 never terminated), 4-byte RM header with length 0/0x7FFFFFFF, RM length mismatch with actual data, multiple small RM fragments reassembling to oversized message, RM fragment splitting RPC header mid-field. Targets Snort sunrpc inspector RM reassembly. Triggers: dos, evasion, heap-overflow
+- rpc_header_manipulation: RPC message header field corruption — invalid msg_type (not 0/1), rpcvers != 2, XID=0/0xFFFFFFFF, call with reply msg_type, swapped prog/vers/proc fields, oversized opaque_auth bodies. Targets RPC message dispatch. Triggers: crash, state-corruption, evasion
+- auth_sys_overflow: AUTH_SYS credential overflow — machinename > 255 bytes (Snort 1:9624), uid/gid 0xFFFFFFFF, aux_gid array > 16 elements (RFC limit), oversized stamp field, total AUTH_SYS body > 400 bytes. Targets AUTH_SYS decode in rpc.mountd/nfsd. Triggers: buffer-overflow, heap-overflow, crash
+- auth_flavor_confusion: Authentication flavor mismatch — credential says AUTH_NONE but includes body, verifier flavor != credential flavor, unknown flavor numbers (7-99, 300000+), AUTH_SHORT with oversized opaque handle, RPCSEC_GSS with invalid gss_proc/service values. Targets auth dispatch. Triggers: state-corruption, crash, auth-bypass
+- portmap_abuse: Portmapper/RPCBIND abuse — GETPORT for program 100000 (recursive), SET/UNSET to redirect services (Snort 1:1280/1950), CALLIT amplification (Snort 1:2015), DUMP flood for service enumeration, registration of privileged programs from unprivileged port. Targets rpcbind service. Triggers: dos, amplification, service-hijack
+- nfs_compound_overflow: NFS COMPOUND operation overflow — CVE-2022-30136 surface. Oversized argarray (1000+ operations), deeply nested COMPOUND, tag string > 2^20 bytes, single huge operation (WRITE with 10MB data), mixed valid/invalid opcodes forcing partial rollback. Targets NFS v4 COMPOUND dispatch. Triggers: heap-overflow, dos, state-corruption
+- program_version_mismatch: Program/version mismatch probing — valid program with version 0 or 0xFFFFFFFF, non-existent program numbers (0, 0x40000000-0x5FFFFFFF), procedure number > known max, version range abuse (low > high in PROG_MISMATCH reply). Targets program lookup and version negotiation. Triggers: crash, info-leak, state-corruption
+- xdr_padding_violation: XDR alignment/padding violations — string/opaque data not padded to 4-byte boundary, extra padding bytes, non-zero pad bytes, data length not multiple of 4 without padding, truncated mid-XDR-word. Targets XDR decode assumptions about 4-byte alignment. Triggers: oob-read, crash, evasion
+- tcp_segmentation_evasion: TCP segmentation for sunrpc inspector evasion — split 4-byte RM header across TCP segments, split RPC XID across segments, single-byte TCP segments for entire RPC message, split inside XDR string length field, interleaved PSH flags at non-message boundaries. Targets TCP reassembly interaction with Snort sunrpc RM desegmentation. Triggers: evasion, parser-desync
+- reply_fuzzing: RPC reply message fuzzing — MSG_DENIED with invalid reject_stat, PROG_MISMATCH with inverted version range, SYSTEM_ERR with oversized data, accepted reply with garbage accept_stat, reply with XID matching no outstanding call. Targets reply parsing in client stacks. Triggers: state-corruption, crash, info-leak
+- null_procedure_abuse: RPC NULL procedure (proc 0) abuse — NULL call with non-empty payload, rapid NULL flood for resource exhaustion, NULL with AUTH_SYS creds requesting privileged portmapper operations, NULL to every registered program in sequence. Targets service availability and auth bypass. Triggers: dos, auth-bypass, info-leak
+- rpc_service_daemon_fuzz: RPC service daemon targeting — statd STAT/STAT_CALLBACK with format strings in hostname (CVE-2000-0666), cmsd oversized calendar name, sadmind AUTH_SYS bypass (CVE-2003-0722), ypupdated command injection, tooltalk buffer overflow. Targets specific RPC program implementations. Triggers: rce, buffer-overflow, command-injection
+
+TELNET STRATEGIES (used when fuzzing Telnet — text-based NVT + binary IAC escape, TCP 23; RFC 854/855/856/1091/1572/2941/2946/2217; Snort 3 telnet inspector GID 126):
+- iac_sequence_injection: IAC command sequence injection — CVE-2001-0554 AYT flood heap corruption, orphaned IAC at stream end, IAC with invalid command bytes (0x00-0xEC), rapid IAC NOP flood, IAC followed by 0x00 (reserved), sequential IAC GA half-duplex confusion, mixed valid command flood, IAC EOR flood. Targets telnetd command parser and Snort telnet inspector. Triggers: heap-overflow, dos, crash
+- option_negotiation_flood: Option negotiation exhaustion — WILL for all 256 options, contradictory WILL+WONT for same option, DO for unknown options (128-254), rapid WILL/WONT cycling for Echo, EXOPL (option 255) abuse causing IAC parsing ambiguity, all four commands for every option, DO/DONT SGA flood. Targets option state machine in telnetd. Triggers: dos, state-corruption, memory-exhaustion
+- subnegotiation_overflow: Sub-negotiation payload overflow — CVE-2011-4862 FreeBSD encrypt_keyid heap overflow pattern, SB without matching SE (unterminated), nested SB inside SB, zero-length SB, 64KB SB data, SB for un-negotiated option, unescaped IAC in SB data, multiple overlapping SBs. Targets SB data parsing. Triggers: heap-overflow, crash, buffer-overflow
+- naws_window_manipulation: NAWS (RFC 1073) window size abuse — zero dimensions (0x0), maximum dimensions (0xFFFF x 0xFFFF), wrong data length (3 or 100 bytes instead of 4), NAWS flood with rapid resizing, NAWS without prior negotiation, NAWS with IAC bytes in dimension values requiring escaping. Targets terminal size handling. Triggers: integer-overflow, dos, state-corruption
+- terminal_type_overflow: Terminal-Type (RFC 1091) SB overflow — oversized type string (5-30KB), empty type, null bytes in type string, raw unescaped IAC in type, format string characters (%n%s), flood of TERMTYPE IS responses, shell metacharacters, non-printable byte sequences. Targets TERM environment variable handling. Triggers: buffer-overflow, format-string, command-injection
+- environment_variable_injection: NEW-ENVIRON (RFC 1572) variable injection — CVE-2023-33230 Sitecom router command injection pattern, oversized VAR value, shell injection in VAR, LD_PRELOAD/PATH injection, hundreds of VARs, embedded NUL in values, conflicting VAR/USERVAR, empty VAR name, ESC byte abuse. Targets environment processing in login shell. Triggers: command-injection, buffer-overflow, auth-bypass
+- authentication_option_abuse: Telnet Authentication Option (RFC 2941) abuse — oversized NAME field, unknown auth types (128-255), empty auth IS, IS without prior SEND, many auth-type pairs, auth with modifier bits set incorrectly, rapid auth cycling. Targets authentication state machine. Triggers: crash, state-corruption, auth-bypass
+- encrypt_option_exploit: Telnet Encryption Option (RFC 2946) exploitation — CVE-2011-4862 oversized encrypt_keyid exact pattern, unknown encryption types, empty ENCRYPT SB, ENCRYPT_IS with huge data, ENCRYPT_SUPPORT with all 256 types, ENCRYPT_START without negotiation, format strings in ENCRYPT_REPLY, oversized DEC_KEYID. Targets encrypt key handling buffer. Triggers: heap-overflow, crash, rce
+- command_injection_evasion: Telnet command injection with IDS evasion — CVE-2022-29153 Consul smuggling, IAC NOP between every command byte, IAC IAC literal 0xFF insertion, backspace (EC) evasion, Go Ahead insertion between chars, null byte insertion, command split across SB/SE, EL then real command, mixed NOP+AYT interleaving. Targets IDS content matching. Triggers: evasion, command-injection
+- line_ending_confusion: NVT line-ending rule violations — bare CR without LF/NUL (RFC 854 violation), bare LF, CR followed by arbitrary byte, mixed line endings, oversized line (64KB+) without CRLF, Unicode line separators (U+2028/U+2029), CR CR LF sequences. Targets NVT CR handling in telnetd and IDS. Triggers: evasion, parser-desync, crash
+- data_mark_urgent_abuse: Data Mark (DM) and TCP Urgent pointer abuse — DM flood without TCP urgent, DM interleaved with data, IP+DM Synch rapid sequence, multiple DMs in sequence, DM inside sub-negotiation (illegal), AO+DM combination, BRK+DM rapid cycling. Targets Synch signal processing. Triggers: state-corruption, dos, evasion
+- iac_escape_desync: IAC escape sequence parser desynchronization — single IAC at buffer boundaries (255, 511, 1023, 4095), triple IAC (odd count), IAC IAC before WILL/WONT commands, IAC splitting option negotiation, rapid data/command mode toggling, 5-byte IAC sequences, IAC at power-of-2 boundaries, alternating IAC-data patterns. Targets IAC parser state machine. Triggers: evasion, parser-desync, crash
+- comport_option_overflow: COM Port Control Option (RFC 2217) overflow — oversized baud rate (0xFFFFFFFF), all command codes in sequence, unknown command codes (128-255), SET_CONTROL with invalid flow control, SET_LINESTATE with all bits, rapid baud rate cycling, oversized signature. Targets serial-port emulation layer. Triggers: buffer-overflow, crash, dos
+- tcp_segmentation_evasion: TCP segmentation for telnet inspector evasion — login sequence with IAC options designed for tiny segments, 1-byte TCP segments with NOP interleaving, option negotiation + command with split-friendly padding, many small SB sequences, duplicate login with overlap simulation, minimal request under segment threshold. Targets TCP reassembly interaction with Snort telnet inspector. Triggers: evasion, parser-desync
+
+TFTP STRATEGIES (used when fuzzing TFTP — binary UDP port 69; RFC 1350/2347/2348/2349/7440/2090; Snort SID 518/519/520/1289/1441-1444/1941/2337/2339/18767/32637):
+- rrq_filename_overflow: RRQ Read Request filename overflow — CVE-2002-0813 Cisco IOS >100 bytes, CVE-2006-6184 AT-TFTP stack overflow, CVE-2021-44428 Serva stack overflow, CVE-2021-44429 Pinkie buffer overflow. Snort SID 1941 checks isdataat:100. Variants: giant ASCII fill, non-ASCII charset confusion, NUL at byte 99 (SID 1941 boundary evasion), format string specifiers (%n%s%x%p), no NUL terminator, embedded path separators, all-0xFF bytes. Targets filename buffer in TFTP server. Triggers: buffer-overflow, stack-overflow, rce
+- wrq_filename_overflow: WRQ Write Request filename overflow — CVE-2003-0380 AT-TFTP PUT overflow, CVE-2008-1611 TFTP Server filename overflow. Snort SID 2337 checks opcode 0x0002 + isdataat:100. Same variant matrix as RRQ but with opcode 2. Targets filename buffer on write path. Triggers: buffer-overflow, stack-overflow, rce
+- directory_traversal_injection: Path traversal in RRQ/WRQ filenames — CVE-1999-0183 generic "../" traversal, CVE-2009-0271 SolarWinds "..../" collapse bypass. Snort SID 519 checks ".." at offset 2, SID 520 checks absolute path. Evasion: URL-encoded (%2e%2e/%2f), overlong UTF-8 (%c0%ae), SolarWinds collapse (....//) , NUL byte truncation, mixed encoding, double mangling (..././), backslash substitution. Targets file path resolution. Triggers: info-leak, arbitrary-file-read, arbitrary-file-write
+- error_packet_overflow: ERROR packet message overflow — CVE-2008-2161 Open TFTP heap overflow, CVE-2018-10387 heap overflow, CVE-2019-12567 stack overflow in logMess. NO Snort TFTP rule covers ERROR message length. Variants: giant message (1-32KB), missing NUL terminator, format strings, non-ASCII bytes, invalid error codes (9-65535), zero-length message, embedded NULs. Targets error message logging/display buffer. Triggers: heap-overflow, stack-overflow, format-string
+- opcode_abuse: Invalid/unexpected TFTP opcodes — CVE-2007-3948 NULL opcode crash. Snort SID 2339 catches 0x0000 only; opcodes 7-255 undetected. Variants: NULL opcode (0x0000), undefined opcodes 7-255, maximum 0xFFFF, single-byte truncated, valid opcode with random body, unsolicited OACK, three-byte opcode. Targets opcode dispatch. Triggers: crash, dos, undefined-behavior
+- option_negotiation_abuse: Malformed RFC 2347/2348/2349/7440 options in RRQ/WRQ — CVE-2018-8476 Windows WDS TFTP UAF via blksize+windowsize (PXE Dust). NO Snort rule inspects TFTP option fields. Variants: blksize=0 (divide-by-zero), blksize>65464, tsize integer overflow, windowsize=0 or 65535, many options exceeding 512-byte request, missing NUL between key/value, PXE Dust exact trigger (blksize=1456+windowsize=64), duplicate options, unknown option names with long values. Targets option parsing. Triggers: uaf, integer-overflow, dos, memory-exhaustion
+- mode_string_abuse: Mutated transfer mode field — Metasploit 3Com TFTP Fuzzer crash via long mode. Snort rules check opcode+filename but NOT mode content. Variants: oversized mode (500-5000 bytes), unknown modes (binary/foobar/MAIL), empty mode, missing NUL, embedded NUL in mode, non-ASCII bytes, case variations. Targets mode string parsing. Triggers: buffer-overflow, crash, dos
+- block_number_manipulation: Block number abuse in DATA/ACK — block#=0 in DATA (invalid), block#=0xFFFF rollover boundary, ACK for future unsent block, duplicate ACK concatenation (Sorcerer's Apprentice Syndrome trigger), oversized DATA > blocksize, ACK with trailing data. Targets transfer state machine. Triggers: state-corruption, dos, infinite-loop
+- malformed_packet_structure: Structurally invalid TFTP packets — CVE-2008-4441 Tftpd32 malformed packet crash. Variants: empty payload, single byte, opcode only, RRQ with no filename, RRQ with filename but no mode, DATA with no block number, near-64KB payload, all-NUL packets. Targets parser robustness. Triggers: crash, oob-read, dos
+- ip_fragmentation_evasion: Oversized TFTP payloads forcing IP fragmentation for IDS evasion — padding pushes traversal/overflow content into second IP fragment beyond Snort reassembly window. Variants: 1400-byte padding before traversal filename, NUL padding to fragment boundary, oversized DATA blocks (2-16KB), many options filling multiple fragments, NOP sled patterns, near-max UDP payload. Targets IP reassembly interaction with TFTP inspection. Triggers: evasion, parser-desync
+- multicast_option_abuse: Malformed RFC 2090 multicast options — invalid multicast IP (999.999.999.999), port > 65535, invalid master client flag, empty value, overflow in address field, missing comma delimiters, non-numeric port. Most servers don't implement RFC 2090; malformed values may crash parsers. Triggers: crash, dos, oob-read
+- unsolicited_response_injection: Server-side packets (OACK/DATA/ACK/ERROR) sent to port 69 where only RRQ/WRQ expected — OACK with options, DATA block#1 with payload, ACK block#0 mimicking WRQ ack, ERROR with crafted message, DATA block#0 (should never exist), OACK with extreme option values. Tests undefined behavior on listening port. Triggers: state-corruption, crash, dos
+- tid_spoofing_confusion: Transfer ID session confusion — ACK with random block# to port 69, multiple RRQs concatenated in one datagram, DATA response to port 69, RRQ+ERROR in same datagram, ACK with appended option-like data, multiple RRQs for different files. Tests parser boundary detection and session management. Triggers: state-corruption, evasion, session-hijack
+- pxe_boot_payload_injection: PXE/WDS-specific RRQ packets — CVE-2018-8476 Windows WDS TFTP UAF (PXE Dust, all Windows Server ≥2008SP2), PixieFail CVE-2023-45229-45237 EDK II UEFI PXE stack. Variants: standard PXE Dust option combo (blksize=1456+windowsize=64), extreme windowsize memory exhaustion, msftwindow non-standard option, UNC path injection, blksize×windowsize > cache overflow, PXE path + directory traversal. Targets PXE boot infrastructure. Triggers: uaf, memory-exhaustion, rce, arbitrary-file-read
 """
 
 # ---------------------------------------------------------------------------
@@ -681,7 +770,7 @@ For each vulnerability found, provide:
   - Protocol and port the payload should be sent on
   - Which mutation strategy from the list below BEST triggers this vulnerability (matched_strategy)
   - strategy_protocol: the protocol family that the matched strategy belongs to — EXACTLY one of:
-    dns, ftp, http, smtp, ssh, smb2, smb3, http2, dcerpc, dhcp, dhcpv6, snmp, icmp, icmpv6, sip, mgcp, rtsp, radius, tacacs, ldap
+    dns, ftp, http, smtp, ssh, smb2, smb3, http2, dcerpc, dhcp, dhcpv6, snmp, icmp, icmpv6, sip, mgcp, rtsp, radius, tacacs, ldap, cifs, sunrpc, telnet, tftp
     (this disambiguates strategy names shared by multiple protocols, e.g. cmd_overflow, version_confusion)
   - confidence: an integer 0-100 — how confident you are this is a REAL, triggerable bug (not theoretical)
 
@@ -780,7 +869,7 @@ SEVERITY_MULTIPLIERS = {
 
 def compute_weights_from_vulns(verified_vulns):
     """Deterministic weight computation from verified vulnerabilities.
-    Returns (dns_weights, ftp_weights, http_weights, smtp_weights, ssh_weights, smb2_weights, smb3_weights, http2_weights, dcerpc_weights, dhcp_weights, dhcpv6_weights, snmp_weights, icmp_weights, icmpv6_weights, sip_weights, mgcp_weights, rtsp_weights, radius_weights, tacacs_weights, ldap_weights, reasoning_str)."""
+    Returns (dns_weights, ftp_weights, http_weights, smtp_weights, ssh_weights, smb2_weights, smb3_weights, http2_weights, dcerpc_weights, dhcp_weights, dhcpv6_weights, snmp_weights, icmp_weights, icmpv6_weights, sip_weights, mgcp_weights, rtsp_weights, radius_weights, tacacs_weights, ldap_weights, cifs_weights, sunrpc_weights, telnet_weights, tftp_weights, reasoning_str)."""
 
     # Start with default weights
     dns_w = dict(zip(DNS_STRATEGY_NAMES, DNS_DEFAULT_WEIGHTS))
@@ -803,6 +892,10 @@ def compute_weights_from_vulns(verified_vulns):
     radius_w = dict(zip(RADIUS_STRATEGY_NAMES, RADIUS_DEFAULT_WEIGHTS))
     tacacs_w = dict(zip(TACACS_STRATEGY_NAMES, TACACS_DEFAULT_WEIGHTS))
     ldap_w = dict(zip(LDAP_STRATEGY_NAMES, LDAP_DEFAULT_WEIGHTS))
+    cifs_w = dict(zip(CIFS_STRATEGY_NAMES, CIFS_DEFAULT_WEIGHTS))
+    sunrpc_w = dict(zip(SUNRPC_STRATEGY_NAMES, SUNRPC_DEFAULT_WEIGHTS))
+    telnet_w = dict(zip(TELNET_STRATEGY_NAMES, TELNET_DEFAULT_WEIGHTS))
+    tftp_w = dict(zip(TFTP_STRATEGY_NAMES, TFTP_DEFAULT_WEIGHTS))
 
     reasoning_lines = ["Weight computation (deterministic formula):"]
     reasoning_lines.append(f"  Starting from default weights. {len(verified_vulns)} verified vulnerabilities.")
@@ -831,6 +924,10 @@ def compute_weights_from_vulns(verified_vulns):
         ("radius", radius_w, "RADIUS", 1),
         ("tacacs", tacacs_w, "TACACS+", 1),
         ("ldap", ldap_w, "LDAP", 1),
+        ("cifs", cifs_w, "CIFS", 1),
+        ("sunrpc", sunrpc_w, "SUNRPC", 1),
+        ("telnet", telnet_w, "Telnet", 1),
+        ("tftp", tftp_w, "TFTP", 1),
     ]
     _by_key = {k: (wd, disp, dec) for k, wd, disp, dec in _weight_dicts}
     # strategy name -> list of protocol keys that define it (in registry order)
@@ -839,7 +936,7 @@ def compute_weights_from_vulns(verified_vulns):
         for s in wd:
             _name_index.setdefault(s, []).append(k)
     # Common ways the model may spell a protocol family hint.
-    _hint_aliases = {"smb": "smb2", "icmpv4": "icmp", "dhcp6": "dhcpv6", "tacacs+": "tacacs", "ldap+": "ldap"}
+    _hint_aliases = {"smb": "smb2", "icmpv4": "icmp", "dhcp6": "dhcpv6", "tacacs+": "tacacs", "ldap+": "ldap", "smb1": "cifs", "rpc": "sunrpc", "oncrpc": "sunrpc", "nfs": "sunrpc", "portmapper": "sunrpc", "rpcbind": "sunrpc", "tel": "telnet", "trivial": "tftp", "pxe": "tftp"}
 
     # Apply multipliers
     for v in verified_vulns:
@@ -1002,7 +1099,31 @@ def compute_weights_from_vulns(verified_vulns):
         ldap_w = {s: round(v / ldap_total * 100, 1) for s, v in ldap_w.items()}
     reasoning_lines.append(f"  LDAP normalized (sum was {ldap_total:.1f})")
 
-    return dns_w, ftp_w, http_w, smtp_w, ssh_w, smb2_w, smb3_w, http2_w, dcerpc_w, dhcp_w, dhcpv6_w, snmp_w, icmp_w, icmpv6_w, sip_w, mgcp_w, rtsp_w, radius_w, tacacs_w, ldap_w, "\n".join(reasoning_lines)
+    # Normalize CIFS to sum=100
+    cifs_total = sum(cifs_w.values())
+    if cifs_total > 0:
+        cifs_w = {s: round(v / cifs_total * 100, 1) for s, v in cifs_w.items()}
+    reasoning_lines.append(f"  CIFS normalized (sum was {cifs_total:.1f})")
+
+    # Normalize SUNRPC to sum=100
+    sunrpc_total = sum(sunrpc_w.values())
+    if sunrpc_total > 0:
+        sunrpc_w = {s: round(v / sunrpc_total * 100, 1) for s, v in sunrpc_w.items()}
+    reasoning_lines.append(f"  SUNRPC normalized (sum was {sunrpc_total:.1f})")
+
+    # Normalize Telnet to sum=100
+    telnet_total = sum(telnet_w.values())
+    if telnet_total > 0:
+        telnet_w = {s: round(v / telnet_total * 100, 1) for s, v in telnet_w.items()}
+    reasoning_lines.append(f"  Telnet normalized (sum was {telnet_total:.1f})")
+
+    # Normalize TFTP to sum=100
+    tftp_total = sum(tftp_w.values())
+    if tftp_total > 0:
+        tftp_w = {s: round(v / tftp_total * 100, 1) for s, v in tftp_w.items()}
+    reasoning_lines.append(f"  TFTP normalized (sum was {tftp_total:.1f})")
+
+    return dns_w, ftp_w, http_w, smtp_w, ssh_w, smb2_w, smb3_w, http2_w, dcerpc_w, dhcp_w, dhcpv6_w, snmp_w, icmp_w, icmpv6_w, sip_w, mgcp_w, rtsp_w, radius_w, tacacs_w, ldap_w, cifs_w, sunrpc_w, telnet_w, tftp_w, "\n".join(reasoning_lines)
 
 # AI analysis state
 analysis_state = {
@@ -1129,7 +1250,7 @@ def api_start():
 
     body = request.json or {}
     protocol = body.get("protocol", "dns").lower()
-    if protocol not in ("dns", "ftp", "http", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6", "sip", "mgcp", "rtsp", "radius", "tacacs", "ldap"):
+    if protocol not in ("dns", "ftp", "http", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6", "sip", "mgcp", "rtsp", "radius", "tacacs", "ldap", "cifs", "sunrpc", "telnet", "tftp"):
         protocol = "dns"
     mode = body.get("mode", "pipe").lower()
     live_config = body.get("live_config", {})
@@ -1244,14 +1365,14 @@ def api_filesend_send():
         return jsonify({"error": "No files provided"}), 400
 
     protocol = (request.form.get("protocol") or "http").lower().strip()
-    if protocol not in ("http", "ftp", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6", "sip", "mgcp", "rtsp", "radius", "tacacs", "ldap"):
-        return jsonify({"error": "protocol must be 'http', 'ftp', 'smtp', 'ssh', 'smb2', 'smb3', 'http2', 'dcerpc', 'dhcp', 'dhcpv6', 'snmp', 'icmp', 'icmpv6', 'sip', 'mgcp', 'rtsp', 'radius', 'tacacs', or 'ldap'"}), 400
+    if protocol not in ("http", "ftp", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6", "sip", "mgcp", "rtsp", "radius", "tacacs", "ldap", "cifs", "sunrpc", "telnet", "tftp"):
+        return jsonify({"error": "protocol must be one of: http, ftp, smtp, ssh, smb2, smb3, http2, dcerpc, dhcp, dhcpv6, snmp, icmp, icmpv6, sip, mgcp, rtsp, radius, tacacs, ldap, cifs, sunrpc, telnet, tftp"}), 400
 
     host = (request.form.get("host") or "").strip()
     if not host:
         return jsonify({"error": "Target host is required"}), 400
 
-    default_port = {"http": 80, "ftp": 21, "smtp": 25, "ssh": 22, "smb2": 445, "smb3": 445, "http2": 80, "dcerpc": 135, "dhcp": 67, "dhcpv6": 547, "snmp": 161, "icmp": 0, "icmpv6": 0, "sip": 5060, "mgcp": 2427, "rtsp": 554, "radius": 1812, "tacacs": 49, "ldap": 389}[protocol]
+    default_port = {"http": 80, "ftp": 21, "smtp": 25, "ssh": 22, "smb2": 445, "smb3": 445, "http2": 80, "dcerpc": 135, "dhcp": 67, "dhcpv6": 547, "snmp": 161, "icmp": 0, "icmpv6": 0, "sip": 5060, "mgcp": 2427, "rtsp": 554, "radius": 1812, "tacacs": 49, "ldap": 389, "cifs": 445, "sunrpc": 111, "telnet": 23, "tftp": 69}[protocol]
     try:
         port = int(request.form.get("port") or default_port)
     except ValueError:
@@ -1343,6 +1464,22 @@ def api_filesend_send():
             res = send_file_ldap(
                 host, port, f.filename, data,
             )
+        elif protocol == "cifs":
+            res = send_file_cifs(
+                host, port, f.filename, data,
+            )
+        elif protocol == "sunrpc":
+            res = send_file_sunrpc(
+                host, port, f.filename, data,
+            )
+        elif protocol == "telnet":
+            res = send_file_telnet(
+                host, port, f.filename, data,
+            )
+        elif protocol == "tftp":
+            res = send_file_tftp(
+                host, port, f.filename, data,
+            )
         else:
             res = send_file_ftp(
                 host, port, f.filename, data,
@@ -1387,14 +1524,14 @@ def api_filesend_stream():
         return jsonify({"error": "No files provided"}), 400
 
     protocol = (request.form.get("protocol") or "http").lower().strip()
-    if protocol not in ("http", "ftp", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6", "sip", "mgcp", "rtsp", "radius", "tacacs", "ldap"):
-        return jsonify({"error": "protocol must be 'http', 'ftp', 'smtp', 'ssh', 'smb2', 'smb3', 'http2', 'dcerpc', 'dhcp', 'dhcpv6', 'snmp', 'icmp', 'icmpv6', 'sip', 'mgcp', 'rtsp', 'radius', 'tacacs', or 'ldap'"}), 400
+    if protocol not in ("http", "ftp", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6", "sip", "mgcp", "rtsp", "radius", "tacacs", "ldap", "cifs", "sunrpc", "telnet", "tftp"):
+        return jsonify({"error": "protocol must be one of: http, ftp, smtp, ssh, smb2, smb3, http2, dcerpc, dhcp, dhcpv6, snmp, icmp, icmpv6, sip, mgcp, rtsp, radius, tacacs, ldap, cifs, sunrpc, telnet, tftp"}), 400
 
     host = (request.form.get("host") or "").strip()
     if not host:
         return jsonify({"error": "Target host is required"}), 400
 
-    default_port = {"http": 80, "ftp": 21, "smtp": 25, "ssh": 22, "smb2": 445, "smb3": 445, "http2": 80, "dcerpc": 135, "dhcp": 67, "dhcpv6": 547, "snmp": 161, "icmp": 0, "icmpv6": 0, "sip": 5060, "mgcp": 2427, "rtsp": 554, "radius": 1812, "tacacs": 49, "ldap": 389}[protocol]
+    default_port = {"http": 80, "ftp": 21, "smtp": 25, "ssh": 22, "smb2": 445, "smb3": 445, "http2": 80, "dcerpc": 135, "dhcp": 67, "dhcpv6": 547, "snmp": 161, "icmp": 0, "icmpv6": 0, "sip": 5060, "mgcp": 2427, "rtsp": 554, "radius": 1812, "tacacs": 49, "ldap": 389, "cifs": 445, "sunrpc": 111, "telnet": 23, "tftp": 69}[protocol]
     try:
         port = int(request.form.get("port") or default_port)
     except ValueError:
@@ -1499,6 +1636,18 @@ def api_filesend_stream():
                                           on_packet=on_packet)
                 elif protocol == "ldap":
                     res = send_file_ldap(host, port, fname, data,
+                                        on_packet=on_packet)
+                elif protocol == "cifs":
+                    res = send_file_cifs(host, port, fname, data,
+                                        on_packet=on_packet)
+                elif protocol == "sunrpc":
+                    res = send_file_sunrpc(host, port, fname, data,
+                                          on_packet=on_packet)
+                elif protocol == "telnet":
+                    res = send_file_telnet(host, port, fname, data,
+                                          on_packet=on_packet)
+                elif protocol == "tftp":
+                    res = send_file_tftp(host, port, fname, data,
                                         on_packet=on_packet)
                 else:
                     res = send_file_ftp(host, port, fname, data,
@@ -1799,7 +1948,7 @@ For each vulnerability, provide a concrete byte-level payload that would trigger
 
         # ── WEIGHER: DETERMINISTIC PYTHON ─────────────────────────
         print("[AI] ══ Computing weights (Python) ══")
-        dns_w, ftp_w, http_w, smtp_w, ssh_w, smb2_w, smb3_w, http2_w, dcerpc_w, dhcp_w, dhcpv6_w, snmp_w, icmp_w, icmpv6_w, sip_w, mgcp_w, rtsp_w, radius_w, tacacs_w, ldap_w, reasoning = compute_weights_from_vulns(raw_vulns)
+        dns_w, ftp_w, http_w, smtp_w, ssh_w, smb2_w, smb3_w, http2_w, dcerpc_w, dhcp_w, dhcpv6_w, snmp_w, icmp_w, icmpv6_w, sip_w, mgcp_w, rtsp_w, radius_w, tacacs_w, ldap_w, cifs_w, sunrpc_w, telnet_w, tftp_w, reasoning = compute_weights_from_vulns(raw_vulns)
         print(f"[AI] Weights computed deterministically.")
 
         # Assemble final results
@@ -1829,6 +1978,10 @@ For each vulnerability, provide a concrete byte-level payload that would trigger
                 "radius": radius_w,
                 "tacacs": tacacs_w,
                 "ldap": ldap_w,
+                "cifs": cifs_w,
+                "sunrpc": sunrpc_w,
+                "telnet": telnet_w,
+                "tftp": tftp_w,
                 "weight_reasoning": reasoning,
             },
             "model_used": model_used,
@@ -2132,6 +2285,10 @@ def ai_get_weights():
     radius_default = dict(zip(RADIUS_STRATEGY_NAMES, RADIUS_DEFAULT_WEIGHTS))
     tacacs_default = dict(zip(TACACS_STRATEGY_NAMES, TACACS_DEFAULT_WEIGHTS))
     ldap_default = dict(zip(LDAP_STRATEGY_NAMES, LDAP_DEFAULT_WEIGHTS))
+    cifs_default = dict(zip(CIFS_STRATEGY_NAMES, CIFS_DEFAULT_WEIGHTS))
+    sunrpc_default = dict(zip(SUNRPC_STRATEGY_NAMES, SUNRPC_DEFAULT_WEIGHTS))
+    telnet_default = dict(zip(TELNET_STRATEGY_NAMES, TELNET_DEFAULT_WEIGHTS))
+    tftp_default = dict(zip(TFTP_STRATEGY_NAMES, TFTP_DEFAULT_WEIGHTS))
     return jsonify({
         "source": ai_weights.get("source", "default"),
         "dns": ai_weights.get("dns", dns_default),
@@ -2154,6 +2311,10 @@ def ai_get_weights():
         "radius": ai_weights.get("radius", radius_default),
         "tacacs": ai_weights.get("tacacs", tacacs_default),
         "ldap": ai_weights.get("ldap", ldap_default),
+        "cifs": ai_weights.get("cifs", cifs_default),
+        "sunrpc": ai_weights.get("sunrpc", sunrpc_default),
+        "telnet": ai_weights.get("telnet", telnet_default),
+        "tftp": ai_weights.get("tftp", tftp_default),
         "reasoning": ai_weights.get("reasoning", ""),
         "dns_default": dns_default,
         "ftp_default": ftp_default,
@@ -2175,6 +2336,10 @@ def ai_get_weights():
         "radius_default": radius_default,
         "tacacs_default": tacacs_default,
         "ldap_default": ldap_default,
+        "cifs_default": cifs_default,
+        "sunrpc_default": sunrpc_default,
+        "telnet_default": telnet_default,
+        "tftp_default": tftp_default,
     })
 
 
@@ -2221,6 +2386,10 @@ def ai_apply_weights():
     radius_raw = rec.get("radius", {})
     tacacs_raw = rec.get("tacacs", {})
     ldap_raw = rec.get("ldap", {})
+    cifs_raw = rec.get("cifs", {})
+    sunrpc_raw = rec.get("sunrpc", {})
+    telnet_raw = rec.get("telnet", {})
+    tftp_raw = rec.get("tftp", {})
 
     # Normalize DNS weights
     dns_total = sum(dns_raw.get(s, 0) for s in DNS_STRATEGY_NAMES)
@@ -2322,6 +2491,26 @@ def ai_apply_weights():
     if ldap_total > 0:
         ai_weights["ldap"] = {s: round(ldap_raw.get(s, 0) / ldap_total * 100, 1) for s in LDAP_STRATEGY_NAMES}
 
+    # Normalize CIFS weights
+    cifs_total = sum(cifs_raw.get(s, 0) for s in CIFS_STRATEGY_NAMES)
+    if cifs_total > 0:
+        ai_weights["cifs"] = {s: round(cifs_raw.get(s, 0) / cifs_total * 100, 1) for s in CIFS_STRATEGY_NAMES}
+
+    # Normalize SUNRPC weights
+    sunrpc_total = sum(sunrpc_raw.get(s, 0) for s in SUNRPC_STRATEGY_NAMES)
+    if sunrpc_total > 0:
+        ai_weights["sunrpc"] = {s: round(sunrpc_raw.get(s, 0) / sunrpc_total * 100, 1) for s in SUNRPC_STRATEGY_NAMES}
+
+    # Normalize Telnet weights
+    telnet_total = sum(telnet_raw.get(s, 0) for s in TELNET_STRATEGY_NAMES)
+    if telnet_total > 0:
+        ai_weights["telnet"] = {s: round(telnet_raw.get(s, 0) / telnet_total * 100, 1) for s in TELNET_STRATEGY_NAMES}
+
+    # Normalize TFTP weights
+    tftp_total = sum(tftp_raw.get(s, 0) for s in TFTP_STRATEGY_NAMES)
+    if tftp_total > 0:
+        ai_weights["tftp"] = {s: round(tftp_raw.get(s, 0) / tftp_total * 100, 1) for s in TFTP_STRATEGY_NAMES}
+
     ai_weights["source"] = "ai"
     ai_weights["reasoning"] = rec.get("weight_reasoning", "")
 
@@ -2345,6 +2534,10 @@ def ai_apply_weights():
     radius_bandit.reset()
     tacacs_bandit.reset()
     ldap_bandit.reset()
+    cifs_bandit.reset()
+    sunrpc_bandit.reset()
+    telnet_bandit.reset()
+    tftp_bandit.reset()
 
     log_event("INFO", f"AI weights applied — source: {results.get('model_used', 'unknown')}, RL bandits reset")
     print(f"[AI] Weights applied: DNS={ai_weights['dns']}")
@@ -2366,8 +2559,10 @@ def ai_apply_weights():
     print(f"[AI] Weights applied: RADIUS={ai_weights.get('radius', {})}")
     print(f"[AI] Weights applied: TACACS+={ai_weights.get('tacacs', {})}")
     print(f"[AI] Weights applied: LDAP={ai_weights.get('ldap', {})}")
+    print(f"[AI] Weights applied: CIFS={ai_weights.get('cifs', {})}")
+    print(f"[AI] Weights applied: SUNRPC={ai_weights.get('sunrpc', {})}")
 
-    return jsonify({"status": "applied", "dns": ai_weights["dns"], "ftp": ai_weights["ftp"], "http": ai_weights["http"], "smtp": ai_weights["smtp"], "ssh": ai_weights["ssh"], "smb2": ai_weights["smb2"], "smb3": ai_weights["smb3"], "http2": ai_weights["http2"], "dcerpc": ai_weights["dcerpc"], "dhcp": ai_weights["dhcp"], "dhcpv6": ai_weights["dhcpv6"], "snmp": ai_weights["snmp"], "icmp": ai_weights.get("icmp", {}), "icmpv6": ai_weights.get("icmpv6", {}), "sip": ai_weights.get("sip", {}), "mgcp": ai_weights.get("mgcp", {}), "rtsp": ai_weights.get("rtsp", {}), "radius": ai_weights.get("radius", {}), "tacacs": ai_weights.get("tacacs", {}), "ldap": ai_weights.get("ldap", {})})
+    return jsonify({"status": "applied", "dns": ai_weights["dns"], "ftp": ai_weights["ftp"], "http": ai_weights["http"], "smtp": ai_weights["smtp"], "ssh": ai_weights["ssh"], "smb2": ai_weights["smb2"], "smb3": ai_weights["smb3"], "http2": ai_weights["http2"], "dcerpc": ai_weights["dcerpc"], "dhcp": ai_weights["dhcp"], "dhcpv6": ai_weights["dhcpv6"], "snmp": ai_weights["snmp"], "icmp": ai_weights.get("icmp", {}), "icmpv6": ai_weights.get("icmpv6", {}), "sip": ai_weights.get("sip", {}), "mgcp": ai_weights.get("mgcp", {}), "rtsp": ai_weights.get("rtsp", {}), "radius": ai_weights.get("radius", {}), "tacacs": ai_weights.get("tacacs", {}), "ldap": ai_weights.get("ldap", {}), "cifs": ai_weights.get("cifs", {}), "sunrpc": ai_weights.get("sunrpc", {})})
 
 
 @app.route("/api/ai/reset_weights", methods=["POST"])
@@ -2393,6 +2588,10 @@ def ai_reset_weights():
     ai_weights["radius"] = dict(zip(RADIUS_STRATEGY_NAMES, RADIUS_DEFAULT_WEIGHTS))
     ai_weights["tacacs"] = dict(zip(TACACS_STRATEGY_NAMES, TACACS_DEFAULT_WEIGHTS))
     ai_weights["ldap"] = dict(zip(LDAP_STRATEGY_NAMES, LDAP_DEFAULT_WEIGHTS))
+    ai_weights["cifs"] = dict(zip(CIFS_STRATEGY_NAMES, CIFS_DEFAULT_WEIGHTS))
+    ai_weights["sunrpc"] = dict(zip(SUNRPC_STRATEGY_NAMES, SUNRPC_DEFAULT_WEIGHTS))
+    ai_weights["telnet"] = dict(zip(TELNET_STRATEGY_NAMES, TELNET_DEFAULT_WEIGHTS))
+    ai_weights["tftp"] = dict(zip(TFTP_STRATEGY_NAMES, TFTP_DEFAULT_WEIGHTS))
     ai_weights["source"] = "default"
     ai_weights["reasoning"] = ""
 
@@ -2416,6 +2615,10 @@ def ai_reset_weights():
     radius_bandit.reset()
     tacacs_bandit.reset()
     ldap_bandit.reset()
+    cifs_bandit.reset()
+    sunrpc_bandit.reset()
+    telnet_bandit.reset()
+    tftp_bandit.reset()
 
     log_event("INFO", "Strategy weights reset to defaults, RL bandits reset")
     return jsonify({"status": "reset"})
@@ -2539,11 +2742,11 @@ def ai_analyze_v2():
 
         # Compute weights from merged vulns
         if raw_vulns:
-            dns_w, ftp_w, http_w, smtp_w, ssh_w, smb2_w, smb3_w, http2_w, dcerpc_w, dhcp_w, dhcpv6_w, snmp_w, icmp_w, icmpv6_w, sip_w, mgcp_w, rtsp_w, radius_w, tacacs_w, ldap_w, reasoning = compute_weights_from_vulns(raw_vulns)
+            dns_w, ftp_w, http_w, smtp_w, ssh_w, smb2_w, smb3_w, http2_w, dcerpc_w, dhcp_w, dhcpv6_w, snmp_w, icmp_w, icmpv6_w, sip_w, mgcp_w, rtsp_w, radius_w, tacacs_w, ldap_w, cifs_w, sunrpc_w, telnet_w, tftp_w, reasoning = compute_weights_from_vulns(raw_vulns)
             recommended_weights = {
                 "dns": dns_w, "ftp": ftp_w, "http": http_w, "smtp": smtp_w, "ssh": ssh_w,
                 "smb2": smb2_w, "smb3": smb3_w, "http2": http2_w, "dcerpc": dcerpc_w,
-                "dhcp": dhcp_w, "dhcpv6": dhcpv6_w, "snmp": snmp_w, "icmp": icmp_w, "icmpv6": icmpv6_w, "sip": sip_w, "mgcp": mgcp_w, "rtsp": rtsp_w, "radius": radius_w, "tacacs": tacacs_w, "ldap": ldap_w, "weight_reasoning": reasoning,
+                "dhcp": dhcp_w, "dhcpv6": dhcpv6_w, "snmp": snmp_w, "icmp": icmp_w, "icmpv6": icmpv6_w, "sip": sip_w, "mgcp": mgcp_w, "rtsp": rtsp_w, "radius": radius_w, "tacacs": tacacs_w, "ldap": ldap_w, "cifs": cifs_w, "sunrpc": sunrpc_w, "telnet": telnet_w, "tftp": tftp_w, "weight_reasoning": reasoning,
             }
         else:
             recommended_weights = None
