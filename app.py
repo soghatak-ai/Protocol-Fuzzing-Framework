@@ -653,6 +653,8 @@ RADIUS STRATEGIES (used when fuzzing RADIUS — binary, UDP 1812 auth / 1813 acc
 - coa_disconnect_abuse: CoA / Disconnect abuse (RFC 5176, port 3799) — CoA-Request with unknown attributes, Disconnect-Request with conflicting session identifiers, CoA with oversized Event-Timestamp, Disconnect-NAK spoofing, rapid CoA flood (100+), CoA with empty Authenticator, Disconnect with all error-cause codes (401-603). Targets dynamic authorization. Triggers: state-corruption, dos, auth-bypass
 - accounting_desync: Accounting protocol desynchronization (port 1813) — Acct-Status-Type cycling (Start/Stop/Interim-Update/On/Off), Acct-Session-Id reuse across different NAS-IP, Acct-Delay-Time = 0xFFFFFFFF (huge backlog), duplicate Accounting-Request with different Acct-Status, missing mandatory attributes, Acct-Input/Output-Gigawords overflow, rapid accounting flood. Targets accounting state machine. Triggers: state-corruption, integer-overflow, dos
 - nas_filter_rule_crash: NAS-Filter-Rule (attr 92) pre-auth crash — 253-byte oversized filter rule (FreeRADIUS 2026 vulnerability), 100+ NAS-Filter-Rule attributes, NAS-Filter-Rule with embedded NUL bytes, filter rule with format string characters (%n%s), empty filter rule, filter rule in Access-Request (pre-auth, no authentication needed). Targets filter rule parsing. Triggers: buffer-overflow, crash, format-string
+- ip_frag_cache_exhaustion: IP fragment cache exhaustion (stream_ip.max_frags=8192) — incomplete fragment chains (first-fragment only, held 60s), overlapping fragments at same offsets (max_overlaps=0 unlimited), 8-byte tiny fragments (below MTU), teardrop-variant overlapping offsets, many unique IP ID values each incomplete. Targets Snort stream_ip defragmentation cache. Triggers: dos, evasion, resource-exhaustion
+- udp_session_spray: UDP session spray for flow cache exhaustion (stream.max_flows=476288) — multi-port spray across 1812/1813/3799, unique Identifier spray with varying NAS-IP-Address, max-attribute packets maximizing per-flow memory cost, Accounting-Request flood with unique session IDs on port 1813. Targets Snort flow cache via cheap UDP session creation. Triggers: dos, evasion, resource-exhaustion
 
 TACACS+ STRATEGIES (used when fuzzing TACACS+ — binary, TCP 49; RFC 8907; 12-byte cleartext header + MD5 XOR pad obfuscated body; Snort 3 has NO dedicated TACACS+ inspector, detection via generic byte_test/content rules):
 - header_manipulation: TACACS+ 12-byte header abuse — invalid major/minor version nibbles (0x00, 0xFF, 0xD0), undefined packet types (0x00, 0x04-0xFF), seq_no=0 (invalid), seq_no=even (server-only), flags field manipulation (TAC_PLUS_UNENCRYPTED_FLAG toggling, undefined flag bits 0xFE), session_id=0/0xFFFFFFFF, body_length=0xFFFFFFFF vs actual body. Targets header parser and version/type dispatch. Triggers: oob-read, integer-overflow, state-corruption
@@ -669,6 +671,11 @@ TACACS+ STRATEGIES (used when fuzzing TACACS+ — binary, TCP 49; RFC 8907; 12-b
 - follow_status_abuse: FOLLOW status response exploitation — crafted REPLY with status=TAC_PLUS_AUTHEN_STATUS_FOLLOW (0x04) containing malicious server_msg with redirect data, FOLLOW with oversized data field, FOLLOW chain loop (redirect to self), FOLLOW with invalid server address format, multiple FOLLOW in sequence (chain depth). Targets FOLLOW redirect handling. Triggers: ssrf, infinite-loop, oob-read
 - oversized_field_bomb: Oversized field and packet bombs — single packet at TCP segment max (~64KB body), 100+ small packets in rapid succession, body filled with repeated 0xFF pattern (worst-case obfuscation), authentication START with all variable fields at max (user=255, port=255, rem_addr=255, data=255), total packet exceeding 65535 bytes via multiple TCP segments. Targets memory allocation and processing limits. Triggers: dos, heap-overflow, resource-exhaustion
 - tcp_segmentation_evasion: TCP segmentation for IDS evasion — split 12-byte header across two TCP segments (6+6), split at header/body boundary (12 + body), single-byte TCP segments for entire packet, out-of-order TCP segments, overlapping TCP segments with conflicting header bytes, PSH flag manipulation, TCP urgent pointer overlapping TACACS+ header. Targets TCP reassembly and TACACS+ parser interaction. Triggers: evasion, oob-read, state-corruption
+- flow_cache_exhaustion: Snort flow cache exhaustion (stream.max_flows=476288) — 200 TACACS+ packets with unique session-ids (established flood), 500 minimal 13-byte packets (minimal data flood), 100 session-ids cycled through seq 1/3/5 (interleaved sessions). Targets Snort stream flow cache pruning. Triggers: dos, evasion, resource-exhaustion
+- tcp_overlap_desync: TCP overlapping segment desync (Ptacek-Newsham 1998) — decoy in first segment / real in overlapping second (BSD first-wins vs Linux last-wins), partial 50% overlap, retransmit with different payload (insertion attack), triple overlap at same offset. Exploits stream_tcp.overlap_limit=0 (unlimited) and policy=bsd. Triggers: evasion, state-corruption, detection-bypass
+- segment_queue_exhaustion: TCP segment queue exhaustion (stream_tcp queue_limit) — 3100 single-byte segments exceeding max_segments=3072, 4MB fill with TACACS+ noise exceeding max_bytes, alternating 1-byte and normal-sized segments. Exploits small_segments detection being DISABLED by default. Triggers: dos, evasion, resource-exhaustion
+- reassembly_policy_confusion: Reassembly policy mismatch exploitation (BSD vs Linux/Windows) — payload in overlapping second segment for Linux last-wins targets, Windows-specific trim boundary exploit, TTL-based evasion (short TTL decoy reaches Snort but not target), multi-region mixed-policy interleave. Exploits stream_tcp.policy=bsd default mismatch with target OS. Triggers: evasion, detection-bypass
+- embryonic_connection_flood: Embryonic (half-open) connection flood — SYN+data with TACACS+ payload (triggers 129:2), RST race after minimal data, FIN before established with partial headers, SYN with extreme TCP options (window scale=14). Exploits embryonic_timeout=30s to hold state. Triggers: dos, resource-exhaustion, state-corruption
 
 LDAP STRATEGIES (used when fuzzing LDAP — binary ASN.1 BER, TCP 389; RFC 4511; Snort 3 has NO dedicated LDAP inspector, detection via generic content rules on port 389/636):
 - ber_length_overflow: BER length-field overflow (CVE-2015-6908 pattern) — 4GB outer SEQUENCE length (0x84 0xFF 0xFF 0xFF 0xFF), 5-octet illegal length form (0x85), declared length >> actual body, messageID with huge length, DN octet string with 2GB length, bind body length lie, address-wrapping length offset, exact CVE-2015-6908 PoC bytes. Targets ber_get_next and length-parsing arithmetic. Triggers: heap-overflow, oob-read, assert-crash, integer-overflow
@@ -1175,6 +1182,7 @@ def api_state():
         "trigger_detail": fuzzer_state.get("trigger_detail"),
         "bandit_stats": _bandit_for_proto(protocol).get_stats(
             base_weights=ai_weights.get(protocol, {})),
+        "payload_mode": fuzzer_state.get("payload_mode", "default"),
     }
     return jsonify(data)
 
@@ -1255,8 +1263,16 @@ def api_start():
     mode = body.get("mode", "pipe").lower()
     live_config = body.get("live_config", {})
 
+    payload_mode = body.get("payload_mode", "default").lower()
+    custom_payload = body.get("custom_payload", "")
+
     fuzzer_state["protocol"] = protocol
     fuzzer_state["mode"] = mode
+    fuzzer_state["payload_mode"] = payload_mode
+    if payload_mode == "custom" and custom_payload:
+        fuzzer_state["payload_override"] = custom_payload.encode("utf-8", errors="replace") if isinstance(custom_payload, str) else custom_payload
+    else:
+        fuzzer_state["payload_override"] = None
     if live_config:
         fuzzer_state["live_config"] = live_config
     reset_state()

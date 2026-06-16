@@ -101,8 +101,9 @@ def _data_envelope(headers: bytes, body: bytes, terminate: bool = True) -> bytes
     return msg
 
 
-def build_smtp_payload(strategy: str) -> bytes:
+def build_smtp_payload(strategy: str, payload_override=None) -> bytes:
     """Build one SMTP payload (client->server bytes) for the given strategy."""
+    m = payload_override if payload_override is not None else _MARKER
 
     if strategy == "cmd_overflow":
         # Oversized command lines / arguments. RFC 5321 §4.5.3.1: command line
@@ -160,7 +161,7 @@ def build_smtp_payload(strategy: str) -> bytes:
             headers = b"".join(b"X-H%d: %d\r\n" % (i, i) for i in range(6000))
             # Send DATA without the header/body separator, unterminated.
             return _EHLO + _MAIL + _RCPT + b"DATA\r\n" + headers
-        return _data_envelope(headers, _MARKER + b"\r\n")
+        return _data_envelope(headers, m + b"\r\n")
 
     elif strategy == "mime_decode_bomb":
         # Stress Snort's MIME decoders: base64 / quoted-printable / uuencode and
@@ -229,7 +230,7 @@ def build_smtp_payload(strategy: str) -> bytes:
         sep = b"--" + boundary + b"\r\n"
         part = (sep + b'Content-Type: application/octet-stream\r\n'
                 b"Content-Transfer-Encoding: base64\r\n\r\n" +
-                _b64(_MARKER * 4) + b"\r\n")
+                _b64(m * 4) + b"\r\n")
         if variant == "missing_close":
             body = part * 60                      # never sends the closing --boundary--
         elif variant == "nested":
@@ -257,7 +258,7 @@ def build_smtp_payload(strategy: str) -> bytes:
             "dot_no_crlf", "lf_dot_lf", "split_terminator",
         ])
         headers = b"From: a@b.com\r\nSubject: desync\r\n"
-        prefix = _EHLO + _MAIL + _RCPT + b"DATA\r\n" + headers + b"\r\n" + _MARKER
+        prefix = _EHLO + _MAIL + _RCPT + b"DATA\r\n" + headers + b"\r\n" + m
         if variant == "bare_lf_dot":
             # LF-only end-of-data: "\n.\n" instead of "\r\n.\r\n".
             return prefix + b"\n.\n" + b"RSET\r\n"
@@ -286,7 +287,7 @@ def build_smtp_payload(strategy: str) -> bytes:
             "cmd_after_quit", "rset_storm", "data_no_rcpt",
         ])
         if variant == "data_before_mail":
-            return _EHLO + b"DATA\r\n" + _MARKER + b"\r\n.\r\n"
+            return _EHLO + b"DATA\r\n" + m + b"\r\n.\r\n"
         elif variant == "rcpt_before_mail":
             return _EHLO + (_RCPT * 50)
         elif variant == "double_mail":
@@ -300,7 +301,7 @@ def build_smtp_payload(strategy: str) -> bytes:
         elif variant == "rset_storm":
             return _EHLO + (b"MAIL FROM:<a@b.com>\r\nRSET\r\n" * 3000)
         else:  # data_no_rcpt — MAIL then DATA with no RCPT
-            return _EHLO + _MAIL + b"DATA\r\n" + _MARKER + b"\r\n.\r\n"
+            return _EHLO + _MAIL + b"DATA\r\n" + m + b"\r\n.\r\n"
 
     elif strategy == "pipeline_flood":
         # Pipeline many full transactions / commands in one TCP segment. Stresses
@@ -308,7 +309,7 @@ def build_smtp_payload(strategy: str) -> bytes:
         variant = random.choice(["full_txns", "noop_flood", "mixed_cmds"])
         if variant == "full_txns":
             txn = (_MAIL + _RCPT + b"DATA\r\n" + b"Subject: x\r\n\r\n" +
-                   _MARKER + b"\r\n.\r\n")
+                   m + b"\r\n.\r\n")
             return _EHLO + txn * 800
         elif variant == "noop_flood":
             return _EHLO + b"NOOP\r\n" * 8000
@@ -378,7 +379,7 @@ def build_smtp_payload(strategy: str) -> bytes:
             # Many BDAT LAST in a row — each should end the message.
             return head + (b"BDAT 5 LAST\r\nHELLO" * 2000)
         else:  # bdat_after_data — mix DATA and BDAT modes
-            return (head + b"DATA\r\n" + _MARKER + b"\r\n.\r\n" +
+            return (head + b"DATA\r\n" + m + b"\r\n.\r\n" +
                     b"BDAT 10\r\n" + b"X" * 10 + b"BDAT 0 LAST\r\n")
 
     elif strategy == "auth_overflow":
@@ -414,13 +415,13 @@ def build_smtp_payload(strategy: str) -> bytes:
         # FTP "AUTH TLS then cleartext" trick already in protocol/ftp.py).
         variant = random.choice(["plain_after_tls", "tls_then_data", "repeated_tls"])
         hidden = (_MAIL + _RCPT + b"DATA\r\n" +
-                  b"Subject: hidden\r\n\r\n" + _MARKER + b"\r\n.\r\n")
+                  b"Subject: hidden\r\n\r\n" + m + b"\r\n.\r\n")
         if variant == "plain_after_tls":
             return _EHLO + b"STARTTLS\r\n" + hidden
         elif variant == "tls_then_data":
             # STARTTLS mid-transaction, then keep streaming cleartext DATA.
             return (_EHLO + _MAIL + _RCPT + b"STARTTLS\r\n" +
-                    b"DATA\r\n" + _MARKER + b"\r\n.\r\n")
+                    b"DATA\r\n" + m + b"\r\n.\r\n")
         else:  # repeated_tls — many STARTTLS toggles
             return _EHLO + (b"STARTTLS\r\n" + _MAIL) * 1000
 
@@ -440,7 +441,7 @@ def build_smtp_payload(strategy: str) -> bytes:
         elif variant == "bare_cr":
             return _EHLO + b"MAIL FROM:<a@b.com>\rRCPT TO:<c@d.com>\r\n"
         elif variant == "bare_lf":
-            return b"EHLO x\nMAIL FROM:<a@b.com>\nRCPT TO:<c@d.com>\nDATA\n" + _MARKER + b"\n.\n"
+            return b"EHLO x\nMAIL FROM:<a@b.com>\nRCPT TO:<c@d.com>\nDATA\n" + m + b"\n.\n"
         elif variant == "telnet_iac":
             # Telnet IAC sequences embedded in the command stream.
             iac = [b"\xff\xf4", b"\xff\xf2", b"\xff\xfb\x03", b"\xff\xfd\x18", b"\xff\xff"]
@@ -519,7 +520,7 @@ def build_smtp_payload(strategy: str) -> bytes:
 
     else:
         # Fallback: a benign, valid transaction.
-        return _data_envelope(b"From: a@b.com\r\nSubject: hello\r\n", _MARKER + b"\r\n")
+        return _data_envelope(b"From: a@b.com\r\nSubject: hello\r\n", m + b"\r\n")
 
 
 class SmtpMutator:
@@ -534,11 +535,11 @@ class SmtpMutator:
             return [self._external_weights.get(s, 5) for s in self.strategies]
         return SMTP_WEIGHTS
 
-    def mutate(self) -> tuple:
+    def mutate(self, payload_override=None) -> tuple:
         """Returns (payload_bytes, strategy_name)."""
         if self._bandit:
             strategy = self._bandit.select_with_weights(self._external_weights or {})
         else:
             strategy = random.choices(self.strategies, weights=self.weights, k=1)[0]
-        payload = build_smtp_payload(strategy)
+        payload = build_smtp_payload(strategy, payload_override=payload_override)
         return payload, strategy

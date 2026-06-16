@@ -174,7 +174,7 @@ ICMP_STRATEGY_LABELS = {
 
 # ── per-strategy payload builders ────────────────────────────────────
 
-def _build_fragment_reassembly_evasion():
+def _build_fragment_reassembly_evasion(payload_override=None):
     """IP fragmentation of ICMP to evade/crash defrag engine (GID 123).
 
     Variants target overlapping fragments (BSD-vs-Windows reassembly policy
@@ -187,6 +187,13 @@ def _build_fragment_reassembly_evasion():
     proto = 1  # ICMP
     echo_id = random.randint(0, 0xFFFF)
     echo_seq = random.randint(0, 0xFFFF)
+    if payload_override is not None:
+        icmp_pkt = _echo(8, 0, echo_id, echo_seq, payload_override)
+        mid = (len(icmp_pkt) // 2 + 7) & ~7
+        frag0 = icmp_pkt[:mid]
+        frag1 = icmp_pkt[mid:]
+        return [(frag0, 0, True, ip_id, proto),
+                (frag1, mid, False, ip_id, proto)], "fragments"
     # Build a complete ICMP echo request with a recognisable payload
     trigger = b"FUZZ" + os.urandom(120)
     icmp_pkt = _echo(8, 0, echo_id, echo_seq, trigger)
@@ -464,13 +471,15 @@ def _build_redirect_route_injection():
     return _build_icmp(5, code, rest, inner), "icmp"
 
 
-def _build_tunnel_payload_evasion():
+def _build_tunnel_payload_evasion(payload_override=None):
     """Data hiding in ICMP Echo payloads (ptunnel-style).
 
     Embeds HTTP requests, DNS queries, shell commands, cross-protocol
     trigger strings, and nested ICMP packets inside Echo Request payloads
     to test deep-inspection depth and cross-protocol rule confusion.
     """
+    if payload_override is not None:
+        return _echo(8, 0, payload=payload_override), "icmp"
     variant = random.choice([
         "http_tunnel", "dns_tunnel", "shell_tunnel",
         "cross_proto_trigger", "depth_probe", "nested_icmp",
@@ -973,7 +982,9 @@ _BUILDERS = {
 }
 
 
-def build_icmp_payload(strategy):
+_ICMP_OVERRIDE_CAPABLE = frozenset(["fragment_reassembly_evasion", "tunnel_payload_evasion"])
+
+def build_icmp_payload(strategy, payload_override=None):
     """Build an ICMPv4 fuzz payload for the given strategy.
 
     Returns (data, packet_type) where packet_type is one of:
@@ -985,6 +996,8 @@ def build_icmp_payload(strategy):
     if builder is None:
         # Fallback: simple echo request
         return _echo(8, 0, payload=os.urandom(56)), "icmp"
+    if payload_override is not None and strategy in _ICMP_OVERRIDE_CAPABLE:
+        return builder(payload_override=payload_override)
     return builder()
 
 
@@ -1004,7 +1017,7 @@ class IcmpMutator:
             return [self._external_weights.get(s, 5) for s in self.strategies]
         return ICMP_WEIGHTS
 
-    def mutate(self):
+    def mutate(self, payload_override=None):
         """Returns (data, strategy_name, packet_type).
 
         packet_type: "icmp" | "fragments" | "raw_ip"
@@ -1013,5 +1026,5 @@ class IcmpMutator:
             strategy = self._bandit.select_with_weights(self._external_weights or {})
         else:
             strategy = random.choices(self.strategies, weights=self.weights, k=1)[0]
-        data, pkt_type = build_icmp_payload(strategy)
+        data, pkt_type = build_icmp_payload(strategy, payload_override=payload_override)
         return data, strategy, pkt_type

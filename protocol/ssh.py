@@ -208,7 +208,7 @@ def _ssh1_packet(msg_type: int, data: bytes, force_len: int = None) -> bytes:
     return _u32(length) + padding + body
 
 
-def build_ssh_payload(strategy: str) -> bytes:
+def build_ssh_payload(strategy: str, payload_override=None) -> bytes:
     """Build one SSH payload (client->server bytes) for the given strategy."""
 
     if strategy == "version_overflow":
@@ -515,14 +515,20 @@ def build_ssh_payload(strategy: str) -> bytes:
         # max_encrypted_packets (default 25): the inspector STOPS deep inspection
         # after this many encrypted packets. Complete a (fake) KEX, push past the
         # threshold, then send an attack that should now be missed — evasion.
-        variant = random.choice([
-            "fake_kex_then_attack", "rapid_newkeys", "post_enc_overflow",
-            "many_small_encrypted",
-        ])
         prelude = (_VERSION + _ssh_packet(_kexinit()) +
                    _ssh_packet(bytes([_MSG_KEXDH_INIT]) +
                                _mpint(random.getrandbits(1024))) +
                    _ssh_packet(bytes([_MSG_NEWKEYS])))
+        if payload_override is not None:
+            out = [prelude]
+            for _ in range(40):
+                out.append(_ssh_packet(bytes(random.choices(range(256), k=64))))
+            out.append(_ssh_packet(payload_override))
+            return b"".join(out)
+        variant = random.choice([
+            "fake_kex_then_attack", "rapid_newkeys", "post_enc_overflow",
+            "many_small_encrypted",
+        ])
         if variant == "fake_kex_then_attack":
             # 40 "encrypted" packets (> max_encrypted_packets) then an overflow.
             out = [prelude]
@@ -670,11 +676,11 @@ class SshMutator:
             return [self._external_weights.get(s, 5) for s in self.strategies]
         return SSH_WEIGHTS
 
-    def mutate(self) -> tuple:
+    def mutate(self, payload_override=None) -> tuple:
         """Returns (payload_bytes, strategy_name)."""
         if self._bandit:
             strategy = self._bandit.select_with_weights(self._external_weights or {})
         else:
             strategy = random.choices(self.strategies, weights=self.weights, k=1)[0]
-        payload = build_ssh_payload(strategy)
+        payload = build_ssh_payload(strategy, payload_override=payload_override)
         return payload, strategy

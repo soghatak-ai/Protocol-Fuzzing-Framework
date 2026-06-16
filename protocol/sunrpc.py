@@ -432,7 +432,7 @@ def _build_xdr_array_overflow():
         return call, 111
 
 
-def _build_record_marking_abuse():
+def _build_record_marking_abuse(payload_override=None):
     """Strategy 3: TCP Record Marking abuse (Snort 106:1-5 grounded).
 
     Targets xdr_rec.c RECSTREAM handling.
@@ -445,6 +445,14 @@ def _build_record_marking_abuse():
     - split_rm_header: RM header split across fragments
     - fragment_reassembly_bomb: hundreds of tiny fragments
     """
+    if payload_override is not None:
+        xid = _rand_xid()
+        base_call = _rpc_call(xid, _PROG_PORTMAPPER, 2, _PMAP_NULL,
+                              cred=_auth_none())
+        mid = len(payload_override) // 2
+        frag1 = _rm_frame(base_call + payload_override[:mid], last=False)
+        frag2 = _rm_frame(payload_override[mid:], last=True)
+        return frag1 + frag2, 111
     variant = random.choice([
         "zero_length_fragment", "oversized_fragment", "never_ending_fragments",
         "multiple_records", "incomplete_segment", "split_rm_header",
@@ -983,7 +991,7 @@ def _build_xdr_padding_violation():
         return call + garbage, 111
 
 
-def _build_tcp_segmentation_evasion():
+def _build_tcp_segmentation_evasion(payload_override=None):
     """Strategy 11: TCP segmentation evasion.
 
     Targets IDS rule matching by splitting content at critical offsets.
@@ -995,6 +1003,11 @@ def _build_tcp_segmentation_evasion():
     - interleaved_records: mix of tiny and normal records
     - slow_byte_drip: 1 byte at a time
     """
+    if payload_override is not None:
+        xid = _rand_xid()
+        call = _rpc_call(xid, _PROG_PORTMAPPER, 2, _PMAP_NULL,
+                         cred=_auth_none()) + payload_override
+        return _rm_frame(call), 111
     variant = random.choice([
         "split_rm_header", "split_rpc_header", "split_at_auth",
         "split_at_args", "interleaved_records", "slow_byte_drip",
@@ -1279,12 +1292,17 @@ _BUILDERS = {
 }
 
 
-def build_sunrpc_payload(strategy: str):
+_SUNRPC_OVERRIDE_CAPABLE = frozenset(["record_marking_abuse", "tcp_segmentation_evasion"])
+
+def build_sunrpc_payload(strategy: str, payload_override=None):
     """Return (payload_bytes, dst_port) for the given strategy."""
     builder = _BUILDERS.get(strategy)
     if builder is None:
         builder = _build_xdr_string_overflow
-    payload, dst_port = builder()
+    if payload_override is not None and strategy in _SUNRPC_OVERRIDE_CAPABLE:
+        payload, dst_port = builder(payload_override=payload_override)
+    else:
+        payload, dst_port = builder()
     return _clamp(payload), dst_port
 
 
@@ -1301,11 +1319,11 @@ class SunrpcMutator:
             return [self._external_weights.get(s, 5) for s in self.strategies]
         return SUNRPC_WEIGHTS
 
-    def mutate(self):
+    def mutate(self, payload_override=None):
         """Returns (payload_bytes, strategy_name, dst_port)."""
         if self._bandit:
             strategy = self._bandit.select_with_weights(self._external_weights or {})
         else:
             strategy = random.choices(self.strategies, weights=self.weights, k=1)[0]
-        payload, dst_port = build_sunrpc_payload(strategy)
+        payload, dst_port = build_sunrpc_payload(strategy, payload_override=payload_override)
         return payload, strategy, dst_port

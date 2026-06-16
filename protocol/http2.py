@@ -246,7 +246,7 @@ def _valid_preface() -> bytes:
 
 # ===== strategy implementations ==============================================
 
-def build_http2_payload(strategy: str) -> bytes:
+def build_http2_payload(strategy: str, payload_override=None) -> bytes:
     """Build one HTTP/2 payload (client->server bytes) for the given strategy."""
 
     # ── hpack_state_desync ──────────────────────────────────────────────
@@ -472,6 +472,17 @@ def build_http2_payload(strategy: str) -> bytes:
     #   to the correct request context. Also tests rapid stream creation,
     #   out-of-order IDs, and stream ID exhaustion.
     elif strategy == "stream_interleave_evasion":
+        if payload_override is not None:
+            frames = _valid_preface()
+            stream_ids = list(range(1, 11, 2))  # 1,3,5,7,9
+            for sid in stream_ids:
+                frames += _minimal_request_headers(sid, end_stream=False)
+            chunks = [payload_override[i:i+1] for i in range(len(payload_override))]
+            for i, byte in enumerate(chunks):
+                sid = stream_ids[i % len(stream_ids)]
+                fl = _FL_END_STREAM if i == len(chunks) - 1 else 0
+                frames += _frame(_FT_DATA, fl, sid, byte)
+            return frames
         variant = random.choice([
             "round_robin", "high_stream_ids", "rapid_open_close",
             "data_before_headers", "reuse_closed",
@@ -1159,11 +1170,11 @@ class Http2Mutator:
             return [self._external_weights.get(s, 5) for s in self.strategies]
         return HTTP2_WEIGHTS
 
-    def mutate(self) -> tuple:
+    def mutate(self, payload_override=None) -> tuple:
         """Returns (payload_bytes, strategy_name)."""
         if self._bandit:
             strategy = self._bandit.select_with_weights(self._external_weights or {})
         else:
             strategy = random.choices(self.strategies, weights=self.weights, k=1)[0]
-        payload = build_http2_payload(strategy)
+        payload = build_http2_payload(strategy, payload_override=payload_override)
         return payload, strategy

@@ -721,7 +721,15 @@ def _build_line_folding_obfuscation():
 # ── Strategy 8: Content-Length Smuggling ──────────────────────────────────
 # CL != body length to make IDS see different content than UA.
 
-def _build_content_length_smuggling():
+def _build_content_length_smuggling(payload_override=None):
+    if payload_override is not None:
+        ip = _rand_ip()
+        uri = _rand_uri().encode()
+        body = b"AAAA" + payload_override
+        return _basic_headers(body=body, extra_headers=[
+            b"Content-Length: 4",
+            b"Content-Type: application/sdp",
+        ]), _SIP_PORT
     v = random.choice(["cl_shorter", "cl_longer", "cl_zero_with_body",
                         "cl_body_hidden_invite", "cl_absent_udp",
                         "double_message", "null_body_desync", "sdp_past_cl"])
@@ -1276,10 +1284,14 @@ _STRATEGY_MAP = {
 }
 
 
-def build_sip_payload(strategy):
+_SIP_OVERRIDE_CAPABLE = frozenset(["content_length_smuggling"])
+
+def build_sip_payload(strategy, payload_override=None):
     """Build one SIP payload. Returns (payload_bytes, dst_port)."""
     fn = _STRATEGY_MAP.get(strategy)
     if fn:
+        if payload_override is not None and strategy in _SIP_OVERRIDE_CAPABLE:
+            return fn(payload_override=payload_override)
         return fn()
     # Fallback: simple INVITE
     return _basic_headers(method=b"INVITE", body=_minimal_sdp()), _SIP_PORT
@@ -1299,11 +1311,11 @@ class SipMutator:
             return [self._external_weights.get(s, 5) for s in self.strategies]
         return SIP_WEIGHTS
 
-    def mutate(self):
+    def mutate(self, payload_override=None):
         """Returns (payload_bytes, strategy_name, dst_port)."""
         if self._bandit:
             strategy = self._bandit.select_with_weights(self._external_weights or {})
         else:
             strategy = random.choices(self.strategies, weights=self.weights, k=1)[0]
-        payload, dst_port = build_sip_payload(strategy)
+        payload, dst_port = build_sip_payload(strategy, payload_override=payload_override)
         return payload, strategy, dst_port

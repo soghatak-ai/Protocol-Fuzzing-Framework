@@ -186,11 +186,15 @@ def _relay_packet(msg_type=_RELAY_FORW, hop_count=0, link_addr=None,
     return hdr + relay_opt + extra_opts
 
 
-def build_dhcpv6_payload(strategy):
+_DHCPV6_OVERRIDE_CAPABLE = frozenset(["option_nested_overflow"])
+
+def build_dhcpv6_payload(strategy, payload_override=None):
     """Build one DHCPv6 payload. Returns (payload_bytes, dst_port).
     dst_port is 547 (client->server) or 546 (server->client)."""
     fn = _STRATEGY_MAP.get(strategy)
     if fn:
+        if payload_override is not None and strategy in _DHCPV6_OVERRIDE_CAPABLE:
+            return fn(payload_override=payload_override)
         return fn()
     opts = _client_id() + _elapsed_time(0) + _ia_na()
     return _dhcpv6_packet(_SOLICIT, options=opts), 547
@@ -350,7 +354,10 @@ def _build_starvation_solicit_flood():
 
 # ── Strategy 4: Option Nested Overflow ────────────────────────────────────
 
-def _build_option_nested_overflow():
+def _build_option_nested_overflow(payload_override=None):
+    if payload_override is not None:
+        evil = _opt(43, payload_override[:0xFF00])
+        return _dhcpv6_packet(_SOLICIT, options=_client_id() + _elapsed_time(0) + evil), 547
     v = random.choice(["len_exceeds", "zero_container", "deep_nest", "max_len",
                         "many_tiny", "dup_singleton", "unknown_codes", "container_ovf"])
     if v == "len_exceeds":
@@ -789,11 +796,11 @@ class Dhcpv6Mutator:
             return [self._external_weights.get(s, 5) for s in self.strategies]
         return DHCPV6_WEIGHTS
 
-    def mutate(self):
+    def mutate(self, payload_override=None):
         """Returns (payload_bytes, strategy_name, dst_port)."""
         if self._bandit:
             strategy = self._bandit.select_with_weights(self._external_weights or {})
         else:
             strategy = random.choices(self.strategies, weights=self.weights, k=1)[0]
-        payload, dst_port = build_dhcpv6_payload(strategy)
+        payload, dst_port = build_dhcpv6_payload(strategy, payload_override=payload_override)
         return payload, strategy, dst_port

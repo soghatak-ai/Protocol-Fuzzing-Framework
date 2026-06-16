@@ -1219,6 +1219,20 @@
             </div>
             <div class="config-body">
 
+                <!-- PAYLOAD MODE TOGGLE -->
+                <div style="margin-bottom:12px;">
+                    <label class="config-label" style="margin-bottom:6px;display:block;">Payload Mode</label>
+                    <div class="mode-toggle" style="display:inline-flex;margin-bottom:8px;">
+                        <button class="mode-btn active" id="btn-payload-default" onclick="setPayloadMode('default')">Default (Random)</button>
+                        <button class="mode-btn" id="btn-payload-custom" onclick="setPayloadMode('custom')">Custom Payload</button>
+                    </div>
+                    <div id="custom-payload-fields" style="display:none;margin-top:8px;">
+                        <label class="config-label" for="cfg-custom-payload">Custom Payload String (e.g. EICAR)</label>
+                        <textarea class="config-input" id="cfg-custom-payload" rows="3" style="width:100%;font-family:'JetBrains Mono',monospace;font-size:12px;resize:vertical;" placeholder="X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"></textarea>
+                        <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">This string will be injected into evasion strategies that support payload override.</div>
+                    </div>
+                </div>
+
                 <!-- PIPE MODE NOTE -->
                 <div class="pipe-note" id="pipe-note">
                     <div class="pipe-note-dot"></div>
@@ -1700,6 +1714,7 @@
         let evtSource = null;
         let pendingDeleteFile = null;
         let currentMode = 'pipe';
+        let currentPayloadMode = 'default';
         let aiLastResults = null;
 
         let stratLabels = {
@@ -1922,11 +1937,28 @@
             evtSource.onerror = function() { setTimeout(connectSSE, 3000); };
         }
 
+        function setPayloadMode(mode) {
+            currentPayloadMode = mode;
+            document.getElementById('btn-payload-default').classList.toggle('active', mode === 'default');
+            document.getElementById('btn-payload-custom').classList.toggle('active', mode === 'custom');
+            document.getElementById('custom-payload-fields').style.display = mode === 'custom' ? '' : 'none';
+        }
+
         async function startFuzzer() {
             document.getElementById('btn-start').disabled = true;
             document.getElementById('proto-select').disabled = true;
             const protocol = document.getElementById('proto-select').value;
-            const body = { protocol, mode: currentMode };
+            const body = { protocol, mode: currentMode, payload_mode: currentPayloadMode };
+            if (currentPayloadMode === 'custom') {
+                const cp = document.getElementById('cfg-custom-payload').value.trim();
+                if (!cp) {
+                    alert('Please enter a custom payload string.');
+                    document.getElementById('btn-start').disabled = false;
+                    document.getElementById('proto-select').disabled = false;
+                    return;
+                }
+                body.custom_payload = cp;
+            }
 
             if (currentMode === 'live') {
                 const serverIp = document.getElementById('cfg-server-ip').value.trim();

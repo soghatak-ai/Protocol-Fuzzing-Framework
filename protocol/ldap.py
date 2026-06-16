@@ -391,9 +391,16 @@ def _build_ber_nonminimal_encoding():
 
 
 # ── Strategy 3: Indefinite form + constructed primitives (RFC 4511 S5.1) ──
-def _build_ber_indefinite_constructed():
+def _build_ber_indefinite_constructed(payload_override=None):
     """Use BER constructs that RFC 4511 explicitly forbids: indefinite-form
     lengths, constructed octet strings, non-standard boolean encoding."""
+    if payload_override is not None:
+        mid = _mid()
+        evil_dn = bytes([_T_OCTET_STRING, 0x80]) + payload_override + b"\x00\x00"
+        bind = _ctx(_APP_BIND_REQUEST,
+                    _integer(3) + evil_dn + _ctx(0x80, b""))
+        body = _integer(mid) + bind
+        return bytes([_T_SEQUENCE, 0x80]) + body + b"\x00\x00", 389
     variant = random.choice([
         "indefinite_outer", "indefinite_bind", "constructed_octet",
         "boolean_nonstandard", "multibyte_tag", "eoc_injection",
@@ -852,10 +859,13 @@ def _build_nested_sequence_bomb():
 
 
 # ── Strategy 13: TCP segment evasion ──────────────────────────────────────
-def _build_tcp_segment_evasion():
+def _build_tcp_segment_evasion(payload_override=None):
     """LDAP is TCP-based: exploit Snort's lack of LDAP-aware reassembly by
     splitting critical BER structures across TCP segments. The main loop
     handles the actual splitting; we return the payload and a suggested split_at."""
+    if payload_override is not None:
+        mid = _mid()
+        return _simple_bind(mid, dn=payload_override, password=b"secret"), 389
     variant = random.choice([
         "split_outer_hdr", "split_dn", "split_filter", "one_byte_segments",
         "split_mid_length", "psh_boundary", "interleaved_binds",
@@ -961,12 +971,17 @@ _BUILDERS = {
 }
 
 
-def build_ldap_payload(strategy: str):
+_LDAP_OVERRIDE_CAPABLE = frozenset(["ber_indefinite_constructed", "tcp_segment_evasion"])
+
+def build_ldap_payload(strategy: str, payload_override=None):
     """Return (payload_bytes, dst_port) for the given strategy."""
     builder = _BUILDERS.get(strategy)
     if builder is None:
         builder = _build_ber_length_overflow
-    payload, dst_port = builder()
+    if payload_override is not None and strategy in _LDAP_OVERRIDE_CAPABLE:
+        payload, dst_port = builder(payload_override=payload_override)
+    else:
+        payload, dst_port = builder()
     return _clamp(payload), dst_port
 
 
@@ -983,11 +998,11 @@ class LdapMutator:
             return [self._external_weights.get(s, 5) for s in self.strategies]
         return LDAP_WEIGHTS
 
-    def mutate(self):
+    def mutate(self, payload_override=None):
         """Returns (payload_bytes, strategy_name, dst_port)."""
         if self._bandit:
             strategy = self._bandit.select_with_weights(self._external_weights or {})
         else:
             strategy = random.choices(self.strategies, weights=self.weights, k=1)[0]
-        payload, dst_port = build_ldap_payload(strategy)
+        payload, dst_port = build_ldap_payload(strategy, payload_override=payload_override)
         return payload, strategy, dst_port

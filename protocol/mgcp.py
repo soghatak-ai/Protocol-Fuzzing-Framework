@@ -765,7 +765,15 @@ def _build_event_package_overflow():
 # by a line containing a single dot ".".  Each processed independently.
 # This creates a unique message-boundary attack surface.
 
-def _build_piggyback_smuggling():
+def _build_piggyback_smuggling(payload_override=None):
+    if payload_override is not None:
+        ep = _rand_endpoint()
+        msg1 = _basic_command(b"NTFY", _rand_txid(), ep,
+                              [f"X: {_rand_hex()}", "O: L/hd"])
+        msg2 = _basic_command(b"NTFY", _rand_txid(), ep,
+                              [f"X: {_rand_hex()}", "O: L/hd"])
+        return (msg1 + b"." + _CRLF + payload_override + _CRLF +
+                b"." + _CRLF + msg2)[:_MAX_SEG], _MGCP_GW_PORT
     variant = random.choice([
         "legit_plus_evil", "command_plus_response", "mass_piggyback",
         "dot_separator_variations", "dot_inside_sdp", "no_dot_between",
@@ -1174,10 +1182,14 @@ _STRATEGY_MAP = {
 }
 
 
-def build_mgcp_payload(strategy):
+_MGCP_OVERRIDE_CAPABLE = frozenset(["piggyback_smuggling"])
+
+def build_mgcp_payload(strategy, payload_override=None):
     """Build one MGCP payload. Returns (payload_bytes, dst_port)."""
     fn = _STRATEGY_MAP.get(strategy)
     if fn:
+        if payload_override is not None and strategy in _MGCP_OVERRIDE_CAPABLE:
+            return fn(payload_override=payload_override)
         return fn()
     # Fallback: simple AUEP
     return _basic_command(b"AUEP", _rand_txid(), _rand_endpoint()), _MGCP_GW_PORT
@@ -1197,11 +1209,11 @@ class MgcpMutator:
             return [self._external_weights.get(s, 5) for s in self.strategies]
         return MGCP_WEIGHTS
 
-    def mutate(self):
+    def mutate(self, payload_override=None):
         """Returns (payload_bytes, strategy_name, dst_port)."""
         if self._bandit:
             strategy = self._bandit.select_with_weights(self._external_weights or {})
         else:
             strategy = random.choices(self.strategies, weights=self.weights, k=1)[0]
-        payload, dst_port = build_mgcp_payload(strategy)
+        payload, dst_port = build_mgcp_payload(strategy, payload_override=payload_override)
         return payload, strategy, dst_port

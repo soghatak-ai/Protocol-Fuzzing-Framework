@@ -277,7 +277,7 @@ def _tcp_record_mark(data: bytes, last: bool = True) -> bytes:
 
 # ===== Strategy payload builders =============================================
 
-def build_dcerpc_payload(strategy: str) -> bytes:
+def build_dcerpc_payload(strategy: str, payload_override=None) -> bytes:
     """Return raw bytes for the given DCE/RPC fuzzing strategy."""
 
     # ── bind_flood ──────────────────────────────────────────────────────
@@ -337,6 +337,14 @@ def build_dcerpc_payload(strategy: str) -> bytes:
 
     # ── frag_reassembly_attack ──────────────────────────────────────────
     elif strategy == "frag_reassembly_attack":
+        if payload_override is not None:
+            frames = _bind_pdu()
+            mid = len(payload_override) // 2
+            f1 = _request_pdu(payload_override[:mid], opnum=0, call_id=2,
+                              flags=_PFC_FIRST_FRAG)
+            f2 = _request_pdu(payload_override[mid:], opnum=0, call_id=2,
+                              flags=_PFC_LAST_FRAG)
+            return frames + f1 + f2
         variant = random.choice([
             "overlapping_frags", "out_of_order", "missing_last",
             "zero_length_frag", "max_frag_length", "frag_bomb"
@@ -1089,11 +1097,11 @@ class DcerpcMutator:
             return [self._external_weights.get(s, 5) for s in self.strategies]
         return DCERPC_WEIGHTS
 
-    def mutate(self) -> tuple:
+    def mutate(self, payload_override=None) -> tuple:
         """Returns (payload_bytes, strategy_name)."""
         if self._bandit:
             strategy = self._bandit.select_with_weights(self._external_weights or {})
         else:
             strategy = random.choices(self.strategies, weights=self.weights, k=1)[0]
-        payload = build_dcerpc_payload(strategy)
+        payload = build_dcerpc_payload(strategy, payload_override=payload_override)
         return payload, strategy

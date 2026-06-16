@@ -483,13 +483,16 @@ def _strat_malformed_packet_structure():
 
 # ── Strategy 10: ip_fragmentation_evasion ─────────────────────────────────
 
-def _strat_ip_fragmentation_evasion():
+def _strat_ip_fragmentation_evasion(payload_override=None):
     """Oversized TFTP payloads designed to force IP-layer fragmentation.
 
     When UDP payload exceeds MTU (~1500), the IP layer fragments it.
     Snort may not reassemble fragments before signature matching.
     Malicious content is positioned to fall in later fragments.
     """
+    if payload_override is not None:
+        padding = b"A" * 1400
+        return _OP_DATA + struct.pack(">H", 1) + padding + payload_override
     v = random.randint(0, 5)
     if v == 0:
         # RRQ padded to exceed MTU — traversal filename in second fragment
@@ -754,7 +757,9 @@ _STRATEGY_FUNCS = {
 }
 
 
-def build_tftp_payload(strategy):
+_TFTP_OVERRIDE_CAPABLE = frozenset(["ip_fragmentation_evasion"])
+
+def build_tftp_payload(strategy, payload_override=None):
     """Build a TFTP mutation payload for the given strategy.
 
     Returns (payload_bytes, dst_port).
@@ -763,7 +768,10 @@ def build_tftp_payload(strategy):
     if func is None:
         # Fallback: random RRQ
         return _rrq(b"test.txt"), _TFTP_PORT
-    payload = func()
+    if payload_override is not None and strategy in _TFTP_OVERRIDE_CAPABLE:
+        payload = func(payload_override=payload_override)
+    else:
+        payload = func()
     if not payload:
         payload = _rrq(b"test.txt")
     return payload, _TFTP_PORT
@@ -778,7 +786,7 @@ class TftpMutator:
         self._weights = external_weights or dict(zip(TFTP_STRATEGIES, TFTP_WEIGHTS))
         self._bandit = bandit
 
-    def mutate(self):
+    def mutate(self, payload_override=None):
         """Return (payload_bytes, strategy_name, dst_port)."""
         if self._bandit:
             strategy = self._bandit.select_with_weights(self._weights)
@@ -787,5 +795,5 @@ class TftpMutator:
             weights = [max(self._weights.get(s, 1.0), 0.01) for s in strategies]
             strategy = random.choices(strategies, weights=weights, k=1)[0]
 
-        payload, port = build_tftp_payload(strategy)
+        payload, port = build_tftp_payload(strategy, payload_override=payload_override)
         return payload, strategy, port

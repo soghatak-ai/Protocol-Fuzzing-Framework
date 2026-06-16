@@ -430,7 +430,7 @@ def _build_ndp_option_tlv_overflow():
     return msg, "icmpv6", src, dst
 
 
-def _build_fragment_header_evasion():
+def _build_fragment_header_evasion(payload_override=None):
     """IPv6 Fragment Header + ICMPv6 reassembly evasion.
 
     IPv6 fragmentation uses an extension header (Next Header 44):
@@ -440,13 +440,32 @@ def _build_fragment_header_evasion():
     across boundary, atomic fragment (offset=0, M=0), out-of-order,
     duplicate first, many tiny, gap fragment.
     """
+    frag_id = random.randint(1, 0xFFFFFFFF)
+    src = _rand_link_local()
+    dst = _rand_link_local()
+
+    if payload_override is not None:
+        echo_body = struct.pack("!HH", random.randint(0, 0xFFFF),
+                                random.randint(0, 0xFFFF)) + payload_override
+        full_msg = struct.pack("!BBH", 128, 0, 0) + echo_body
+        cs = _icmpv6_checksum(src, dst, full_msg)
+        icmpv6_pkt = struct.pack("!BBH", 128, 0, cs) + echo_body
+        mid = (len(icmpv6_pkt) // 2 + 7) & ~7
+        def _frag_hdr_ov(offset_bytes, mf, next_hdr=ICMPV6_PROTO):
+            offset_units = offset_bytes // 8
+            frag_off_m = (offset_units << 3) | (1 if mf else 0)
+            return struct.pack("!BBH I", next_hdr, 0, frag_off_m, frag_id)
+        def _ipv6_frag_ov(src, dst, off, mf, payload):
+            fhdr = _frag_hdr_ov(off, mf)
+            return _build_ipv6(src, dst, fhdr + payload, next_header=44, hop_limit=64)
+        frag0 = _ipv6_frag_ov(src, dst, 0, True, icmpv6_pkt[:mid])
+        frag1 = _ipv6_frag_ov(src, dst, mid, False, icmpv6_pkt[mid:])
+        return [frag0, frag1], "fragments", src, dst
+
     variant = random.choice([
         "overlapping", "tiny_header_split", "atomic_fragment",
         "out_of_order", "duplicate_first", "many_tiny", "gap_fragment",
     ])
-    frag_id = random.randint(1, 0xFFFFFFFF)
-    src = _rand_link_local()
-    dst = _rand_link_local()
     # Build ICMPv6 Echo Request payload
     echo_body = struct.pack("!HH", random.randint(0, 0xFFFF),
                             random.randint(0, 0xFFFF)) + os.urandom(120)
@@ -1101,7 +1120,9 @@ _BUILDERS = {
 }
 
 
-def build_icmpv6_payload(strategy):
+_ICMPV6_OVERRIDE_CAPABLE = frozenset(["fragment_header_evasion"])
+
+def build_icmpv6_payload(strategy, payload_override=None):
     """Build an ICMPv6 fuzz payload for the given strategy.
 
     Returns (data, packet_type, src_ipv6, dst_ipv6) where packet_type is:
@@ -1113,6 +1134,8 @@ def build_icmpv6_payload(strategy):
     if builder is None:
         msg, src, dst = _echo6(128, 0, payload=os.urandom(56))
         return msg, "icmpv6", src, dst
+    if payload_override is not None and strategy in _ICMPV6_OVERRIDE_CAPABLE:
+        return builder(payload_override=payload_override)
     return builder()
 
 
@@ -1132,7 +1155,7 @@ class Icmpv6Mutator:
             return [self._external_weights.get(s, 5) for s in self.strategies]
         return ICMPV6_WEIGHTS
 
-    def mutate(self):
+    def mutate(self, payload_override=None):
         """Returns (data, strategy_name, packet_type, src_ipv6, dst_ipv6).
 
         packet_type: "icmpv6" | "fragments" | "raw_ipv6"
@@ -1141,5 +1164,5 @@ class Icmpv6Mutator:
             strategy = self._bandit.select_with_weights(self._external_weights or {})
         else:
             strategy = random.choices(self.strategies, weights=self.weights, k=1)[0]
-        data, pkt_type, src, dst = build_icmpv6_payload(strategy)
+        data, pkt_type, src, dst = build_icmpv6_payload(strategy, payload_override=payload_override)
         return data, strategy, pkt_type, src, dst

@@ -160,9 +160,21 @@ def _build_request_line_malformation():
 
 # ── Strategy 2: content_length_smuggling ───────────────────────────────────
 
-def _build_content_length_smuggling():
+def _build_content_length_smuggling(payload_override=None):
     """Content-Length vs actual body mismatch for request smuggling.
     Adapted from HTTP CL.0/CL.TE techniques."""
+    if payload_override is not None:
+        uri = _rand_uri()
+        cseq = _rand_cseq()
+        body = b"AAAA" + payload_override
+        payload = (
+            f"ANNOUNCE {uri} RTSP/1.0\r\n"
+            f"CSeq: {cseq}\r\n"
+            f"Content-Type: application/sdp\r\n"
+            f"Content-Length: 4\r\n"
+            f"\r\n"
+        ).encode() + body
+        return payload[:_MAX_SEG], _RTSP_PORT
     variant = random.randint(0, 7)
     uri = _rand_uri()
     cseq = _rand_cseq()
@@ -313,9 +325,12 @@ def _build_transport_header_overflow():
 
 # ── Strategy 4: interleaved_binary_injection ───────────────────────────────
 
-def _build_interleaved_binary_injection():
+def _build_interleaved_binary_injection(payload_override=None):
     """RTSP-unique $ (0x24) framing for interleaved binary data.
     $ + 1-byte channel + 2-byte length (big-endian) + data."""
+    if payload_override is not None:
+        frame = struct.pack("!BBH", 0x24, 0, len(payload_override)) + payload_override
+        return frame[:_MAX_SEG], _RTSP_PORT
     variant = random.randint(0, 7)
     uri = _rand_uri()
     cseq = _rand_cseq()
@@ -823,9 +838,16 @@ def _build_method_verb_fuzzing():
 
 # ── Strategy 11: uri_encoding_evasion ──────────────────────────────────────
 
-def _build_uri_encoding_evasion():
+def _build_uri_encoding_evasion(payload_override=None):
     """Percent-encoding, double-encoding, mixed case scheme, null bytes,
     path traversal with encoding, overlong UTF-8."""
+    if payload_override is not None:
+        host = _rand_ip()
+        cseq = _rand_cseq()
+        encoded = "".join(f"%{b:02X}" for b in payload_override)
+        uri = f"rtsp://{host}:{_RTSP_PORT}/{encoded}"
+        payload = f"DESCRIBE {uri} RTSP/1.0\r\nCSeq: {cseq}\r\n\r\n"
+        return payload.encode("utf-8", errors="replace")[:_MAX_SEG], _RTSP_PORT
     variant = random.randint(0, 7)
     host = _rand_ip()
     cseq = _rand_cseq()
@@ -957,11 +979,20 @@ def _build_crlf_header_injection():
 
 # ── Strategy 13: tcp_segmentation_evasion ──────────────────────────────────
 
-def _build_tcp_segmentation_evasion():
+def _build_tcp_segmentation_evasion(payload_override=None):
     """Ptacek & Newsham: tiny segments, out-of-order, overlap, TTL
     insertion, pause/timeout, split at protocol boundaries.
     NOTE: Returns the full payload as one block; actual TCP segmentation
     is handled by the transport layer (wrap_tcp_session splits it)."""
+    if payload_override is not None:
+        uri = _rand_uri()
+        cseq = _rand_cseq()
+        payload = (
+            f"DESCRIBE {uri} RTSP/1.0\r\n"
+            f"CSeq: {cseq}\r\n"
+            f"X-Payload: "
+        ).encode() + payload_override + b"\r\n\r\n"
+        return payload[:_MAX_SEG], _RTSP_PORT
     variant = random.randint(0, 7)
     uri = _rand_uri()
     cseq = _rand_cseq()
@@ -1105,12 +1136,19 @@ _STRATEGY_MAP = {
 }
 
 
-def build_rtsp_payload(strategy):
+_RTSP_OVERRIDE_CAPABLE = frozenset([
+    "content_length_smuggling", "interleaved_binary_injection",
+    "uri_encoding_evasion", "tcp_segmentation_evasion",
+])
+
+def build_rtsp_payload(strategy, payload_override=None):
     """Build one fuzzed RTSP payload for the given strategy.
     Returns (payload_bytes, dst_port)."""
     func = _STRATEGY_MAP.get(strategy)
     if func is None:
         raise ValueError(f"Unknown RTSP strategy: {strategy}")
+    if payload_override is not None and strategy in _RTSP_OVERRIDE_CAPABLE:
+        return func(payload_override=payload_override)
     return func()
 
 
@@ -1128,11 +1166,11 @@ class RtspMutator:
             return [self._external_weights.get(s, 5) for s in self.strategies]
         return RTSP_WEIGHTS
 
-    def mutate(self):
+    def mutate(self, payload_override=None):
         """Returns (payload_bytes, strategy_name, dst_port)."""
         if self._bandit:
             strategy = self._bandit.select_with_weights(self._external_weights or {})
         else:
             strategy = random.choices(self.strategies, weights=self.weights, k=1)[0]
-        payload, dst_port = build_rtsp_payload(strategy)
+        payload, dst_port = build_rtsp_payload(strategy, payload_override=payload_override)
         return payload, strategy, dst_port

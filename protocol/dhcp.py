@@ -116,7 +116,9 @@ def _dhcp_packet(op=_BOOTREQUEST, xid=None, secs=0, flags=0x8000,
     return hdr + _MAGIC_COOKIE + options
 
 
-def build_dhcp_payload(strategy):
+_DHCP_OVERRIDE_CAPABLE = frozenset(["option_tlv_overflow"])
+
+def build_dhcp_payload(strategy, payload_override=None):
     """Build one DHCP payload. Returns (payload_bytes, dst_port).
     dst_port is 67 (client->server) or 68 (server->client)."""
 
@@ -125,6 +127,8 @@ def build_dhcp_payload(strategy):
     elif strategy == "starvation_flood":
         return _build_starvation()
     elif strategy == "option_tlv_overflow":
+        if payload_override is not None:
+            return _build_option_overflow(payload_override=payload_override)
         return _build_option_overflow()
     elif strategy == "option_overload_attack":
         return _build_option_overload()
@@ -258,8 +262,11 @@ def _build_starvation():
         return pkts, 67
 
 
-def _build_option_overflow():
+def _build_option_overflow(payload_override=None):
     """TLV option parsing abuse: oversized, truncated, missing end, duplicates."""
+    if payload_override is not None:
+        opts = _opt53(_DISCOVER) + _opt(43, payload_override[:255]) + _opt_end()
+        return _dhcp_packet(options=opts), 67
     variant = random.choice(["max_len", "len_exceeds", "no_end", "past_end",
                               "many_tiny", "dup_msgtype", "zero_len", "chain_bomb"])
     if variant == "max_len":
@@ -639,11 +646,11 @@ class DhcpMutator:
             return [self._external_weights.get(s, 5) for s in self.strategies]
         return DHCP_WEIGHTS
 
-    def mutate(self):
+    def mutate(self, payload_override=None):
         """Returns (payload_bytes, strategy_name, dst_port)."""
         if self._bandit:
             strategy = self._bandit.select_with_weights(self._external_weights or {})
         else:
             strategy = random.choices(self.strategies, weights=self.weights, k=1)[0]
-        payload, dst_port = build_dhcp_payload(strategy)
+        payload, dst_port = build_dhcp_payload(strategy, payload_override=payload_override)
         return payload, strategy, dst_port

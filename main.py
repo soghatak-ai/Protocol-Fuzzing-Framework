@@ -231,6 +231,8 @@ fuzzer_state = {
     "last_crash_type": None,
     "packets_per_sec": 0,
     "strategy_stats": {},
+    "payload_mode": "default",
+    "payload_override": None,
 }
 
 event_log = []
@@ -248,6 +250,8 @@ def log_event(level, message):
 def reset_state():
     # Preserve protocol across resets so the fuzzer loop reads the right one
     protocol = fuzzer_state.get("protocol", "dns")
+    payload_mode = fuzzer_state.get("payload_mode", "default")
+    payload_override = fuzzer_state.get("payload_override")
     fuzzer_state.update({
         "iteration": 0,
         "last_packet_time": time.time(),
@@ -260,6 +264,8 @@ def reset_state():
         "baseline_mem_mb": None,
         "peak_mem_mb": None,
         "current_mem_mb": None,
+        "payload_mode": payload_mode,
+        "payload_override": payload_override,
         "snort_pid": None,
         "trigger_detail": None,
         "status": "idle",
@@ -334,7 +340,7 @@ def save_crash_log(iteration: int, stderr_data: bytes, anomaly_type: str = "CRAS
     print(f"\n[!!!] {anomaly_type} DETECTED AT ITERATION {iteration:,} [!!!]")
     print(f"[+] Diagnostic trace saved to: {report_path}")
 
-def _build_dns_mutation(strategy: str, seed_message):
+def _build_dns_mutation(strategy: str, seed_message, payload_override=None):
     """Build one DNS mutation payload. Returns (mutated_bytes, tcp_payload, split_at).
     Exactly one of mutated_bytes / tcp_payload will be non-None.
     split_at is set only when the TCP payload must be delivered in two segments."""
@@ -348,7 +354,7 @@ def _build_dns_mutation(strategy: str, seed_message):
         if random.random() < 0.2:
             mutated_bytes = ByteMutator.bit_flip(mutated_bytes)
     elif strategy == "response_fuzz":
-        mutated_bytes = ResponseMutator.mutate()
+        mutated_bytes = ResponseMutator.mutate(payload_override=payload_override)
         if random.random() < 0.3:
             mutated_bytes = ByteMutator.bit_flip(mutated_bytes)
     elif strategy == "compression_loop":
@@ -361,7 +367,7 @@ def _build_dns_mutation(strategy: str, seed_message):
         tcp_payload = TCPDNSSegmentMutator.mutate()
         split_at = random.choice([1, 2, 3, 13, max(1, len(tcp_payload) // 2)])
     elif strategy == "txt_rdata_bomb":
-        tcp_payload = TxtRdataBombMutator.mutate()
+        tcp_payload = TxtRdataBombMutator.mutate(payload_override=payload_override)
     elif strategy == "tcp_two_message":
         tcp_payload = TcpTwoMessageMutator.mutate()
         split_at = random.choice([1, 2, max(1, len(tcp_payload) // 3)])
@@ -733,13 +739,16 @@ def run_fuzzer(build_dir: str):
             pipe.write(transport.get_global_header())
             pipe.flush()
 
+            # Resolve dynamic payload override (None = default random mode)
+            _po = fuzzer_state.get("payload_override") if fuzzer_state.get("payload_mode") == "custom" else None
+
             while fuzzer_state["running"] and not fuzzer_state["anomaly_detected"]:
                 fuzzer_state["iteration"] += 1
                 iteration = fuzzer_state["iteration"]
 
                 if protocol == "ftp":
                     if iteration == 1 or (iteration - 1) % 50 == 0:
-                        _ftp_payload, _ftp_strategy = ftp_mutator.mutate()
+                        _ftp_payload, _ftp_strategy = ftp_mutator.mutate(payload_override=_po)
                     payload, strategy = _ftp_payload, _ftp_strategy
                     fuzzer_state["current_strategy"] = strategy
                     fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
@@ -748,7 +757,7 @@ def run_fuzzer(build_dir: str):
                     fuzzer_state["iteration"] += 4  # 5 PCAP records per TCP session (includes FIN-ACK)
                 elif protocol == "http":
                     if iteration == 1 or (iteration - 1) % 50 == 0:
-                        _http_payload, _http_strategy = http_mutator.mutate()
+                        _http_payload, _http_strategy = http_mutator.mutate(payload_override=_po)
                     payload, strategy = _http_payload, _http_strategy
                     fuzzer_state["current_strategy"] = strategy
                     fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
@@ -761,7 +770,7 @@ def run_fuzzer(build_dir: str):
                     fuzzer_state["iteration"] += 4  # full TCP session per HTTP message
                 elif protocol == "smtp":
                     if iteration == 1 or (iteration - 1) % 50 == 0:
-                        _smtp_payload, _smtp_strategy = smtp_mutator.mutate()
+                        _smtp_payload, _smtp_strategy = smtp_mutator.mutate(payload_override=_po)
                     payload, strategy = _smtp_payload, _smtp_strategy
                     fuzzer_state["current_strategy"] = strategy
                     fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
@@ -770,7 +779,7 @@ def run_fuzzer(build_dir: str):
                     fuzzer_state["iteration"] += 4  # full TCP session per SMTP transaction
                 elif protocol == "ssh":
                     if iteration == 1 or (iteration - 1) % 50 == 0:
-                        _ssh_payload, _ssh_strategy = ssh_mutator.mutate()
+                        _ssh_payload, _ssh_strategy = ssh_mutator.mutate(payload_override=_po)
                     payload, strategy = _ssh_payload, _ssh_strategy
                     fuzzer_state["current_strategy"] = strategy
                     fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
@@ -779,7 +788,7 @@ def run_fuzzer(build_dir: str):
                     fuzzer_state["iteration"] += 4  # full TCP session per SSH handshake
                 elif protocol in ("smb2", "smb3"):
                     if iteration == 1 or (iteration - 1) % 50 == 0:
-                        _smb_payload, _smb_strategy = smb_mutator.mutate()
+                        _smb_payload, _smb_strategy = smb_mutator.mutate(payload_override=_po)
                     payload, strategy = _smb_payload, _smb_strategy
                     fuzzer_state["current_strategy"] = strategy
                     fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
@@ -788,7 +797,7 @@ def run_fuzzer(build_dir: str):
                     fuzzer_state["iteration"] += 4  # full TCP session per SMB transaction
                 elif protocol == "http2":
                     if iteration == 1 or (iteration - 1) % 50 == 0:
-                        _h2_payload, _h2_strategy = http2_mutator.mutate()
+                        _h2_payload, _h2_strategy = http2_mutator.mutate(payload_override=_po)
                     payload, strategy = _h2_payload, _h2_strategy
                     fuzzer_state["current_strategy"] = strategy
                     fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
@@ -797,7 +806,7 @@ def run_fuzzer(build_dir: str):
                     fuzzer_state["iteration"] += 4  # full TCP session per HTTP/2 message
                 elif protocol == "dcerpc":
                     if iteration == 1 or (iteration - 1) % 50 == 0:
-                        _dcerpc_payload, _dcerpc_strategy = dcerpc_mutator.mutate()
+                        _dcerpc_payload, _dcerpc_strategy = dcerpc_mutator.mutate(payload_override=_po)
                     payload, strategy = _dcerpc_payload, _dcerpc_strategy
                     fuzzer_state["current_strategy"] = strategy
                     fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
@@ -806,7 +815,7 @@ def run_fuzzer(build_dir: str):
                     fuzzer_state["iteration"] += 4  # full TCP session per DCE/RPC message
                 elif protocol == "dhcp":
                     if iteration == 1 or (iteration - 1) % 50 == 0:
-                        _dhcp_payload, _dhcp_strategy, _dhcp_dst_port = dhcp_mutator.mutate()
+                        _dhcp_payload, _dhcp_strategy, _dhcp_dst_port = dhcp_mutator.mutate(payload_override=_po)
                     payload, strategy = _dhcp_payload, _dhcp_strategy
                     fuzzer_state["current_strategy"] = strategy
                     fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
@@ -816,7 +825,7 @@ def run_fuzzer(build_dir: str):
                                                           src_ip=src_ip, src_port=src_port))
                 elif protocol == "dhcpv6":
                     if iteration == 1 or (iteration - 1) % 50 == 0:
-                        _dhcpv6_payload, _dhcpv6_strategy, _dhcpv6_dst_port = dhcpv6_mutator.mutate()
+                        _dhcpv6_payload, _dhcpv6_strategy, _dhcpv6_dst_port = dhcpv6_mutator.mutate(payload_override=_po)
                     payload, strategy = _dhcpv6_payload, _dhcpv6_strategy
                     fuzzer_state["current_strategy"] = strategy
                     fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
@@ -826,7 +835,7 @@ def run_fuzzer(build_dir: str):
                                                           src_ip=src_ip, src_port=src_port))
                 elif protocol == "snmp":
                     if iteration == 1 or (iteration - 1) % 50 == 0:
-                        _snmp_payload, _snmp_strategy, _snmp_dst_port = snmp_mutator.mutate()
+                        _snmp_payload, _snmp_strategy, _snmp_dst_port = snmp_mutator.mutate(payload_override=_po)
                     payload, strategy = _snmp_payload, _snmp_strategy
                     fuzzer_state["current_strategy"] = strategy
                     fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
@@ -836,7 +845,7 @@ def run_fuzzer(build_dir: str):
                                                           src_ip=src_ip, src_port=src_port))
                 elif protocol == "icmp":
                     if iteration == 1 or (iteration - 1) % 50 == 0:
-                        _icmp_data, _icmp_strategy, _icmp_pkt_type = icmp_mutator.mutate()
+                        _icmp_data, _icmp_strategy, _icmp_pkt_type = icmp_mutator.mutate(payload_override=_po)
                     strategy = _icmp_strategy
                     fuzzer_state["current_strategy"] = strategy
                     fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
@@ -850,7 +859,7 @@ def run_fuzzer(build_dir: str):
                         pipe.write(transport.wrap_icmp(_icmp_data, src_ip=src_ip))
                 elif protocol == "icmpv6":
                     if iteration == 1 or (iteration - 1) % 50 == 0:
-                        _v6_data, _v6_strategy, _v6_pkt_type, _v6_src, _v6_dst = icmpv6_mutator.mutate()
+                        _v6_data, _v6_strategy, _v6_pkt_type, _v6_src, _v6_dst = icmpv6_mutator.mutate(payload_override=_po)
                     strategy = _v6_strategy
                     fuzzer_state["current_strategy"] = strategy
                     fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
@@ -863,7 +872,7 @@ def run_fuzzer(build_dir: str):
                         pipe.write(transport.wrap_icmpv6(_v6_data, _v6_src, _v6_dst))
                 elif protocol == "sip":
                     if iteration == 1 or (iteration - 1) % 50 == 0:
-                        _sip_payload, _sip_strategy, _sip_dst_port = sip_mutator.mutate()
+                        _sip_payload, _sip_strategy, _sip_dst_port = sip_mutator.mutate(payload_override=_po)
                     payload, strategy = _sip_payload, _sip_strategy
                     fuzzer_state["current_strategy"] = strategy
                     fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
@@ -873,7 +882,7 @@ def run_fuzzer(build_dir: str):
                                                           src_ip=src_ip, src_port=src_port))
                 elif protocol == "mgcp":
                     if iteration == 1 or (iteration - 1) % 50 == 0:
-                        _mgcp_payload, _mgcp_strategy, _mgcp_dst_port = mgcp_mutator.mutate()
+                        _mgcp_payload, _mgcp_strategy, _mgcp_dst_port = mgcp_mutator.mutate(payload_override=_po)
                     payload, strategy = _mgcp_payload, _mgcp_strategy
                     fuzzer_state["current_strategy"] = strategy
                     fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
@@ -883,7 +892,7 @@ def run_fuzzer(build_dir: str):
                                                           src_ip=src_ip, src_port=src_port))
                 elif protocol == "rtsp":
                     if iteration == 1 or (iteration - 1) % 50 == 0:
-                        _rtsp_payload, _rtsp_strategy, _rtsp_dst_port = rtsp_mutator.mutate()
+                        _rtsp_payload, _rtsp_strategy, _rtsp_dst_port = rtsp_mutator.mutate(payload_override=_po)
                     payload, strategy = _rtsp_payload, _rtsp_strategy
                     fuzzer_state["current_strategy"] = strategy
                     fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
@@ -893,7 +902,7 @@ def run_fuzzer(build_dir: str):
                                                                 src_ip=src_ip))
                 elif protocol == "radius":
                     if iteration == 1 or (iteration - 1) % 50 == 0:
-                        _radius_payload, _radius_strategy, _radius_dst_port = radius_mutator.mutate()
+                        _radius_payload, _radius_strategy, _radius_dst_port = radius_mutator.mutate(payload_override=_po)
                     payload, strategy = _radius_payload, _radius_strategy
                     fuzzer_state["current_strategy"] = strategy
                     fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
@@ -903,7 +912,7 @@ def run_fuzzer(build_dir: str):
                                                           src_ip=src_ip, src_port=src_port))
                 elif protocol == "tacacs":
                     if iteration == 1 or (iteration - 1) % 50 == 0:
-                        _tacacs_payload, _tacacs_strategy, _tacacs_dst_port = tacacs_mutator.mutate()
+                        _tacacs_payload, _tacacs_strategy, _tacacs_dst_port = tacacs_mutator.mutate(payload_override=_po)
                     payload, strategy = _tacacs_payload, _tacacs_strategy
                     fuzzer_state["current_strategy"] = strategy
                     fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
@@ -913,7 +922,7 @@ def run_fuzzer(build_dir: str):
                     fuzzer_state["iteration"] += 4
                 elif protocol == "ldap":
                     if iteration == 1 or (iteration - 1) % 50 == 0:
-                        _ldap_payload, _ldap_strategy, _ldap_dst_port = ldap_mutator.mutate()
+                        _ldap_payload, _ldap_strategy, _ldap_dst_port = ldap_mutator.mutate(payload_override=_po)
                     payload, strategy = _ldap_payload, _ldap_strategy
                     fuzzer_state["current_strategy"] = strategy
                     fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
@@ -927,7 +936,7 @@ def run_fuzzer(build_dir: str):
                     fuzzer_state["iteration"] += 4
                 elif protocol == "cifs":
                     if iteration == 1 or (iteration - 1) % 50 == 0:
-                        _cifs_payload, _cifs_strategy, _cifs_dst_port = cifs_mutator.mutate()
+                        _cifs_payload, _cifs_strategy, _cifs_dst_port = cifs_mutator.mutate(payload_override=_po)
                     payload, strategy = _cifs_payload, _cifs_strategy
                     fuzzer_state["current_strategy"] = strategy
                     fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
@@ -940,7 +949,7 @@ def run_fuzzer(build_dir: str):
                     fuzzer_state["iteration"] += 4
                 elif protocol == "sunrpc":
                     if iteration == 1 or (iteration - 1) % 50 == 0:
-                        _sunrpc_payload, _sunrpc_strategy, _sunrpc_dst_port = sunrpc_mutator.mutate()
+                        _sunrpc_payload, _sunrpc_strategy, _sunrpc_dst_port = sunrpc_mutator.mutate(payload_override=_po)
                     payload, strategy = _sunrpc_payload, _sunrpc_strategy
                     fuzzer_state["current_strategy"] = strategy
                     fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
@@ -961,7 +970,7 @@ def run_fuzzer(build_dir: str):
                                                               src_ip=src_ip, src_port=src_port))
                 elif protocol == "telnet":
                     if iteration == 1 or (iteration - 1) % 50 == 0:
-                        _telnet_payload, _telnet_strategy, _telnet_dst_port = telnet_mutator.mutate()
+                        _telnet_payload, _telnet_strategy, _telnet_dst_port = telnet_mutator.mutate(payload_override=_po)
                     payload, strategy = _telnet_payload, _telnet_strategy
                     fuzzer_state["current_strategy"] = strategy
                     fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
@@ -974,7 +983,7 @@ def run_fuzzer(build_dir: str):
                     fuzzer_state["iteration"] += 4
                 elif protocol == "tftp":
                     if iteration == 1 or (iteration - 1) % 50 == 0:
-                        _tftp_payload, _tftp_strategy, _tftp_dst_port = tftp_mutator.mutate()
+                        _tftp_payload, _tftp_strategy, _tftp_dst_port = tftp_mutator.mutate(payload_override=_po)
                     payload, strategy = _tftp_payload, _tftp_strategy
                     fuzzer_state["current_strategy"] = strategy
                     fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
@@ -1003,7 +1012,7 @@ def run_fuzzer(build_dir: str):
                         pipe.write(transport.wrap_tcp_session_to_port(smb_payload, 445, src_ip=src_ip))
                         fuzzer_state["iteration"] += 4
                     else:
-                        mutated_bytes, tcp_payload, split_at = _build_dns_mutation(strategy, seed_message)
+                        mutated_bytes, tcp_payload, split_at = _build_dns_mutation(strategy, seed_message, payload_override=_po)
                         if mutated_bytes is not None:
                             pipe.write(transport.wrap_payload(mutated_bytes, src_ip=0x7f000001, src_port=12345))
                         elif tcp_payload is not None:

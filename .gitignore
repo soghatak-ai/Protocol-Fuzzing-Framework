@@ -9,5 +9,9 @@ target.pipe
 generate_ppt.py
 .env
 vuln_target/
-evasion_*
+*evasion_*
 templates/*.bak
+test_all_protocols_live.py
+test_tftp_live.py
+evasion_test.py
+snort_stress_test.py

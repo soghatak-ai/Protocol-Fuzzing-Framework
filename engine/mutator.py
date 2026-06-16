@@ -98,8 +98,8 @@ class ResponseMutator:
     ]
 
     @staticmethod
-    def mutate() -> bytes:
-        return build_response_packet(anomaly=random.choice(ResponseMutator.ANOMALIES))
+    def mutate(payload_override=None) -> bytes:
+        return build_response_packet(anomaly=random.choice(ResponseMutator.ANOMALIES), payload_override=payload_override)
 
 
 class EDNSExploitMutator:
@@ -139,8 +139,8 @@ class TxtRdataBombMutator:
     ANOMALIES = ["event_queue_flood", "deep_txt_chain", "multi_answer_txt"]
 
     @staticmethod
-    def mutate() -> bytes:
-        return build_txt_rdata_bomb(anomaly=random.choice(TxtRdataBombMutator.ANOMALIES))
+    def mutate(payload_override=None) -> bytes:
+        return build_txt_rdata_bomb(anomaly=random.choice(TxtRdataBombMutator.ANOMALIES), payload_override=payload_override)
 
 
 class TcpTwoMessageMutator:
@@ -154,7 +154,7 @@ class TcpTwoMessageMutator:
 class InspectorStressMutator:
     ANOMALIES = [
         "truncated_rr_chain", "rdlength_cascade", "name_hash_flood",
-        "stateful_tid_storm", "partial_header_truncation",
+        "stateful_tid_storm", "partial_header_truncatin",
         "zero_key_rdata", "rapid_init_burst",
     ]
 

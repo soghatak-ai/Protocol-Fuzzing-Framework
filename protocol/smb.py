@@ -167,7 +167,7 @@ def _negotiate_preamble(dialects=None):
 
 # === Strategy Builders ===
 
-def build_smb_payload(strategy):
+def build_smb_payload(strategy, payload_override=None):
     """Build an SMB payload (raw TCP bytes for port 445) for the given strategy."""
     pre = _negotiate_preamble()
 
@@ -612,6 +612,17 @@ def build_smb_payload(strategy):
 
     # ---- 12. TRANSFORM HEADER ATTACK ----
     elif strategy == "transform_header_attack":
+        if payload_override is not None:
+            inner = _smb2(SMB2_ECHO, mid=1, sid=1) + payload_override
+            nonce = os.urandom(16)
+            orig_size = len(inner)
+            th = SMB3_TRANSFORM_MAGIC
+            th += b'\xAA' * 16          # Signature
+            th += nonce
+            th += struct.pack("<I", orig_size)
+            th += struct.pack("<HH", 0, 0x0001)
+            th += struct.pack("<Q", 1)
+            return pre + _wrap(th + inner)
         v = random.choice(["bad_sig", "nonce_overflow", "size_mismatch",
                            "wrong_algo", "double_transform", "smb1_inside"])
         inner = _smb2(SMB2_ECHO, mid=1, sid=1) + _echo_body()
@@ -646,6 +657,13 @@ def build_smb_payload(strategy):
 
     # ---- 13. COMPRESSION ATTACK ----
     elif strategy == "compression_attack":
+        if payload_override is not None:
+            inner = _smb2(SMB2_ECHO, mid=1, sid=1) + payload_override
+            ch = SMB3_COMPRESS_MAGIC
+            ch += struct.pack("<I", len(inner))
+            ch += struct.pack("<HH", 0x0002, 0)  # LZ77
+            ch += struct.pack("<I", 0)
+            return pre + _wrap(ch + inner)
         v = random.choice(["invalid_algo", "decomp_bomb", "chain_overflow",
                            "pattern_junk", "orig_size_overflow", "lz77_bad",
                            "smbghost_overflow"])
@@ -837,13 +855,13 @@ class Smb2Mutator:
             return [self._external_weights.get(s, 5) for s in self.strategies]
         return self._default_weights
 
-    def mutate(self):
+    def mutate(self, payload_override=None):
         """Returns (payload_bytes, strategy_name)."""
         if self._bandit:
             strategy = self._bandit.select_with_weights(self._external_weights or {})
         else:
             strategy = random.choices(self.strategies, weights=self.weights, k=1)[0]
-        payload = build_smb_payload(strategy)
+        payload = build_smb_payload(strategy, payload_override=payload_override)
         return payload, strategy
 
 
@@ -861,13 +879,13 @@ class Smb3Mutator:
             return [self._external_weights.get(s, 5) for s in self.strategies]
         return self._default_weights
 
-    def mutate(self):
+    def mutate(self, payload_override=None):
         """Returns (payload_bytes, strategy_name)."""
         if self._bandit:
             strategy = self._bandit.select_with_weights(self._external_weights or {})
         else:
             strategy = random.choices(self.strategies, weights=self.weights, k=1)[0]
-        payload = build_smb_payload(strategy)
+        payload = build_smb_payload(strategy, payload_override=payload_override)
         return payload, strategy
 
 

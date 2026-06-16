@@ -181,11 +181,19 @@ def build_label_flood_packet(strategy: str = "max_len_labels") -> bytes:
     return header + name + qtype_class
 
 
-def build_response_packet(anomaly: str = "rdlength_mismatch") -> bytes:
+def build_response_packet(anomaly: str = "rdlength_mismatch", payload_override=None) -> bytes:
     tid = random.randint(0, 0xFFFF)
     flags = 0x8580
     question_name = _encode_name("example.com")
     question = question_name + struct.pack("!HH", 1, 1)
+
+    if payload_override is not None:
+        # Embed payload as TXT record RDATA in a DNS response
+        chunks = [payload_override[i:i+255] for i in range(0, len(payload_override), 255)]
+        rdata = b''.join(bytes([len(c)]) + c for c in chunks)
+        answer = b'\xc0\x0c' + struct.pack("!HHIH", 16, 1, 300, len(rdata)) + rdata
+        header = struct.pack("!HHHHHH", tid, flags, 1, 1, 0, 0)
+        return header + question + answer
 
     if anomaly == "rdlength_mismatch":
         answer = b'\xc0\x0c' + struct.pack("!HHIH", 1, 1, 300, 100) + b'\x7f\x00\x00\x01'
@@ -676,13 +684,21 @@ def build_tcp_dns_segment(anomaly: str = "length_lie") -> bytes:
         return struct.pack("!H", 0xFFFF) + base_dns
 
 
-def build_txt_rdata_bomb(anomaly: str = "event_queue_flood") -> bytes:
+def build_txt_rdata_bomb(anomaly: str = "event_queue_flood", payload_override=None) -> bytes:
     """TCP-DNS TXT record attacks targeting CheckRRTypeTXTVuln in dns.cc.
     Returns a 2-byte-prefixed TCP DNS payload for use with wrap_tcp_session."""
     tid = random.randint(0, 0xFFFF)
     flags = 0x8580
     question_name = _encode_name("example.com")
     question = question_name + struct.pack("!HH", 16, 1)
+
+    if payload_override is not None:
+        chunks = [payload_override[i:i+255] for i in range(0, len(payload_override), 255)]
+        rdata = b''.join(bytes([len(c)]) + c for c in chunks)
+        answer = b'\xc0\x0c' + struct.pack("!HHIH", 16, 1, 300, len(rdata)) + rdata
+        header = struct.pack("!HHHHHH", tid, flags, 1, 1, 0, 0)
+        dns_msg = header + question + answer
+        return struct.pack("!H", len(dns_msg)) + dns_msg
 
     if anomaly == "event_queue_flood":
         # txt_count*4 + total_txt_len*2 + 4 > 0xFFFF fires DNS_EVENT_RDATA_OVERFLOW.
