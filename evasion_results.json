@@ -1,0 +1,2658 @@
+[
+  {
+    "proto": "http",
+    "strategy": "method_overflow",
+    "size": 65044,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http",
+    "strategy": "header_bomb",
+    "size": 165824,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http",
+    "strategy": "chunked_confusion",
+    "size": 124,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "http",
+    "strategy": "request_smuggling",
+    "size": 205,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "http",
+    "strategy": "uri_evasion",
+    "size": 149,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http",
+    "strategy": "pipeline_flood",
+    "size": 144890,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http",
+    "strategy": "header_folding",
+    "size": 105,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "http",
+    "strategy": "version_confusion",
+    "size": 48,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http",
+    "strategy": "content_length_attack",
+    "size": 99,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "http",
+    "strategy": "multipart_boundary",
+    "size": 365,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "http",
+    "strategy": "gzip_bomb",
+    "size": 144,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http",
+    "strategy": "absolute_uri_confusion",
+    "size": 157,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http",
+    "strategy": "method_fuzz",
+    "size": 52,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http",
+    "strategy": "header_field_fuzz",
+    "size": 97,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http",
+    "strategy": "resp_http09",
+    "size": 61,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "http",
+    "strategy": "resp_deflate_ambiguity",
+    "size": 105,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http",
+    "strategy": "resp_chunked_evasion",
+    "size": 92,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "http",
+    "strategy": "resp_double_encoding",
+    "size": 148,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http",
+    "strategy": "resp_gzip_quirks",
+    "size": 118,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http",
+    "strategy": "resp_whitespace_evasion",
+    "size": 95,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "http",
+    "strategy": "resp_lucky_status",
+    "size": 133,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "http",
+    "strategy": "resp_nul_injection",
+    "size": 95,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "http",
+    "strategy": "resp_version_confusion",
+    "size": 88,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "http",
+    "strategy": "resp_header_end",
+    "size": 93,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "http",
+    "strategy": "resp_content_length",
+    "size": 131,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "ftp",
+    "strategy": "cmd_overflow",
+    "size": 65007,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ftp",
+    "strategy": "port_bomb",
+    "size": 74316,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ftp",
+    "strategy": "pipelined_auth",
+    "size": 164000,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ftp",
+    "strategy": "cwd_depth",
+    "size": 16047,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ftp",
+    "strategy": "epsv_eprt_mix",
+    "size": 33498,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ftp",
+    "strategy": "stray_commands",
+    "size": 45225,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ftp",
+    "strategy": "boundary_port",
+    "size": 504041,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ftp",
+    "strategy": "oversized_site",
+    "size": 32853,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ftp",
+    "strategy": "encoding_attack",
+    "size": 68,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ftp",
+    "strategy": "rest_overflow",
+    "size": 17527,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ftp",
+    "strategy": "data_channel_confusion",
+    "size": 56041,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ftp",
+    "strategy": "feat_negotiate",
+    "size": 85,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "smtp",
+    "strategy": "cmd_overflow",
+    "size": 40046,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smtp",
+    "strategy": "header_overflow",
+    "size": 104160,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "smtp",
+    "strategy": "mime_decode_bomb",
+    "size": 300178,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smtp",
+    "strategy": "mime_boundary_confusion",
+    "size": 12162,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smtp",
+    "strategy": "data_desync",
+    "size": 180,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "smtp",
+    "strategy": "state_machine_violation",
+    "size": 81025,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smtp",
+    "strategy": "pipeline_flood",
+    "size": 48025,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smtp",
+    "strategy": "rcpt_bomb",
+    "size": 281839,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smtp",
+    "strategy": "xlink2state",
+    "size": 60046,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smtp",
+    "strategy": "bdat_chunk",
+    "size": 4117,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smtp",
+    "strategy": "auth_overflow",
+    "size": 80046,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smtp",
+    "strategy": "starttls_evasion",
+    "size": 152,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "smtp",
+    "strategy": "encoding_attack",
+    "size": 64,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smtp",
+    "strategy": "command_fuzz",
+    "size": 40032,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ssh",
+    "strategy": "version_overflow",
+    "size": 4019,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ssh",
+    "strategy": "version_confusion",
+    "size": 286,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ssh",
+    "strategy": "banner_flood",
+    "size": 40019,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ssh",
+    "strategy": "packet_length_attack",
+    "size": 129,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ssh",
+    "strategy": "padding_corruption",
+    "size": 43,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ssh",
+    "strategy": "kexinit_namelist_overflow",
+    "size": 98127,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ssh",
+    "strategy": "challenge_response_overflow",
+    "size": 60023,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ssh",
+    "strategy": "crc32_attack",
+    "size": 57937,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ssh",
+    "strategy": "kexdh_mpint_overflow",
+    "size": 87,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ssh",
+    "strategy": "state_machine_desync",
+    "size": 815,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ssh",
+    "strategy": "encrypted_packet_evasion",
+    "size": 3679,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "ssh",
+    "strategy": "disconnect_desync",
+    "size": 48023,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ssh",
+    "strategy": "guess_kex_confusion",
+    "size": 4287,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ssh",
+    "strategy": "gex_group_attack",
+    "size": 58127,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smb",
+    "strategy": "negotiate_confusion",
+    "size": 159,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smb",
+    "strategy": "header_manipulation",
+    "size": 188,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smb",
+    "strategy": "compound_abuse",
+    "size": 36120,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smb",
+    "strategy": "netbios_desync",
+    "size": 188,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smb",
+    "strategy": "session_state_attack",
+    "size": 216,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smb",
+    "strategy": "tree_path_overflow",
+    "size": 1716,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smb",
+    "strategy": "create_fuzz",
+    "size": 64242,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smb",
+    "strategy": "read_write_overflow",
+    "size": 237,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smb",
+    "strategy": "dce_pipe_attack",
+    "size": 11216,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smb",
+    "strategy": "ioctl_attack",
+    "size": 266,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smb",
+    "strategy": "oplock_lease_flood",
+    "size": 9316,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smb",
+    "strategy": "multi_protocol_evasion",
+    "size": 316,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smb",
+    "strategy": "query_info_overflow",
+    "size": 60218,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smb",
+    "strategy": "signing_evasion",
+    "size": 260,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "smb",
+    "strategy": "transform_header_attack",
+    "size": 250,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "smb",
+    "strategy": "compression_attack",
+    "size": 214,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "dns",
+    "strategy": "response_rdlength_mismatch",
+    "size": 55,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "dns",
+    "strategy": "response_name_ptr_loop",
+    "size": 55,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "dns",
+    "strategy": "response_qdcount_lie",
+    "size": 55,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "dns",
+    "strategy": "txt_event_queue_flood",
+    "size": 57,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "dns",
+    "strategy": "txt_oversize_txt",
+    "size": 57,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "http2",
+    "strategy": "hpack_state_desync",
+    "size": 2127,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http2",
+    "strategy": "continuation_flood",
+    "size": 123,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http2",
+    "strategy": "stream_interleave_evasion",
+    "size": 393,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http2",
+    "strategy": "settings_manipulation",
+    "size": 7533,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http2",
+    "strategy": "pseudo_header_smuggling",
+    "size": 85,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http2",
+    "strategy": "unknown_frame_injection",
+    "size": 326,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http2",
+    "strategy": "flow_control_evasion",
+    "size": 20065,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http2",
+    "strategy": "goaway_desync",
+    "size": 50050,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http2",
+    "strategy": "priority_tree_attack",
+    "size": 2833,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http2",
+    "strategy": "push_promise_confusion",
+    "size": 183,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http2",
+    "strategy": "data_padding_evasion",
+    "size": 174,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http2",
+    "strategy": "rst_stream_race",
+    "size": 57,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http2",
+    "strategy": "preface_manipulation",
+    "size": 53,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "http2",
+    "strategy": "header_block_fragmentation",
+    "size": 813,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dcerpc",
+    "strategy": "bind_flood",
+    "size": 28,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dcerpc",
+    "strategy": "frag_reassembly_attack",
+    "size": 141,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dcerpc",
+    "strategy": "ptype_confusion",
+    "size": 5016,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dcerpc",
+    "strategy": "auth_verifier_overflow",
+    "size": 40110,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dcerpc",
+    "strategy": "context_negotiation_abuse",
+    "size": 160,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dcerpc",
+    "strategy": "stub_data_overflow",
+    "size": 13002,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dcerpc",
+    "strategy": "alter_context_race",
+    "size": 268,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dcerpc",
+    "strategy": "cl_header_manipulation",
+    "size": 9000,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dcerpc",
+    "strategy": "endian_drep_confusion",
+    "size": 72,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dcerpc",
+    "strategy": "opnum_dispatch_fuzz",
+    "size": 14872,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dcerpc",
+    "strategy": "cancel_orphan_attack",
+    "size": 1672,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dcerpc",
+    "strategy": "record_marking_desync",
+    "size": 76,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dcerpc",
+    "strategy": "multi_bind_ack_confusion",
+    "size": 142,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dcerpc",
+    "strategy": "uuid_manipulation",
+    "size": 72,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dcerpc",
+    "strategy": "connection_state_uaf",
+    "size": 86505,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dhcp",
+    "strategy": "rogue_server_attack",
+    "size": 5480,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dhcp",
+    "strategy": "starvation_flood",
+    "size": 12600,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dhcp",
+    "strategy": "option_tlv_overflow",
+    "size": 265,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "dhcp",
+    "strategy": "option_overload_attack",
+    "size": 247,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dhcp",
+    "strategy": "magic_cookie_corruption",
+    "size": 548,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dhcp",
+    "strategy": "relay_agent_injection",
+    "size": 262,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dhcp",
+    "strategy": "state_machine_violation",
+    "size": 250,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dhcp",
+    "strategy": "bootp_crossover",
+    "size": 244,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dhcp",
+    "strategy": "field_boundary_attack",
+    "size": 1272,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dhcp",
+    "strategy": "xid_collision",
+    "size": 2440,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dhcp",
+    "strategy": "lease_time_confusion",
+    "size": 280,
+    "canary_in_raw": false,
+    "snort_detected": true,
+    "verdict": "DETECTED"
+  },
+  {
+    "proto": "dhcp",
+    "strategy": "broadcast_flag_abuse",
+    "size": 244,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dhcp",
+    "strategy": "client_id_spoof",
+    "size": 244,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dhcp",
+    "strategy": "sname_file_injection",
+    "size": 244,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dhcpv6",
+    "strategy": "rogue_server_advertise",
+    "size": 113,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dhcpv6",
+    "strategy": "duid_identity_attack",
+    "size": 234,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dhcpv6",
+    "strategy": "starvation_solicit_flood",
+    "size": 2070,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dhcpv6",
+    "strategy": "option_nested_overflow",
+    "size": 57,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "dhcpv6",
+    "strategy": "relay_chain_injection",
+    "size": 52,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dhcpv6",
+    "strategy": "ia_lifetime_confusion",
+    "size": 76,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dhcpv6",
+    "strategy": "state_machine_desync",
+    "size": 175,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dhcpv6",
+    "strategy": "reconfigure_forge",
+    "size": 810,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dhcpv6",
+    "strategy": "dns_option_injection",
+    "size": 53,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dhcpv6",
+    "strategy": "vendor_class_exploit",
+    "size": 65078,
+    "canary_in_raw": false,
+    "snort_detected": true,
+    "verdict": "DETECTED"
+  },
+  {
+    "proto": "dhcpv6",
+    "strategy": "transaction_id_manipulation",
+    "size": 4487,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dhcpv6",
+    "strategy": "prefix_delegation_abuse",
+    "size": 120,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dhcpv6",
+    "strategy": "multiprotocol_evasion",
+    "size": 28,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "dhcpv6",
+    "strategy": "elapsed_time_preference_fuzz",
+    "size": 281,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "snmp",
+    "strategy": "ber_length_overflow",
+    "size": 44,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "snmp",
+    "strategy": "ber_indefinite_nonminimal",
+    "size": 60,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "snmp",
+    "strategy": "truncated_tlv",
+    "size": 39,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "snmp",
+    "strategy": "version_pdu_confusion",
+    "size": 43,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "snmp",
+    "strategy": "getbulk_amplification",
+    "size": 63,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "snmp",
+    "strategy": "oid_encoding_attack",
+    "size": 45,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "snmp",
+    "strategy": "varbind_bomb",
+    "size": 40053,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "snmp",
+    "strategy": "trap_v1_malform",
+    "size": 42,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "snmp",
+    "strategy": "integer_field_overflow",
+    "size": 47,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "snmp",
+    "strategy": "community_overflow",
+    "size": 101,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "snmp",
+    "strategy": "nested_sequence_bomb",
+    "size": 5882,
+    "canary_in_raw": false,
+    "snort_detected": true,
+    "verdict": "DETECTED"
+  },
+  {
+    "proto": "snmp",
+    "strategy": "v3_header_malform",
+    "size": 91,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "snmp",
+    "strategy": "usm_param_overflow",
+    "size": 4096,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "snmp",
+    "strategy": "engineid_scopedpdu_abuse",
+    "size": 100,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sip",
+    "strategy": "comment_recursion_bomb",
+    "size": 2695,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sip",
+    "strategy": "content_length_overflow",
+    "size": 521,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sip",
+    "strategy": "oversized_header_overflow",
+    "size": 40462,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sip",
+    "strategy": "invite_flood_dos",
+    "size": 38994,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sip",
+    "strategy": "compact_form_desync",
+    "size": 706,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sip",
+    "strategy": "hcolon_whitespace_evasion",
+    "size": 398,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sip",
+    "strategy": "line_folding_obfuscation",
+    "size": 413,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sip",
+    "strategy": "content_length_smuggling",
+    "size": 439,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "sip",
+    "strategy": "uri_escape_injection",
+    "size": 338,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sip",
+    "strategy": "multipart_mime_wrap",
+    "size": 688,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sip",
+    "strategy": "malformed_startline",
+    "size": 331,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sip",
+    "strategy": "mandatory_header_omission",
+    "size": 261,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sip",
+    "strategy": "sdp_body_malformation",
+    "size": 1398,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sip",
+    "strategy": "digest_auth_state_desync",
+    "size": 45328,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "mgcp",
+    "strategy": "verb_line_overflow",
+    "size": 31726,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "mgcp",
+    "strategy": "transaction_id_desync",
+    "size": 4448,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "mgcp",
+    "strategy": "endpoint_wildcard_abuse",
+    "size": 88,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "mgcp",
+    "strategy": "parameter_injection",
+    "size": 33429,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "mgcp",
+    "strategy": "digit_map_bomb",
+    "size": 5509,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "mgcp",
+    "strategy": "local_connection_opts_overflow",
+    "size": 161,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "mgcp",
+    "strategy": "sdp_mgcp_body_mismatch",
+    "size": 175,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "mgcp",
+    "strategy": "event_package_overflow",
+    "size": 1381,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "mgcp",
+    "strategy": "piggyback_smuggling",
+    "size": 206,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "mgcp",
+    "strategy": "provisional_response_flood",
+    "size": 68,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "mgcp",
+    "strategy": "version_protocol_confusion",
+    "size": 94,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "mgcp",
+    "strategy": "notified_entity_hijack",
+    "size": 129,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "mgcp",
+    "strategy": "quarantine_handling_abuse",
+    "size": 37881,
+    "canary_in_raw": false,
+    "snort_detected": true,
+    "verdict": "DETECTED"
+  },
+  {
+    "proto": "mgcp",
+    "strategy": "restart_cascade_dos",
+    "size": 1064,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "rtsp",
+    "strategy": "request_line_malformation",
+    "size": 68,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "rtsp",
+    "strategy": "content_length_smuggling",
+    "size": 148,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "rtsp",
+    "strategy": "transport_header_overflow",
+    "size": 7118,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "rtsp",
+    "strategy": "interleaved_binary_injection",
+    "size": 23,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "rtsp",
+    "strategy": "session_state_confusion",
+    "size": 337,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "rtsp",
+    "strategy": "http_tunneling_abuse",
+    "size": 237,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "rtsp",
+    "strategy": "sdp_body_malformation",
+    "size": 13962,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "rtsp",
+    "strategy": "oversized_header_overflow",
+    "size": 33119,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "rtsp",
+    "strategy": "cseq_pipelining_abuse",
+    "size": 79,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "rtsp",
+    "strategy": "method_verb_fuzzing",
+    "size": 557,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "rtsp",
+    "strategy": "uri_encoding_evasion",
+    "size": 119,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "rtsp",
+    "strategy": "crlf_header_injection",
+    "size": 119,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "rtsp",
+    "strategy": "tcp_segmentation_evasion",
+    "size": 119,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "rtsp",
+    "strategy": "range_time_format_abuse",
+    "size": 173,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "radius",
+    "strategy": "authenticator_manipulation",
+    "size": 17,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "radius",
+    "strategy": "attribute_tlv_overflow",
+    "size": 685,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "radius",
+    "strategy": "user_password_encryption_abuse",
+    "size": 80,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "radius",
+    "strategy": "vendor_specific_overflow",
+    "size": 81,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "radius",
+    "strategy": "wimax_continuation_attack",
+    "size": 76,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "radius",
+    "strategy": "eap_message_fragmentation",
+    "size": 2091,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "radius",
+    "strategy": "message_authenticator_malform",
+    "size": 93,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "radius",
+    "strategy": "extended_attribute_abuse",
+    "size": 118,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "radius",
+    "strategy": "length_field_desync",
+    "size": 57,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "radius",
+    "strategy": "code_confusion",
+    "size": 57,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "radius",
+    "strategy": "proxy_state_injection",
+    "size": 467,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "radius",
+    "strategy": "coa_disconnect_abuse",
+    "size": 26,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "radius",
+    "strategy": "accounting_desync",
+    "size": 72,
+    "canary_in_raw": false,
+    "snort_detected": true,
+    "verdict": "DETECTED"
+  },
+  {
+    "proto": "radius",
+    "strategy": "nas_filter_rule_crash",
+    "size": 330,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "radius",
+    "strategy": "ip_frag_cache_exhaustion",
+    "size": 16000,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "radius",
+    "strategy": "udp_session_spray",
+    "size": 24600,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tacacs",
+    "strategy": "header_manipulation",
+    "size": 42,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tacacs",
+    "strategy": "length_field_overflow",
+    "size": 42,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tacacs",
+    "strategy": "obfuscation_confusion",
+    "size": 33,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "tacacs",
+    "strategy": "authentication_start_fuzz",
+    "size": 42,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tacacs",
+    "strategy": "authentication_continue_fuzz",
+    "size": 40,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tacacs",
+    "strategy": "authorization_arg_overflow",
+    "size": 59,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tacacs",
+    "strategy": "accounting_flag_confusion",
+    "size": 89,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tacacs",
+    "strategy": "session_state_desync",
+    "size": 213,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tacacs",
+    "strategy": "single_connection_abuse",
+    "size": 108,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tacacs",
+    "strategy": "bit_flip_attack",
+    "size": 89,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tacacs",
+    "strategy": "session_id_collision_replay",
+    "size": 84,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tacacs",
+    "strategy": "follow_status_abuse",
+    "size": 10038,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tacacs",
+    "strategy": "oversized_field_bomb",
+    "size": 7176,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tacacs",
+    "strategy": "tcp_segmentation_evasion",
+    "size": 33,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "tacacs",
+    "strategy": "flow_cache_exhaustion",
+    "size": 6600,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "tacacs",
+    "strategy": "tcp_overlap_desync",
+    "size": 91,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "tacacs",
+    "strategy": "segment_queue_exhaustion",
+    "size": 4333,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "tacacs",
+    "strategy": "reassembly_policy_confusion",
+    "size": 86,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tacacs",
+    "strategy": "embryonic_connection_flood",
+    "size": 3300,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "ldap",
+    "strategy": "ber_length_overflow",
+    "size": 25,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ldap",
+    "strategy": "ber_nonminimal_encoding",
+    "size": 46,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ldap",
+    "strategy": "ber_indefinite_constructed",
+    "size": 40,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "ldap",
+    "strategy": "truncated_tlv",
+    "size": 10,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ldap",
+    "strategy": "bind_auth_confusion",
+    "size": 49,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ldap",
+    "strategy": "search_filter_bomb",
+    "size": 55,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ldap",
+    "strategy": "search_request_malform",
+    "size": 60,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ldap",
+    "strategy": "message_id_confusion",
+    "size": 17,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ldap",
+    "strategy": "modify_add_dn_overflow",
+    "size": 2546,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ldap",
+    "strategy": "extended_starttls_abuse",
+    "size": 51,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ldap",
+    "strategy": "control_injection",
+    "size": 558,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ldap",
+    "strategy": "nested_sequence_bomb",
+    "size": 2257,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "ldap",
+    "strategy": "tcp_segment_evasion",
+    "size": 42,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "ldap",
+    "strategy": "version_pdu_tag_confusion",
+    "size": 34,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "cifs",
+    "strategy": "dialect_negotiation",
+    "size": 1709,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "cifs",
+    "strategy": "header_manipulation",
+    "size": 51,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "cifs",
+    "strategy": "wordcount_bytecount_desync",
+    "size": 94,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "cifs",
+    "strategy": "andx_chain_abuse",
+    "size": 132,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "cifs",
+    "strategy": "transaction_fragmentation",
+    "size": 161,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "cifs",
+    "strategy": "named_pipe_mailslot",
+    "size": 1463,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "cifs",
+    "strategy": "authentication_attack",
+    "size": 421,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "cifs",
+    "strategy": "oplock_state_confusion",
+    "size": 106,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "cifs",
+    "strategy": "dfs_referral_attack",
+    "size": 193,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "cifs",
+    "strategy": "signing_bypass",
+    "size": 96,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "cifs",
+    "strategy": "nbt_session_layer",
+    "size": 72,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "cifs",
+    "strategy": "file_attribute_ea_overflow",
+    "size": 56634,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "cifs",
+    "strategy": "deprecated_command_abuse",
+    "size": 100,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "cifs",
+    "strategy": "tcp_segmentation_evasion",
+    "size": 55,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "sunrpc",
+    "strategy": "xdr_string_overflow",
+    "size": 138,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sunrpc",
+    "strategy": "xdr_array_overflow",
+    "size": 108,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sunrpc",
+    "strategy": "record_marking_abuse",
+    "size": 69,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sunrpc",
+    "strategy": "rpc_header_manipulation",
+    "size": 40,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sunrpc",
+    "strategy": "auth_sys_overflow",
+    "size": 316,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sunrpc",
+    "strategy": "auth_flavor_confusion",
+    "size": 208,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sunrpc",
+    "strategy": "portmap_abuse",
+    "size": 40,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sunrpc",
+    "strategy": "nfs_compound_overflow",
+    "size": 88,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sunrpc",
+    "strategy": "program_version_mismatch",
+    "size": 40,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sunrpc",
+    "strategy": "xdr_padding_violation",
+    "size": 49,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sunrpc",
+    "strategy": "tcp_segmentation_evasion",
+    "size": 65,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "sunrpc",
+    "strategy": "reply_fuzzing",
+    "size": 435,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sunrpc",
+    "strategy": "null_procedure_abuse",
+    "size": 16000,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "sunrpc",
+    "strategy": "rpc_service_daemon_fuzz",
+    "size": 172,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "telnet",
+    "strategy": "iac_sequence_injection",
+    "size": 63,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "telnet",
+    "strategy": "option_negotiation_flood",
+    "size": 4848,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "telnet",
+    "strategy": "subnegotiation_overflow",
+    "size": 1603,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "telnet",
+    "strategy": "naws_window_manipulation",
+    "size": 9,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "telnet",
+    "strategy": "terminal_type_overflow",
+    "size": 3209,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "telnet",
+    "strategy": "environment_variable_injection",
+    "size": 30,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "telnet",
+    "strategy": "authentication_option_abuse",
+    "size": 9,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "telnet",
+    "strategy": "encrypt_option_exploit",
+    "size": 30,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "telnet",
+    "strategy": "command_injection_evasion",
+    "size": 34,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "telnet",
+    "strategy": "line_ending_confusion",
+    "size": 30,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "telnet",
+    "strategy": "data_mark_urgent_abuse",
+    "size": 69,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "telnet",
+    "strategy": "iac_escape_desync",
+    "size": 21,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "telnet",
+    "strategy": "comport_option_overflow",
+    "size": 5923,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "telnet",
+    "strategy": "tcp_segmentation_evasion",
+    "size": 37,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "tftp",
+    "strategy": "rrq_filename_overflow",
+    "size": 2697,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tftp",
+    "strategy": "wrq_filename_overflow",
+    "size": 2682,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tftp",
+    "strategy": "directory_traversal_injection",
+    "size": 36,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tftp",
+    "strategy": "error_packet_overflow",
+    "size": 5,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tftp",
+    "strategy": "opcode_abuse",
+    "size": 225,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tftp",
+    "strategy": "option_negotiation_abuse",
+    "size": 69,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tftp",
+    "strategy": "mode_string_abuse",
+    "size": 15,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tftp",
+    "strategy": "block_number_manipulation",
+    "size": 2004,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tftp",
+    "strategy": "malformed_packet_structure",
+    "size": 1,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tftp",
+    "strategy": "ip_fragmentation_evasion",
+    "size": 1423,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "EVADED!"
+  },
+  {
+    "proto": "tftp",
+    "strategy": "multicast_option_abuse",
+    "size": 5037,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tftp",
+    "strategy": "unsolicited_response_injection",
+    "size": 516,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tftp",
+    "strategy": "tid_spoofing_confusion",
+    "size": 72,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "tftp",
+    "strategy": "pxe_boot_payload_injection",
+    "size": 70,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "EVADED"
+  },
+  {
+    "proto": "icmp",
+    "strategy": "fragment_reassembly_evasion",
+    "size": 5,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmp",
+    "strategy": "embedded_header_confusion",
+    "size": 36,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmp",
+    "strategy": "type_code_matrix_attack",
+    "size": 40,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmp",
+    "strategy": "checksum_desync",
+    "size": 64,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmp",
+    "strategy": "redirect_route_injection",
+    "size": 36,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmp",
+    "strategy": "tunnel_payload_evasion",
+    "size": 27,
+    "canary_in_raw": true,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmp",
+    "strategy": "pmtud_blackhole",
+    "size": 36,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmp",
+    "strategy": "unreachable_state_exhaustion",
+    "size": 36,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmp",
+    "strategy": "ip_option_header_shift",
+    "size": 96,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmp",
+    "strategy": "ping_of_death_reassembly",
+    "size": 5,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmp",
+    "strategy": "rate_limit_bypass",
+    "size": 5,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmp",
+    "strategy": "echo_id_seq_desync",
+    "size": 64,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmp",
+    "strategy": "source_quench_deprecated",
+    "size": 24,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmp",
+    "strategy": "timestamp_address_mask_probe",
+    "size": 12,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmpv6",
+    "strategy": "ndp_ra_spoofing",
+    "size": 56,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmpv6",
+    "strategy": "ndp_ns_na_confusion",
+    "size": 32,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmpv6",
+    "strategy": "ndp_option_tlv_overflow",
+    "size": 20,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmpv6",
+    "strategy": "fragment_header_evasion",
+    "size": 64,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmpv6",
+    "strategy": "extension_header_chain",
+    "size": 120,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmpv6",
+    "strategy": "pseudo_header_checksum_desync",
+    "size": 64,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmpv6",
+    "strategy": "mld_multicast_abuse",
+    "size": 28,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmpv6",
+    "strategy": "packet_too_big_pmtud",
+    "size": 56,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmpv6",
+    "strategy": "parameter_problem_pointer",
+    "size": 56,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmpv6",
+    "strategy": "echo_tunnel_covert_channel",
+    "size": 42,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmpv6",
+    "strategy": "redirect_route_hijack",
+    "size": 48,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmpv6",
+    "strategy": "dest_unreachable_state_exhaustion",
+    "size": 56,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmpv6",
+    "strategy": "hop_limit_manipulation",
+    "size": 96,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  },
+  {
+    "proto": "icmpv6",
+    "strategy": "rpl_dao_dis_attack",
+    "size": 8,
+    "canary_in_raw": false,
+    "snort_detected": false,
+    "verdict": "SKIP"
+  }
+]

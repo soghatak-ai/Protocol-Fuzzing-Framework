@@ -7,6 +7,7 @@ import queue
 import hashlib
 import traceback
 import threading
+import subprocess as _subprocess
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from flask import Flask, render_template, jsonify, Response, send_file, request
@@ -290,6 +291,20 @@ def _derive_title(files: dict) -> str:
     return f"{os.path.basename(names[0])} +{len(names) - 1} more"
 
 
+_BSON_INT_MAX = (1 << 63) - 1
+_BSON_INT_MIN = -(1 << 63)
+
+def _clamp_ints(obj):
+    """Recursively clamp Python ints that exceed BSON 64-bit range to strings."""
+    if isinstance(obj, dict):
+        return {k: _clamp_ints(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_clamp_ints(v) for v in obj]
+    if isinstance(obj, int) and not isinstance(obj, bool):
+        if obj > _BSON_INT_MAX or obj < _BSON_INT_MIN:
+            return str(obj)
+    return obj
+
 def db_create_conversation(title, codebase_hash, files, code_context, analysis):
     if not mongo_ok():
         print("[DB] create_conversation skipped — MongoDB not available")
@@ -301,6 +316,7 @@ def db_create_conversation(title, codebase_hash, files, code_context, analysis):
     except (TypeError, ValueError) as e:
         print(f"[DB] WARNING: analysis serialization issue: {e}")
         safe_analysis = {}
+    safe_analysis = _clamp_ints(safe_analysis)
     doc = {
         "_id": uuid.uuid4().hex,
         "title": title,
@@ -2649,6 +2665,26 @@ def ai_test_inject():
     return jsonify({"status": "injected" if data else "cleared"})
 
 
+@app.route("/api/ai/resave", methods=["POST"])
+def ai_resave():
+    """Retry saving in-memory analysis results to MongoDB."""
+    results = analysis_state.get("results")
+    if not results:
+        return jsonify({"error": "No results in memory to save"}), 400
+    all_files = dict(analysis_state.get("files", {}))
+    conv_id = db_create_conversation(
+        _derive_title(list(all_files.keys()) if all_files else ["unknown"]),
+        compute_codebase_hash(all_files) if all_files else "unknown",
+        list(all_files.keys()),
+        results.get("code_context", ""),
+        results,
+    )
+    if conv_id:
+        results["conversation_id"] = conv_id
+        return jsonify({"status": "saved", "conversation_id": conv_id})
+    return jsonify({"error": "MongoDB save failed — check server logs"}), 500
+
+
 @app.route("/api/ai/clear", methods=["POST"])
 def ai_clear():
     analysis_state["files"].clear()
@@ -2815,6 +2851,470 @@ def ai_analyze_v2():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
+
+
+# ---------------------------------------------------------------------------
+# Multi-Protocol Attack (Snort Blinder UI)
+# ---------------------------------------------------------------------------
+_BLINDER_PROTOCOL_REGISTRY = {
+    "dns":     ("udp",  53),   "dhcp":    ("udp",  67),
+    "snmp":    ("udp",  161),  "sip":     ("udp",  5060),
+    "mgcp":    ("udp",  2427), "radius":  ("udp",  1812),
+    "sunrpc":  ("udp",  111),  "tftp":    ("udp",  69),
+    "http":    ("tcp",  80),   "ftp":     ("tcp",  21),
+    "smtp":    ("tcp",  25),   "ssh":     ("tcp",  22),
+    "smb2":    ("tcp",  445),  "http2":   ("tcp",  80),
+    "dcerpc":  ("tcp",  135),  "rtsp":    ("tcp",  554),
+    "tacacs":  ("tcp",  49),   "ldap":    ("tcp",  389),
+    "cifs":    ("tcp",  445),  "telnet":  ("tcp",  23),
+    "icmp":    ("icmp", 0),
+}
+
+_BLINDER_INTENSITY = {
+    1: {"udp": 3,  "tcp": 2,  "label": "Normal"},
+    2: {"udp": 6,  "tcp": 4,  "label": "Elevated"},
+    3: {"udp": 10, "tcp": 6,  "label": "High"},
+    4: {"udp": 15, "tcp": 8,  "label": "Extreme"},
+    5: {"udp": 20, "tcp": 12, "label": "Maximum"},
+}
+
+# Snort alert log — shared Docker volume mounted at /shared/snort_logs (kali)
+# and /var/log/snort (firewall).  Falls back to local path if running on host.
+_SNORT_LOG_PATHS = [
+    "/shared/snort_logs/alert_fast.txt",   # inside kali via shared volume
+    "/var/log/snort/alert_fast.txt",        # if running directly on firewall
+]
+_CANARY_SIDS = ["1000001", "1000006"]  # TCP and UDP canary rules
+
+
+def _find_snort_log():
+    """Return the first readable Snort alert log path, or None."""
+    for p in _SNORT_LOG_PATHS:
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def _count_alerts(log_path, pattern=None):
+    """Count lines matching pattern in Snort alert log (fast, via grep/wc)."""
+    if not log_path or not os.path.exists(log_path):
+        return 0
+    try:
+        if pattern is None:
+            r = _subprocess.run(["wc", "-l", log_path],
+                                capture_output=True, text=True, timeout=3)
+            return int(r.stdout.strip().split()[0]) if r.returncode == 0 else 0
+        else:
+            r = _subprocess.run(["grep", "-c", "-F", pattern, log_path],
+                                capture_output=True, text=True, timeout=3)
+            return int(r.stdout.strip()) if r.returncode == 0 else 0
+    except Exception:
+        return 0
+
+
+def _count_canary_alerts(log_path):
+    """Count Snort alert lines matching any canary SID (fast, via grep)."""
+    if not log_path or not os.path.exists(log_path):
+        return 0
+    try:
+        # grep -c with alternation for all canary SIDs
+        pattern = r"\|".join(_CANARY_SIDS)
+        r = _subprocess.run(["grep", "-c", pattern, log_path],
+                            capture_output=True, text=True, timeout=3)
+        return int(r.stdout.strip()) if r.returncode == 0 else 0
+    except Exception:
+        return 0
+
+
+def _clear_snort_log(log_path):
+    """Truncate the Snort alert log for a clean test."""
+    if log_path and os.path.exists(log_path):
+        try:
+            with open(log_path, "w") as f:
+                f.truncate(0)
+        except Exception:
+            pass
+
+
+def _send_canary(target_ip, port=80):
+    """Send a UDP packet containing the EICAR canary string that Snort rule
+    SID 1000006 must match.  UDP is fire-and-forget — never blocks."""
+    import socket as _sock
+    try:
+        s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
+        s.sendto(b"EICAR-STANDARD-ANTIVIRUS-TEST-FILE!", (target_ip, port))
+        s.close()
+        return True
+    except Exception:
+        return False
+
+
+multiattack_state = {
+    "running": False,
+    "stop_requested": False,
+    "config": {},
+    "start_time": None,
+    "elapsed": 0,
+    "pps": 0,
+    "mbps": 0,
+    "total_packets": 0,
+    "total_bytes": 0,
+    "per_proto": {},
+    "errors": {},
+    "canary_sent": 0,
+    "canary_detected": 0,
+    "snort_alerts": 0,
+    "detection_rate": 100.0,
+    "verdict": "IDLE",
+    "log": [],
+    "active_protos": 0,
+}
+
+_multiattack_thread = None
+_multiattack_procs = []
+
+
+def _multiattack_log(msg):
+    multiattack_state["log"].append({
+        "time": time.strftime("%H:%M:%S"),
+        "msg": msg
+    })
+    if len(multiattack_state["log"]) > 200:
+        multiattack_state["log"] = multiattack_state["log"][-200:]
+    print(f"[MULTI-ATTACK] {msg}")
+
+
+def _multiattack_worker(target_ip, protocols, duration, intensity, processes):
+    """
+    Pure live-network flood.  Spawns snort_blinder.py --flood sub-processes
+    locally.  Packets are sent directly from this machine to <target_ip>
+    via real sockets — no Docker orchestration needed.
+    """
+    global _multiattack_procs
+    try:
+        multiattack_state["running"] = True
+        multiattack_state["stop_requested"] = False
+        multiattack_state["start_time"] = time.time()
+        multiattack_state["log"] = []
+        multiattack_state["verdict"] = "WARMING"
+        multiattack_state["total_packets"] = 0
+        multiattack_state["total_bytes"] = 0
+        multiattack_state["per_proto"] = {}
+        multiattack_state["errors"] = {}
+        multiattack_state["canary_sent"] = 0
+        multiattack_state["canary_detected"] = 0
+        multiattack_state["snort_alerts"] = 0
+        multiattack_state["detection_rate"] = 100.0
+
+        _multiattack_log(f"Target: {target_ip}")
+        _multiattack_log(f"Protocols: {', '.join(p.upper() for p in protocols)}")
+
+        # Detect Snort alert log via shared volume
+        snort_log = _find_snort_log()
+        snort_available = snort_log is not None
+        if snort_available:
+            _multiattack_log(f"Snort alert log found: {snort_log}")
+            _clear_snort_log(snort_log)
+        else:
+            _multiattack_log("Snort alert log NOT available — verdict will be throughput-only")
+
+        # Quick connectivity check
+        import socket as _socket
+        _multiattack_log("Testing connectivity...")
+        try:
+            s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+            s.settimeout(2)
+            s.sendto(b"\x00", (target_ip, 53))
+            s.close()
+            _multiattack_log(f"Target {target_ip} reachable")
+        except Exception as e:
+            _multiattack_log(f"Warning: connectivity probe ({e}) — continuing anyway")
+
+        # Canary pre-test: send a known-bad request that Snort MUST detect
+        if snort_available:
+            _multiattack_log("Sending canary probe (EICAR via UDP+TCP)...")
+            pre_alerts = _count_canary_alerts(snort_log)
+            _send_canary(target_ip)
+            time.sleep(2)
+            post_alerts = _count_canary_alerts(snort_log)
+            if post_alerts > pre_alerts:
+                _multiattack_log(f"Canary DETECTED by Snort ({post_alerts - pre_alerts} alerts)")
+            else:
+                _multiattack_log("Canary NOT detected — Snort may not be running or rule missing")
+            _clear_snort_log(snort_log)
+
+        # Clean old stats files
+        _subprocess.run(["bash", "-c", "rm -f /tmp/blinder_stats_*.json"],
+                        capture_output=True, timeout=5)
+
+        # Build process groups — distribute protocols across N processes
+        preset = _BLINDER_INTENSITY.get(intensity, _BLINDER_INTENSITY[1])
+        n_procs = processes
+
+        if n_procs <= len(protocols):
+            proto_groups = [[] for _ in range(n_procs)]
+            for i, p in enumerate(protocols):
+                proto_groups[i % n_procs].append(p)
+        else:
+            base_n = min(n_procs, len(protocols))
+            proto_groups = [[] for _ in range(base_n)]
+            for i, p in enumerate(protocols):
+                proto_groups[i % base_n].append(p)
+            base_groups = list(proto_groups)
+            while len(proto_groups) < n_procs:
+                proto_groups.append(list(base_groups[len(proto_groups) % len(base_groups)]))
+
+        # Estimate total thread count
+        total_workers = 0
+        for g in proto_groups:
+            for p in g:
+                t = _BLINDER_PROTOCOL_REGISTRY[p][0]
+                if t == "udp":
+                    total_workers += preset["udp"]
+                elif t == "tcp":
+                    total_workers += preset["tcp"]
+                else:
+                    total_workers += 1
+
+        _multiattack_log(f"Intensity {intensity} [{preset['label']}] — "
+                         f"UDP: {preset['udp']} threads/proto, TCP: {preset['tcp']} conns/proto")
+        _multiattack_log(f"Launching {len(proto_groups)} processes (~{total_workers} workers)")
+
+        # Resolve script directory
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Launch flood sub-processes directly on this machine
+        stats_files = []
+        _multiattack_procs = []
+        for gi, group in enumerate(proto_groups):
+            sf = f"/tmp/blinder_stats_{gi}.json"
+            stats_files.append(sf)
+            proto_list = ",".join(group)
+            flood_cmd = (
+                f"cd {script_dir} && python3 Testing/snort_blinder.py "
+                f"--flood --target {target_ip} --duration {duration} "
+                f"--phase-duration 15 --intensity {intensity} "
+                f"--protocols {proto_list} --stats-file {sf}"
+            )
+            proc = _subprocess.Popen(
+                ["bash", "-c", flood_cmd],
+                stdout=_subprocess.PIPE, stderr=_subprocess.STDOUT, text=True
+            )
+            _multiattack_procs.append(proc)
+
+        _multiattack_log(f"All {len(proto_groups)} flood processes launched — firing at {target_ip}")
+
+        # Canary tracking — sent from app.py directly, not from snort_blinder
+        _canary_sent = 0
+        _canary_interval = 5  # seconds between canary probes
+        _last_canary_time = 0
+
+        # Monitor loop — read stats directly from local /tmp/ files
+        def _aggregate():
+            agg = {"elapsed": 0, "pps": 0, "mbps": 0, "per_proto": {},
+                   "canary_sent": 0, "total_packets": 0, "total_bytes": 0, "errors": {}}
+            for sf in stats_files:
+                try:
+                    with open(sf, "r") as fh:
+                        s = json.load(fh)
+                    agg["total_packets"] += s.get("total_packets", 0)
+                    agg["total_bytes"] += s.get("total_bytes", 0)
+                    agg["canary_sent"] += s.get("canary_sent", 0)
+                    agg["elapsed"] = max(agg["elapsed"], s.get("elapsed", 0))
+                    for p, c in s.get("per_proto", {}).items():
+                        agg["per_proto"][p] = agg["per_proto"].get(p, 0) + c
+                    for p, c in s.get("errors", {}).items():
+                        agg["errors"][p] = agg["errors"].get(p, 0) + c
+                except Exception:
+                    continue
+            el = max(agg["elapsed"], 1)
+            agg["pps"] = round(agg["total_packets"] / el)
+            agg["mbps"] = round((agg["total_bytes"] * 8) / (el * 1_000_000), 2)
+            return agg
+
+        while any(p.poll() is None for p in _multiattack_procs):
+            if multiattack_state["stop_requested"]:
+                _multiattack_log("Stop requested — terminating flood processes")
+                for p in _multiattack_procs:
+                    p.terminate()
+                break
+
+            snap = _aggregate()
+            pps = snap.get("pps", 0)
+
+            # Send canary probe every _canary_interval seconds
+            now = time.time()
+            if snort_available and (now - _last_canary_time) >= _canary_interval:
+                if _send_canary(target_ip):
+                    _canary_sent += 1
+                _last_canary_time = now
+
+            canary_sent = _canary_sent
+
+            # Read Snort alerts if available
+            if snort_available:
+                alerts = _count_alerts(snort_log, "[**]")
+                canary_detected = _count_canary_alerts(snort_log)
+                det_rate = min(round(canary_detected / canary_sent * 100, 1), 100.0) if canary_sent > 0 else 100.0
+
+                if canary_sent < 2:
+                    verdict = "WARMING"
+                elif det_rate >= 80:
+                    verdict = "DETECTING"
+                elif det_rate >= 30:
+                    verdict = "DEGRADED"
+                else:
+                    verdict = "BLINDED"
+            else:
+                alerts = 0
+                canary_detected = 0
+                det_rate = 0.0
+                verdict = "WARMING" if pps == 0 else "FLOODING"
+
+            multiattack_state.update({
+                "elapsed": round(time.time() - multiattack_state["start_time"]),
+                "pps": pps,
+                "mbps": snap.get("mbps", 0),
+                "total_packets": snap.get("total_packets", 0),
+                "total_bytes": snap.get("total_bytes", 0),
+                "per_proto": snap.get("per_proto", {}),
+                "errors": snap.get("errors", {}),
+                "canary_sent": canary_sent,
+                "canary_detected": canary_detected,
+                "snort_alerts": alerts,
+                "detection_rate": det_rate,
+                "verdict": verdict,
+                "active_protos": len([p for p, c in snap.get("per_proto", {}).items() if c > 0]),
+            })
+
+            time.sleep(2)
+
+        # Final stats
+        for p in _multiattack_procs:
+            try:
+                p.wait(timeout=10)
+            except Exception:
+                p.kill()
+
+        snap = _aggregate()
+        canary_sent = _canary_sent
+        if snort_available:
+            alerts = _count_alerts(snort_log, "[**]")
+            canary_detected = _count_canary_alerts(snort_log)
+            det_rate = min(round(canary_detected / canary_sent * 100, 1), 100.0) if canary_sent > 0 else 100.0
+            if canary_sent == 0:
+                verdict = "NO DATA"
+            elif det_rate >= 80:
+                verdict = "WITHSTOOD"
+            elif det_rate >= 30:
+                verdict = "DEGRADED"
+            else:
+                verdict = "BLINDED"
+        else:
+            alerts = 0
+            canary_detected = 0
+            det_rate = 0.0
+            verdict = "COMPLETE"
+
+        multiattack_state.update({
+            "elapsed": round(time.time() - multiattack_state["start_time"]),
+            "pps": snap.get("pps", 0),
+            "mbps": snap.get("mbps", 0),
+            "total_packets": snap.get("total_packets", 0),
+            "total_bytes": snap.get("total_bytes", 0),
+            "per_proto": snap.get("per_proto", {}),
+            "errors": snap.get("errors", {}),
+            "canary_sent": canary_sent,
+            "canary_detected": canary_detected,
+            "snort_alerts": alerts,
+            "detection_rate": det_rate,
+            "verdict": verdict,
+            "active_protos": len([p for p, c in snap.get("per_proto", {}).items() if c > 0]),
+        })
+        _multiattack_log(f"FINISHED — {verdict} | {snap.get('total_packets',0):,} pkts, "
+                         f"{snap.get('pps',0):,} pps | Snort alerts: {alerts}, "
+                         f"canary: {canary_detected}/{canary_sent} ({det_rate}%)")
+
+    except Exception as e:
+        _multiattack_log(f"Error: {e}")
+        multiattack_state["verdict"] = "ERROR"
+        traceback.print_exc()
+    finally:
+        multiattack_state["running"] = False
+        _multiattack_procs = []
+
+
+@app.route("/api/multiattack/protocols", methods=["GET"])
+def api_multiattack_protocols():
+    protos = []
+    for name, (transport, port) in sorted(_BLINDER_PROTOCOL_REGISTRY.items()):
+        protos.append({"name": name, "transport": transport, "port": port})
+    return jsonify({"protocols": protos})
+
+
+@app.route("/api/multiattack/start", methods=["POST"])
+def api_multiattack_start():
+    global _multiattack_thread
+    if multiattack_state["running"]:
+        return jsonify({"error": "Attack already running"}), 400
+
+    body = request.json or {}
+    target_ip = body.get("target_ip", "").strip()
+    if not target_ip:
+        return jsonify({"error": "Target IP is required"}), 400
+
+    protocols = body.get("protocols", list(_BLINDER_PROTOCOL_REGISTRY.keys()))
+    duration = body.get("duration", 60)
+    intensity = body.get("intensity", 3)
+    processes = body.get("processes", 6)
+
+    # Validate
+    valid_protos = [p for p in protocols if p in _BLINDER_PROTOCOL_REGISTRY]
+    if not valid_protos:
+        return jsonify({"error": "No valid protocols selected"}), 400
+    if intensity < 1 or intensity > 5:
+        intensity = 3
+    if processes < 1 or processes > 50:
+        processes = 6
+    if duration < 10 or duration > 600:
+        duration = 60
+
+    multiattack_state["config"] = {
+        "target_ip": target_ip,
+        "protocols": valid_protos,
+        "duration": duration,
+        "intensity": intensity,
+        "processes": processes,
+    }
+
+    # Set state immediately so the UI knows we're starting
+    multiattack_state["running"] = True
+    multiattack_state["verdict"] = "WARMING"
+    multiattack_state["elapsed"] = 0
+    multiattack_state["total_packets"] = 0
+    multiattack_state["pps"] = 0
+    multiattack_state["log"] = []
+
+    _multiattack_thread = threading.Thread(
+        target=_multiattack_worker,
+        args=(target_ip, valid_protos, duration, intensity, processes),
+        daemon=True
+    )
+    _multiattack_thread.start()
+    return jsonify({"status": "started", "config": multiattack_state["config"]})
+
+
+@app.route("/api/multiattack/stop", methods=["POST"])
+def api_multiattack_stop():
+    if not multiattack_state["running"]:
+        return jsonify({"error": "No attack running"}), 400
+    multiattack_state["stop_requested"] = True
+    return jsonify({"status": "stopping"})
+
+
+@app.route("/api/multiattack/status", methods=["GET"])
+def api_multiattack_status():
+    return jsonify(multiattack_state)
 
 
 if __name__ == "__main__":
