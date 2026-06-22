@@ -67,8 +67,16 @@ RUN mkdir -p /var/log/snort
 RUN printf "\nnetwork = (network or {})\nnetwork.checksum_eval = 'none'\nalert_fast = { file = true }\n" \
     >> /usr/local/etc/snort/snort.lua
 
+# Enable builtin rules and include local canary rules in Snort config
+RUN printf "\nenable_builtin_rules = true\nips = { include = '/etc/snort/local.rules' }\n" \
+    >> /usr/local/etc/snort/snort.lua
+
+# Add UDP canary rule
+RUN printf 'alert udp any any -> any any ( msg:"EICAR canary UDP"; content:"EICAR-STANDARD-ANTIVIRUS-TEST-FILE!",nocase; sid:1000006; rev:1; )\n' \
+    >> /etc/snort/local.rules
+
 # Expose web terminal
 EXPOSE 7681
 
-# On startup, route traffic and start the web terminal
-CMD bash -c "iptables -A FORWARD -j ACCEPT && ttyd -p 7681 bash"
+# On startup, route traffic, start Snort on eth1, and start the web terminal
+CMD bash -c "iptables -A FORWARD -j ACCEPT && snort -c /usr/local/etc/snort/snort.lua -i eth1 -l /var/log/snort -A fast -k none -D && ttyd -p 7681 bash"

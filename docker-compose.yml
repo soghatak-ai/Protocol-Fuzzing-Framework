@@ -34,6 +34,7 @@ services:
       bash -c "
       apt-get update && 
       apt-get install -y python3 python3-pip python3-venv iproute2 iputils-ping tcpdump &&
+      pip3 install flask python-dotenv openai pymongo psutil tiktoken chromadb numpy scikit-learn &&
       ip route del default &&
       ip route add default via 172.20.0.254 &&
       sleep infinity

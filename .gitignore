@@ -9,5 +9,6 @@ target.pipe
 generate_ppt.py
 .env
 vuln_target/
-Testing/
+Testing/*
+!Testing/snort_blinder.py
 templates/*.bak
