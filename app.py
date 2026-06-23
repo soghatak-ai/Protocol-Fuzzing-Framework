@@ -2941,7 +2941,7 @@ class FtdSnortStats:
             self._drain(2.0)
 
             # Verify CLISH works with a test command
-            test = self._clish_exec_raw("show version", timeout=8, min_wait=3.0)
+            test = self._clish_exec_raw("show version", wait=5.0)
             clean_test = self._strip_ansi(test) if test else ""
             if len(clean_test) > 10:
                 self._log(f"CLISH verified ({len(clean_test)} chars)")
@@ -2974,22 +2974,16 @@ class FtdSnortStats:
     def _strip_ansi(cls, text):
         return cls._ANSI_RE.sub('', text)
 
-    def _clish_exec_raw(self, cmd, timeout=8, min_wait=2.5, silence=0.8):
-        """Send a CLISH command and collect output.
+    def _clish_exec_raw(self, cmd, wait=4.0):
+        """Send a CLISH command and collect ALL output for `wait` seconds.
 
-        CRITICAL TIMING:
-        - CLISH echoes the command immediately (~50ms)
-        - Then takes 1-2s to process before sending output
-        - Without min_wait, silence detection triggers on the
-          echo gap and returns before output even starts
+        CLISH timing is unpredictable:
+        - Echoes the command immediately (~50ms)
+        - Then takes 1-5s to process before sending output
+        - Silence detection CANNOT work because the echo-to-output
+          gap is longer than any reasonable silence threshold
 
-        Args:
-            cmd:      CLISH command string
-            timeout:  Max total wait (seconds)
-            min_wait: Always wait at least this long before
-                      allowing silence detection to trigger
-            silence:  After min_wait, break when no new data
-                      for this many seconds
+        Simple fixed-duration drain is the only reliable approach.
         """
         if not self._shell or self._shell.closed:
             return None
@@ -2997,23 +2991,7 @@ class FtdSnortStats:
             if self._shell.recv_ready():
                 self._shell.recv(65535)
             self._shell.send(f"{cmd}\n")
-            output = ""
-            start = time.time()
-            deadline = start + timeout
-            last_data = start
-            while time.time() < deadline:
-                time.sleep(0.1)
-                if self._shell.recv_ready():
-                    chunk = self._shell.recv(65535).decode("utf-8", errors="ignore")
-                    output += chunk
-                    last_data = time.time()
-                else:
-                    elapsed = time.time() - start
-                    gap = time.time() - last_data
-                    # Only check silence AFTER min_wait has passed
-                    if elapsed >= min_wait and output and gap >= silence:
-                        break
-            return output if output else None
+            return self._drain(wait)
         except Exception as e:
             self._log(f"exec failed: {e}")
             return None
@@ -3021,14 +2999,14 @@ class FtdSnortStats:
     def get_stats(self):
         """Run 'show snort statistics' and parse key counters.
         Returns dict with keys: passed, blocked, bypassed_down, bypassed_busy."""
-        raw = self._clish_exec_raw("show snort statistics", timeout=8, min_wait=2.5, silence=0.8)
+        raw = self._clish_exec_raw("show snort statistics", wait=5.0)
         if not raw:
             now = time.time()
             if (now - self._last_reconnect) >= self._reconnect_cooldown:
                 self._last_reconnect = now
                 self._log("No output — reconnecting")
                 if self._reconnect():
-                    raw = self._clish_exec_raw("show snort statistics", timeout=8, min_wait=2.5, silence=0.8)
+                    raw = self._clish_exec_raw("show snort statistics", wait=5.0)
             if not raw:
                 self._log("get_stats: no output")
                 return None
@@ -3064,7 +3042,7 @@ class FtdSnortStats:
         return stats if stats else None
 
     def clear_stats(self):
-        out = self._clish_exec_raw("clear snort statistics", timeout=6, min_wait=2.0, silence=0.8)
+        out = self._clish_exec_raw("clear snort statistics", wait=4.0)
         clean = self._strip_ansi(out) if out else ""
         self._log(f"clear_stats done ({len(clean)} chars)")
 
