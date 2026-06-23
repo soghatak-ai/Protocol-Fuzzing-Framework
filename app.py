@@ -2910,7 +2910,10 @@ class FtdSnortStats:
         self._alert_glob = None  # glob for per-instance perfmon base CSVs
         self._alert_files = []   # resolved perf_monitor_base.csv paths (1 per instance)
         self._alert_col = None   # 0-based column index of detection.alerts
-        self._alert_baseline = 0 # summed alert count captured at connect (for deltas)
+        self._alert_baseline = 0 # summed alert count at connect (cumulative mode only)
+        self._alert_cumulative = True  # detected: True=running total, False=per-interval
+        self._alert_since_ts = 0 # epoch cutoff for per-interval summation
+        self._perf_interval = 0  # seconds between perfmon CSV samples (empirical)
         self._log_fn = log_fn or (lambda msg: None)
 
     def _log(self, msg):
@@ -3032,33 +3035,150 @@ class FtdSnortStats:
                 return
 
             self._alert_col = idx
-            self._alert_baseline = self.get_alerts(absolute=True) or 0
-            self._log(f"Alert col[{idx}]='{cols[idx]}', "
-                       f"{len(files)} instances, baseline={self._alert_baseline}")
+
+            # Detect cumulative (running total) vs per-interval (resets each
+            # sample).  Inspect recent rows of one instance: a running total
+            # is non-decreasing; per-interval values rise and fall.
+            awk_col = idx + 1  # awk fields are 1-based
+            sample = self._exec(
+                f"tail -n 20 \"{files[0]}\" | awk -F',' '{{print ${awk_col}}}'",
+                timeout=10)
+            vals = []
+            for x in (sample or "").split("\n"):
+                x = x.strip()
+                try:
+                    vals.append(int(float(x)))
+                except ValueError:
+                    pass
+            # Per-interval if any row is smaller than a previous one
+            self._alert_cumulative = not any(
+                vals[i] > vals[i + 1] for i in range(len(vals) - 1))
+            mode = "cumulative" if self._alert_cumulative else "per-interval"
+
+            # Empirically measure the perfmon flush interval = gap between
+            # the last two sample timestamps in one instance file.
+            self._perf_interval = self._detect_interval()
+
+            if self._alert_cumulative:
+                self._alert_baseline = self._sum_last_rows() or 0
+                self._log(f"Alert col[{idx}]='{cols[idx]}' mode={mode} "
+                           f"{len(files)} instances baseline={self._alert_baseline} "
+                           f"interval~{self._perf_interval}s")
+            else:
+                self._alert_since_ts = self._latest_timestamp() or 0
+                self._log(f"Alert col[{idx}]='{cols[idx]}' mode={mode} "
+                           f"{len(files)} instances since_ts={self._alert_since_ts} "
+                           f"interval~{self._perf_interval}s")
         except Exception as e:
             self._log(f"alert probe failed: {e}")
 
-    def get_alerts(self, absolute=False):
-        """Sum 'detection.alerts' across all Snort instances.
-        If absolute=False, returns the delta since connect baseline.
-        Returns None if no alert source is configured/readable."""
+    def _detect_interval(self):
+        """Seconds between perfmon samples = diff of last two timestamps."""
+        if not self._alert_files:
+            return 0
+        out = self._exec(f'tail -n 3 "{self._alert_files[0]}" | cut -d"," -f1',
+                         timeout=10)
+        ts = []
+        for x in (out or "").split("\n"):
+            x = x.strip()
+            try:
+                ts.append(int(float(x)))
+            except ValueError:
+                pass
+        return (ts[-1] - ts[-2]) if len(ts) >= 2 and ts[-1] > ts[-2] else 0
+
+    def wait_for_flush(self, timeout=None):
+        """After an attack, block until perfmon writes a NEW sample row so
+        the final interval's alerts are captured on disk.  Returns True if
+        a new row appeared, False on timeout / no source."""
         if not self._alert_glob or self._alert_col is None:
-            return None
-        # tail -q -n1 prints the last line of EACH matched file (no headers)
+            return False
+        # Allow ~1.5 sample intervals plus a small buffer (cap at 6 min)
+        if timeout is None:
+            timeout = min(int(self._perf_interval * 1.5) + 15, 360) \
+                if self._perf_interval else 90
+        start_latest = self._latest_timestamp()
+        self._log(f"Waiting up to {timeout}s for perfmon flush "
+                   f"(last sample ts={start_latest})...")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(min(5, max(1, self._perf_interval // 4 or 5)))
+            cur = self._latest_timestamp()
+            if cur > start_latest:
+                self._log(f"Perfmon flushed (new ts={cur})")
+                return True
+        self._log("Perfmon flush wait timed out — alert count may be partial")
+        return False
+
+    def reset_alert_baseline(self):
+        """Re-mark the alert baseline/cutoff at the moment fuzzing starts,
+        so get_alerts() counts only alerts generated during the attack."""
+        if self._alert_col is None:
+            return
+        if self._alert_cumulative:
+            self._alert_baseline = self._sum_last_rows() or 0
+            self._log(f"Alert baseline reset = {self._alert_baseline}")
+        else:
+            self._alert_since_ts = self._latest_timestamp() or 0
+            self._log(f"Alert cutoff reset = {self._alert_since_ts}")
+
+    def _sum_last_rows(self):
+        """Sum detection.alerts from the last row of each instance CSV."""
         out = self._exec(f'tail -q -n1 {self._alert_glob} 2>/dev/null', timeout=12)
         if not out:
             return None
-        total = 0
-        got_any = False
+        total, got = 0, False
         for line in out.split("\n"):
             parts = line.split(",")
             if self._alert_col < len(parts):
                 try:
                     total += int(float(parts[self._alert_col].strip()))
-                    got_any = True
+                    got = True
                 except (ValueError, IndexError):
                     pass
-        if not got_any:
+        return total if got else None
+
+    def _latest_timestamp(self):
+        """Largest #timestamp (field 1) currently present across instances."""
+        out = self._exec(f'tail -q -n1 {self._alert_glob} 2>/dev/null', timeout=12)
+        mx = 0
+        for line in (out or "").split("\n"):
+            parts = line.split(",")
+            if parts:
+                try:
+                    mx = max(mx, int(float(parts[0].strip())))
+                except (ValueError, IndexError):
+                    pass
+        return mx
+
+    def get_alerts(self, absolute=False):
+        """Return alert events caused by fuzzing.
+
+        Cumulative mode:   current_total - baseline.
+        Per-interval mode: sum of detection.alerts across ALL rows newer
+                           than the baseline timestamp, over all instances.
+        """
+        if not self._alert_glob or self._alert_col is None:
+            return None
+
+        if not self._alert_cumulative:
+            # Sum detection.alerts for rows with timestamp > cutoff (all files).
+            awk_col = self._alert_col + 1  # 1-based
+            t = 0 if absolute else self._alert_since_ts
+            cmd = (f"awk -F',' -v t={t} 'FNR>1 && ($1+0)>t "
+                   f"{{s+=${awk_col}}} END{{print s+0}}' "
+                   f"{self._alert_glob} 2>/dev/null")
+            out = self._exec(cmd, timeout=15)
+            if not out:
+                return None
+            try:
+                return int(float(out.strip().split("\n")[-1].strip()))
+            except (ValueError, IndexError):
+                return None
+
+        # Cumulative running total
+        total = self._sum_last_rows()
+        if total is None:
             return None
         return total if absolute else max(total - self._alert_baseline, 0)
 
@@ -3341,6 +3461,7 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes, ft
                 snort_available = True
                 _multiattack_log("FTD SSH connected — clearing Snort statistics...")
                 ftd_monitor.clear_stats()
+                ftd_monitor.reset_alert_baseline()  # mark alert cutoff at attack start
                 time.sleep(1)
                 baseline = ftd_monitor.get_stats()
                 if baseline:
@@ -3569,6 +3690,10 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes, ft
 
         # --- Final verdict ---
         if use_ftd_ssh and ftd_monitor:
+            # Wait for perfmon to flush so the final interval's alerts land on
+            # disk before we read them (perfmon writes on a fixed interval).
+            _multiattack_log("Waiting for Snort perfmon to flush final alerts...")
+            ftd_monitor.wait_for_flush()
             final_stats = ftd_monitor.get_stats()
             if final_stats:
                 passed = final_stats.get("passed", 0)
@@ -3578,6 +3703,12 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes, ft
                 total_inspected = passed + blocked
                 total_traffic = total_inspected + bypassed_down + bypassed_busy
                 alerts = blocked  # drop-action only; alert-only rules counted in passed
+                fuzz_alerts = final_stats.get("alerts")  # alert events during attack
+                clean_passed = final_stats.get("clean_passed")
+                if fuzz_alerts is not None:
+                    _multiattack_log(f"Snort alert events from fuzzing: {fuzz_alerts:,} "
+                                     f"| clean passed (no block, no alert): "
+                                     f"{(clean_passed if clean_passed is not None else passed):,}")
                 det_rate = round(total_inspected / max(total_traffic, 1) * 100, 2)
 
                 if bypassed_down > 0:
