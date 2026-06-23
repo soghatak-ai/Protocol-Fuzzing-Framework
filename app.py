@@ -2914,6 +2914,7 @@ class FtdSnortStats:
         self._alert_cumulative = True  # detected: True=running total, False=per-interval
         self._alert_since_ts = 0 # epoch cutoff for per-interval summation
         self._perf_interval = 0  # seconds between perfmon CSV samples (empirical)
+        self._sudo = ""          # 'sudo ' prefix if needed/available for root-owned files
         self._log_fn = log_fn or (lambda msg: None)
 
     def _log(self, msg):
@@ -2953,6 +2954,13 @@ class FtdSnortStats:
                 self._log("Expert bash ready")
             else:
                 self._log(f"Bash verify warning: {repr(verify[:80])}")
+
+            # Perfmon CSVs are root-owned; expert bash runs as admin.
+            # Detect passwordless sudo so we can read them.
+            sudo_test = self._exec("sudo -n id -u 2>&1", timeout=8)
+            tail_line = (sudo_test or "").strip().split("\n")[-1].strip() if sudo_test else ""
+            self._sudo = "sudo " if tail_line == "0" else ""
+            self._log(f"sudo available: {bool(self._sudo)} ({repr((sudo_test or '')[:60])})")
 
             # Probe: find a working way to pipe commands into clish
             self._probe_stats_command()
@@ -3003,20 +3011,21 @@ class FtdSnortStats:
         try:
             glob = ("/ngfw/var/sf/detection_engines/*/instance-*/"
                     "perf_monitor_base.csv")
-            listing = self._exec(f'ls {glob} 2>/dev/null', timeout=15)
+            listing = self._exec(f'{self._sudo}ls {glob} 2>&1', timeout=15)
             files = [l.strip() for l in (listing or "").split("\n")
                      if l.strip().endswith("perf_monitor_base.csv")]
             if not files:
-                self._log("No perf_monitor_base.csv found \u2014 alerts n/a")
+                self._log(f"No perf_monitor_base.csv found \u2014 alerts n/a "
+                           f"(ls said: {repr((listing or '')[:120])})")
                 return
             self._alert_glob = glob
             self._alert_files = files
             self._log(f"Found {len(files)} perfmon base file(s)")
 
             # Detect the detection.alerts column from one header
-            header = self._exec(f'head -1 "{files[0]}" 2>/dev/null', timeout=10)
+            header = self._exec(f'{self._sudo}head -1 "{files[0]}"', timeout=10)
             if not header or "," not in header:
-                self._log("Could not read perfmon header")
+                self._log(f"Could not read perfmon header: {repr((header or '')[:80])}")
                 return
             cols = [c.strip().lstrip("#").strip() for c in header.split(",")]
             idx = None
@@ -3041,7 +3050,7 @@ class FtdSnortStats:
             # is non-decreasing; per-interval values rise and fall.
             awk_col = idx + 1  # awk fields are 1-based
             sample = self._exec(
-                f"tail -n 20 \"{files[0]}\" | awk -F',' '{{print ${awk_col}}}'",
+                f"{self._sudo}tail -n 20 \"{files[0]}\" | awk -F',' '{{print ${awk_col}}}'",
                 timeout=10)
             vals = []
             for x in (sample or "").split("\n"):
@@ -3076,7 +3085,7 @@ class FtdSnortStats:
         """Seconds between perfmon samples = diff of last two timestamps."""
         if not self._alert_files:
             return 0
-        out = self._exec(f'tail -n 3 "{self._alert_files[0]}" | cut -d"," -f1',
+        out = self._exec(f'{self._sudo}tail -n 3 "{self._alert_files[0]}" | cut -d"," -f1',
                          timeout=10)
         ts = []
         for x in (out or "").split("\n"):
@@ -3124,7 +3133,7 @@ class FtdSnortStats:
 
     def _sum_last_rows(self):
         """Sum detection.alerts from the last row of each instance CSV."""
-        out = self._exec(f'tail -q -n1 {self._alert_glob} 2>/dev/null', timeout=12)
+        out = self._exec(f'{self._sudo}tail -q -n1 {self._alert_glob} 2>/dev/null', timeout=12)
         if not out:
             return None
         total, got = 0, False
@@ -3140,7 +3149,7 @@ class FtdSnortStats:
 
     def _latest_timestamp(self):
         """Largest #timestamp (field 1) currently present across instances."""
-        out = self._exec(f'tail -q -n1 {self._alert_glob} 2>/dev/null', timeout=12)
+        out = self._exec(f'{self._sudo}tail -q -n1 {self._alert_glob} 2>/dev/null', timeout=12)
         mx = 0
         for line in (out or "").split("\n"):
             parts = line.split(",")
@@ -3165,7 +3174,7 @@ class FtdSnortStats:
             # Sum detection.alerts for rows with timestamp > cutoff (all files).
             awk_col = self._alert_col + 1  # 1-based
             t = 0 if absolute else self._alert_since_ts
-            cmd = (f"awk -F',' -v t={t} 'FNR>1 && ($1+0)>t "
+            cmd = (f"{self._sudo}awk -F',' -v t={t} 'FNR>1 && ($1+0)>t "
                    f"{{s+=${awk_col}}} END{{print s+0}}' "
                    f"{self._alert_glob} 2>/dev/null")
             out = self._exec(cmd, timeout=15)
