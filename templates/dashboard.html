@@ -1816,6 +1816,14 @@
                         <div class="ma-stat-value" style="color:var(--accent-red);" id="ma-ftd-blocked">0</div>
                     </div>
                     <div class="ma-stat">
+                        <div class="ma-stat-label">IPS Alerts</div>
+                        <div class="ma-stat-value" style="color:var(--accent-orange);" id="ma-ftd-alerts">0</div>
+                    </div>
+                    <div class="ma-stat">
+                        <div class="ma-stat-label">Clean Passed</div>
+                        <div class="ma-stat-value" style="color:var(--accent-green);" id="ma-ftd-clean">0</div>
+                    </div>
+                    <div class="ma-stat">
                         <div class="ma-stat-label">Bypassed (Down)</div>
                         <div class="ma-stat-value" id="ma-ftd-bypass-down">0</div>
                     </div>
@@ -3484,6 +3492,8 @@
                 ftdRow.style.display = '';
                 document.getElementById('ma-ftd-passed').textContent = formatNum(ftd.passed || 0);
                 document.getElementById('ma-ftd-blocked').textContent = formatNum(ftd.blocked || 0);
+                document.getElementById('ma-ftd-alerts').textContent = (ftd.alerts != null) ? formatNum(ftd.alerts) : 'n/a';
+                document.getElementById('ma-ftd-clean').textContent = (ftd.clean_passed != null) ? formatNum(ftd.clean_passed) : formatNum(ftd.passed || 0);
                 document.getElementById('ma-ftd-bypass-down').textContent = formatNum(ftd.bypassed_down || 0);
                 document.getElementById('ma-ftd-bypass-busy').textContent = formatNum(ftd.bypassed_busy || 0);
                 // Inspection rate = % of traffic Snort is actually inspecting (not bypassing)
@@ -3496,7 +3506,8 @@
                     bar.style.width = Math.min(parseFloat(inspRate), 100) + '%';
                     bar.style.background = ftd.bypassed_down > 0 ? 'var(--accent-red)' : parseFloat(inspRate) >= 99 ? 'var(--accent-green)' : 'var(--accent-orange)';
                 }
-                document.getElementById('ma-canary-info').textContent = `Drops: ${formatNum(ftd.blocked||0)} | Alerts in Passed`;
+                const alShown = (ftd.alerts != null) ? formatNum(ftd.alerts) : 'n/a';
+                document.getElementById('ma-canary-info').textContent = `IPS Alerts: ${alShown} | Drops: ${formatNum(ftd.blocked||0)}`;
             }
 
             // Per-protocol table
