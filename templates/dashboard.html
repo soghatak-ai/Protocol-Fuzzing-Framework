@@ -1736,6 +1736,23 @@
                         <label>Processes</label>
                         <input type="number" id="ma-processes" value="6" min="1" max="50">
                     </div>
+                    <div class="ma-section-title" style="margin-top:14px;">FTD Monitoring (SSH)</div>
+                    <div class="ma-param-row">
+                        <label>FTD IP</label>
+                        <input type="text" id="ma-ftd-ip" placeholder="e.g. 10.83.61.4">
+                    </div>
+                    <div class="ma-param-row">
+                        <label>SSH Port</label>
+                        <input type="number" id="ma-ftd-port" value="22" min="1" max="65535">
+                    </div>
+                    <div class="ma-param-row">
+                        <label>Username</label>
+                        <input type="text" id="ma-ftd-user" value="admin">
+                    </div>
+                    <div class="ma-param-row">
+                        <label>Password</label>
+                        <input type="password" id="ma-ftd-pass" placeholder="password">
+                    </div>
                     <div class="ma-actions">
                         <button class="ctrl-btn start" id="ma-btn-start" onclick="maStart()">Launch Attack</button>
                         <button class="ctrl-btn stop" id="ma-btn-stop" onclick="maStop()" disabled>Stop</button>
@@ -1761,7 +1778,7 @@
                         <div style="font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:600;" id="ma-elapsed">0s</div>
                     </div>
                     <div style="text-align:right;">
-                        <div class="ma-verdict-label">Detection Rate</div>
+                        <div class="ma-verdict-label">Inspection Rate</div>
                         <div style="font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:600;" id="ma-det-rate">--</div>
                         <div class="ma-canary-bar"><div class="ma-canary-fill" id="ma-canary-bar" style="width:0%;background:var(--accent-green);"></div></div>
                     </div>
@@ -1783,9 +1800,28 @@
                         <div class="ma-stat-sub" id="ma-total-bytes">0 B</div>
                     </div>
                     <div class="ma-stat">
-                        <div class="ma-stat-label">Snort Alerts</div>
+                        <div class="ma-stat-label">Snort Blocked</div>
                         <div class="ma-stat-value" id="ma-alerts">0</div>
                         <div class="ma-stat-sub" id="ma-canary-info">Canary: 0/0</div>
+                    </div>
+                </div>
+
+                <div class="ma-stats-grid" id="ma-ftd-stats-row" style="display:none;margin-top:8px;">
+                    <div class="ma-stat">
+                        <div class="ma-stat-label">Snort Passed</div>
+                        <div class="ma-stat-value" id="ma-ftd-passed">0</div>
+                    </div>
+                    <div class="ma-stat">
+                        <div class="ma-stat-label">Snort Blocked</div>
+                        <div class="ma-stat-value" style="color:var(--accent-red);" id="ma-ftd-blocked">0</div>
+                    </div>
+                    <div class="ma-stat">
+                        <div class="ma-stat-label">Bypassed (Down)</div>
+                        <div class="ma-stat-value" id="ma-ftd-bypass-down">0</div>
+                    </div>
+                    <div class="ma-stat">
+                        <div class="ma-stat-label">Bypassed (Busy)</div>
+                        <div class="ma-stat-value" id="ma-ftd-bypass-busy">0</div>
                     </div>
                 </div>
 
@@ -3332,6 +3368,7 @@
             const selected = maGetSelected();
             if (selected.length === 0) { alert('Select at least one protocol.'); return; }
             document.getElementById('ma-btn-start').disabled = true;
+            const ftdIp = document.getElementById('ma-ftd-ip').value.trim();
             const body = {
                 target_ip: targetIp,
                 protocols: selected,
@@ -3339,6 +3376,14 @@
                 intensity: parseInt(document.getElementById('ma-intensity').value) || 3,
                 processes: parseInt(document.getElementById('ma-processes').value) || 6,
             };
+            if (ftdIp) {
+                body.ftd_config = {
+                    host: ftdIp,
+                    port: parseInt(document.getElementById('ma-ftd-port').value) || 22,
+                    username: document.getElementById('ma-ftd-user').value.trim() || 'admin',
+                    password: document.getElementById('ma-ftd-pass').value,
+                };
+            }
             try {
                 const res = await fetch('/api/multiattack/start', {
                     method: 'POST',
@@ -3431,6 +3476,28 @@
             document.getElementById('ma-total-bytes').textContent = maFormatBytes(d.total_bytes || 0);
             document.getElementById('ma-alerts').textContent = formatNum(d.snort_alerts || 0);
             document.getElementById('ma-canary-info').textContent = `Canary: ${d.canary_detected||0}/${cs}`;
+
+            // FTD SSH stats
+            const ftd = d.ftd_stats;
+            const ftdRow = document.getElementById('ma-ftd-stats-row');
+            if (ftd && ftdRow) {
+                ftdRow.style.display = '';
+                document.getElementById('ma-ftd-passed').textContent = formatNum(ftd.passed || 0);
+                document.getElementById('ma-ftd-blocked').textContent = formatNum(ftd.blocked || 0);
+                document.getElementById('ma-ftd-bypass-down').textContent = formatNum(ftd.bypassed_down || 0);
+                document.getElementById('ma-ftd-bypass-busy').textContent = formatNum(ftd.bypassed_busy || 0);
+                // Inspection rate = % of traffic Snort is actually inspecting (not bypassing)
+                const inspected = (ftd.passed || 0) + (ftd.blocked || 0);
+                const totalTraffic = inspected + (ftd.bypassed_down || 0) + (ftd.bypassed_busy || 0);
+                if (totalTraffic > 0) {
+                    const inspRate = (inspected / totalTraffic * 100).toFixed(1);
+                    document.getElementById('ma-det-rate').textContent = inspRate + '%';
+                    const bar = document.getElementById('ma-canary-bar');
+                    bar.style.width = Math.min(parseFloat(inspRate), 100) + '%';
+                    bar.style.background = ftd.bypassed_down > 0 ? 'var(--accent-red)' : parseFloat(inspRate) >= 99 ? 'var(--accent-green)' : 'var(--accent-orange)';
+                }
+                document.getElementById('ma-canary-info').textContent = `Drops: ${formatNum(ftd.blocked||0)} | Alerts in Passed`;
+            }
 
             // Per-protocol table
             const pp = d.per_proto || {};

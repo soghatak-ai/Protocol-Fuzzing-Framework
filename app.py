@@ -2887,6 +2887,139 @@ _SNORT_LOG_PATHS = [
 _CANARY_SIDS = ["1000001", "1000006"]  # TCP and UDP canary rules
 
 
+class FtdSnortStats:
+    """SSH into FTD CLISH to read 'show snort statistics' for live verdict.
+    Uses the same interactive-shell approach as RemoteSnortMonitor to handle
+    the FTD's CLISH environment."""
+
+    def __init__(self, host, port=22, username="admin", password=""):
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self._client = None
+        self._shell = None
+
+    def connect(self):
+        try:
+            import paramiko
+        except ImportError:
+            print("[FtdSnortStats] paramiko not installed")
+            return False
+        try:
+            self._client = paramiko.SSHClient()
+            self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            self._client.connect(
+                self.host, port=self.port, username=self.username,
+                password=self.password, timeout=10,
+                look_for_keys=False, allow_agent=False,
+            )
+            # Open interactive shell for CLISH commands
+            self._shell = self._client.invoke_shell(width=200, height=50)
+            self._drain(3.0)  # eat welcome banner
+            # Disable CLISH paging so show commands don't block at --More--
+            self._shell.send("terminal pager 0\n")
+            self._drain(2.0)
+            print(f"[FtdSnortStats] Connected to {self.host}:{self.port}")
+            return True
+        except Exception as e:
+            print(f"[FtdSnortStats] Connection failed: {e}")
+            return False
+
+    def _reconnect(self):
+        """Attempt to re-establish SSH if session dropped."""
+        print("[FtdSnortStats] Reconnecting...")
+        self.close()
+        return self.connect()
+
+    def _drain(self, seconds=1.0):
+        import time as _t
+        buf = ""
+        deadline = _t.time() + seconds
+        while _t.time() < deadline:
+            _t.sleep(0.1)
+            if self._shell and self._shell.recv_ready():
+                buf += self._shell.recv(65535).decode("utf-8", errors="ignore")
+        return buf
+
+    def _clish_exec(self, cmd, timeout=8):
+        """Run a CLISH command and return stripped output."""
+        import time as _t, re as _re
+        if not self._shell or self._shell.closed:
+            return None
+        try:
+            if self._shell.recv_ready():
+                self._shell.recv(65535)
+            self._shell.send(f"{cmd}\n")
+            output = ""
+            deadline = _t.time() + timeout
+            while _t.time() < deadline:
+                _t.sleep(0.2)
+                if self._shell.recv_ready():
+                    chunk = self._shell.recv(65535).decode("utf-8", errors="ignore")
+                    output += chunk
+                    # CLISH prompt: ">" or "hostname>" at end of output
+                    # Check last non-empty line is a short prompt ending with ">"
+                    stripped = output.rstrip()
+                    if stripped:
+                        last_line = stripped.split("\n")[-1].strip()
+                        if last_line.endswith(">") and len(last_line) < 40:
+                            break
+            # Strip ANSI escape codes
+            clean = _re.sub(r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07|\r', '', output)
+            return clean
+        except Exception as e:
+            print(f"[FtdSnortStats] exec failed: {e}")
+            return None
+
+    def get_stats(self):
+        """Run 'show snort statistics' and parse key counters.
+        Returns dict: {passed, blocked, bypassed_down, bypassed_busy, portscan} or None."""
+        raw = self._clish_exec("show snort statistics")
+        if not raw:
+            # SSH may have dropped — try reconnect once
+            if self._reconnect():
+                raw = self._clish_exec("show snort statistics")
+            if not raw:
+                return None
+        stats = {}
+        for line in raw.split("\n"):
+            line = line.strip()
+            if "Passed Packets" in line:
+                stats["passed"] = self._parse_int(line)
+            elif "Blocked Packets" in line:
+                stats["blocked"] = self._parse_int(line)
+            elif "Packets bypassed (Snort Down)" in line:
+                stats["bypassed_down"] = self._parse_int(line)
+            elif "Packets bypassed (Snort Busy)" in line:
+                stats["bypassed_busy"] = self._parse_int(line)
+            elif "Portscan Events" in line:
+                stats["portscan"] = self._parse_int(line)
+        return stats if stats else None
+
+    def clear_stats(self):
+        """Run 'clear snort statistics' to reset counters."""
+        self._clish_exec("clear snort statistics")
+
+    @staticmethod
+    def _parse_int(line):
+        import re as _re
+        m = _re.search(r'(\d+)\s*$', line.strip())
+        return int(m.group(1)) if m else 0
+
+    def close(self):
+        if self._shell:
+            try:
+                self._shell.close()
+            except Exception:
+                pass
+        if self._client:
+            try:
+                self._client.close()
+            except Exception:
+                pass
+
+
 def _find_snort_log():
     """Return the first readable Snort alert log path, or None."""
     for p in _SNORT_LOG_PATHS:
@@ -2984,11 +3117,13 @@ def _multiattack_log(msg):
     print(f"[MULTI-ATTACK] {msg}")
 
 
-def _multiattack_worker(target_ip, protocols, duration, intensity, processes):
+def _multiattack_worker(target_ip, protocols, duration, intensity, processes, ftd_config=None):
     """
     Pure live-network flood.  Spawns snort_blinder.py --flood sub-processes
     locally.  Packets are sent directly from this machine to <target_ip>
     via real sockets — no Docker orchestration needed.
+    ftd_config: optional dict {host, port, username, password} for SSH-based
+    Snort monitoring on FTD (replaces Docker alert_fast.txt approach).
     """
     global _multiattack_procs
     try:
@@ -3009,14 +3144,43 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes):
         _multiattack_log(f"Target: {target_ip}")
         _multiattack_log(f"Protocols: {', '.join(p.upper() for p in protocols)}")
 
-        # Detect Snort alert log via shared volume
-        snort_log = _find_snort_log()
-        snort_available = snort_log is not None
-        if snort_available:
-            _multiattack_log(f"Snort alert log found: {snort_log}")
-            _clear_snort_log(snort_log)
-        else:
-            _multiattack_log("Snort alert log NOT available — verdict will be throughput-only")
+        # --- Snort monitoring: FTD SSH or Docker file-based ---
+        ftd_monitor = None
+        snort_log = None
+        snort_available = False
+        use_ftd_ssh = False
+
+        if ftd_config:
+            _multiattack_log(f"Connecting to FTD {ftd_config['host']}:{ftd_config.get('port', 22)} via SSH...")
+            ftd_monitor = FtdSnortStats(
+                host=ftd_config["host"],
+                port=ftd_config.get("port", 22),
+                username=ftd_config.get("username", "admin"),
+                password=ftd_config.get("password", ""),
+            )
+            if ftd_monitor.connect():
+                use_ftd_ssh = True
+                snort_available = True
+                _multiattack_log("FTD SSH connected — clearing Snort statistics...")
+                ftd_monitor.clear_stats()
+                time.sleep(1)
+                baseline = ftd_monitor.get_stats()
+                if baseline:
+                    _multiattack_log(f"Snort baseline: passed={baseline.get('passed',0)}, blocked={baseline.get('blocked',0)}")
+                else:
+                    _multiattack_log("Warning: could not read baseline Snort stats")
+            else:
+                _multiattack_log("FTD SSH failed — falling back to file-based detection")
+                ftd_monitor = None
+
+        if not use_ftd_ssh:
+            snort_log = _find_snort_log()
+            snort_available = snort_log is not None
+            if snort_available:
+                _multiattack_log(f"Snort alert log found: {snort_log}")
+                _clear_snort_log(snort_log)
+            else:
+                _multiattack_log("No Snort monitoring available — verdict will be throughput-only")
 
         # Quick connectivity check
         import socket as _socket
@@ -3030,8 +3194,8 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes):
         except Exception as e:
             _multiattack_log(f"Warning: connectivity probe ({e}) — continuing anyway")
 
-        # Canary pre-test: send a known-bad request that Snort MUST detect
-        if snort_available:
+        # Canary pre-test (file-based only — FTD doesn't have canary rules)
+        if snort_available and not use_ftd_ssh:
             _multiattack_log("Sending canary probe (EICAR via UDP+TCP)...")
             pre_alerts = _count_canary_alerts(snort_log)
             _send_canary(target_ip)
@@ -3142,21 +3306,48 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes):
             snap = _aggregate()
             pps = snap.get("pps", 0)
 
-            # Send canary probe every _canary_interval seconds
-            now = time.time()
-            if snort_available and (now - _last_canary_time) >= _canary_interval:
-                if _send_canary(target_ip):
-                    _canary_sent += 1
-                _last_canary_time = now
-
+            # --- Snort health check ---
+            alerts = 0
+            canary_detected = 0
             canary_sent = _canary_sent
+            det_rate = 0.0
+            verdict = "WARMING" if pps == 0 else "FLOODING"
+            ftd_stats_snap = None
 
-            # Read Snort alerts if available
-            if snort_available:
+            if use_ftd_ssh and ftd_monitor:
+                ftd_stats_snap = ftd_monitor.get_stats()
+                if ftd_stats_snap:
+                    passed = ftd_stats_snap.get("passed", 0)
+                    blocked = ftd_stats_snap.get("blocked", 0)
+                    bypassed_down = ftd_stats_snap.get("bypassed_down", 0)
+                    bypassed_busy = ftd_stats_snap.get("bypassed_busy", 0)
+                    total_inspected = passed + blocked
+                    total_traffic = total_inspected + bypassed_down + bypassed_busy
+                    alerts = blocked  # only drop-action rules; alert-only rules are in "passed"
+
+                    if total_traffic == 0:
+                        verdict = "WARMING"
+                    elif bypassed_down > 0:
+                        verdict = "BLINDED"
+                    elif bypassed_busy > 0 and bypassed_busy > total_inspected * 0.3:
+                        verdict = "DEGRADED"
+                    elif total_inspected > 0:
+                        verdict = "DETECTING"
+                    else:
+                        verdict = "WARMING"
+
+                    # Detection rate = % of traffic Snort is actually inspecting
+                    det_rate = round(total_inspected / max(total_traffic, 1) * 100, 2)
+            elif snort_available and not use_ftd_ssh:
+                now = time.time()
+                if (now - _last_canary_time) >= _canary_interval:
+                    if _send_canary(target_ip):
+                        _canary_sent += 1
+                    _last_canary_time = now
+                canary_sent = _canary_sent
                 alerts = _count_alerts(snort_log, "[**]")
                 canary_detected = _count_canary_alerts(snort_log)
                 det_rate = min(round(canary_detected / canary_sent * 100, 1), 100.0) if canary_sent > 0 else 100.0
-
                 if canary_sent < 2:
                     verdict = "WARMING"
                 elif det_rate >= 80:
@@ -3165,13 +3356,8 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes):
                     verdict = "DEGRADED"
                 else:
                     verdict = "BLINDED"
-            else:
-                alerts = 0
-                canary_detected = 0
-                det_rate = 0.0
-                verdict = "WARMING" if pps == 0 else "FLOODING"
 
-            multiattack_state.update({
+            update = {
                 "elapsed": round(time.time() - multiattack_state["start_time"]),
                 "pps": pps,
                 "mbps": snap.get("mbps", 0),
@@ -3185,9 +3371,12 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes):
                 "detection_rate": det_rate,
                 "verdict": verdict,
                 "active_protos": len([p for p, c in snap.get("per_proto", {}).items() if c > 0]),
-            })
+            }
+            if ftd_stats_snap:
+                update["ftd_stats"] = ftd_stats_snap
+            multiattack_state.update(update)
 
-            time.sleep(2)
+            time.sleep(3 if use_ftd_ssh else 2)  # slightly slower polling for SSH
 
         # Final stats
         for p in _multiattack_procs:
@@ -3198,7 +3387,38 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes):
 
         snap = _aggregate()
         canary_sent = _canary_sent
-        if snort_available:
+        canary_detected = 0
+        final_stats = None
+
+        # --- Final verdict ---
+        if use_ftd_ssh and ftd_monitor:
+            final_stats = ftd_monitor.get_stats()
+            if final_stats:
+                passed = final_stats.get("passed", 0)
+                blocked = final_stats.get("blocked", 0)
+                bypassed_down = final_stats.get("bypassed_down", 0)
+                bypassed_busy = final_stats.get("bypassed_busy", 0)
+                total_inspected = passed + blocked
+                total_traffic = total_inspected + bypassed_down + bypassed_busy
+                alerts = blocked  # drop-action only; alert-only rules counted in passed
+                det_rate = round(total_inspected / max(total_traffic, 1) * 100, 2)
+
+                if bypassed_down > 0:
+                    verdict = "BLINDED"
+                elif bypassed_busy > 0 and bypassed_busy > total_inspected * 0.3:
+                    verdict = "DEGRADED"
+                elif total_inspected > 0:
+                    verdict = "WITHSTOOD"
+                else:
+                    verdict = "NO DATA"
+
+                _multiattack_log(f"FTD Final: passed={passed:,}, blocked={blocked:,}, "
+                                 f"bypassed_down={bypassed_down}, bypassed_busy={bypassed_busy}")
+            else:
+                alerts = 0
+                det_rate = 0.0
+                verdict = "COMPLETE"
+        elif snort_available:
             alerts = _count_alerts(snort_log, "[**]")
             canary_detected = _count_canary_alerts(snort_log)
             det_rate = min(round(canary_detected / canary_sent * 100, 1), 100.0) if canary_sent > 0 else 100.0
@@ -3216,7 +3436,7 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes):
             det_rate = 0.0
             verdict = "COMPLETE"
 
-        multiattack_state.update({
+        final_update = {
             "elapsed": round(time.time() - multiattack_state["start_time"]),
             "pps": snap.get("pps", 0),
             "mbps": snap.get("mbps", 0),
@@ -3230,16 +3450,24 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes):
             "detection_rate": det_rate,
             "verdict": verdict,
             "active_protos": len([p for p, c in snap.get("per_proto", {}).items() if c > 0]),
-        })
+        }
+        if use_ftd_ssh and final_stats:
+            final_update["ftd_stats"] = final_stats
+        multiattack_state.update(final_update)
         _multiattack_log(f"FINISHED — {verdict} | {snap.get('total_packets',0):,} pkts, "
-                         f"{snap.get('pps',0):,} pps | Snort alerts: {alerts}, "
-                         f"canary: {canary_detected}/{canary_sent} ({det_rate}%)")
+                         f"{snap.get('pps',0):,} pps | Snort blocked: {alerts}, "
+                         f"detection rate: {det_rate}%")
 
     except Exception as e:
         _multiattack_log(f"Error: {e}")
         multiattack_state["verdict"] = "ERROR"
         traceback.print_exc()
     finally:
+        if ftd_monitor:
+            try:
+                ftd_monitor.close()
+            except Exception:
+                pass
         multiattack_state["running"] = False
         _multiattack_procs = []
 
@@ -3267,6 +3495,7 @@ def api_multiattack_start():
     duration = body.get("duration", 60)
     intensity = body.get("intensity", 3)
     processes = body.get("processes", 6)
+    ftd_config = body.get("ftd_config", None)  # {host, port, username, password}
 
     # Validate
     valid_protos = [p for p in protocols if p in _BLINDER_PROTOCOL_REGISTRY]
@@ -3297,7 +3526,7 @@ def api_multiattack_start():
 
     _multiattack_thread = threading.Thread(
         target=_multiattack_worker,
-        args=(target_ip, valid_protos, duration, intensity, processes),
+        args=(target_ip, valid_protos, duration, intensity, processes, ftd_config),
         daemon=True
     )
     _multiattack_thread.start()
