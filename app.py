@@ -3057,10 +3057,10 @@ class FtdSnortStats:
         if stats:
             print(f"[FtdSnortStats] Parsed: {stats}")
         else:
-            self._log("WARNING: could not parse stats from CLISH output")
             lines = [l.strip() for l in clean.split("\n") if l.strip()]
-            for l in lines[:10]:
-                print(f"  | {l}")
+            # Show actual CLISH output in the UI event log so we can see the field names
+            preview = " | ".join(lines[:6])
+            self._log(f"WARNING: could not parse stats from CLISH output ({len(clean)}c): {preview[:200]}")
         return stats if stats else None
 
     def clear_stats(self):
