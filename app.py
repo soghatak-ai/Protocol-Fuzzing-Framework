@@ -2934,9 +2934,10 @@ class FtdSnortStats:
             )
             self._shell = self._client.invoke_shell(width=511, height=2048)
 
-            # Eat banner, then send a newline to elicit a fresh prompt
+            # Eat banner, then send a CR to elicit a fresh prompt
+            # (Cisco CLISH needs \r, not \n, to submit input)
             self._drain(3.0)
-            self._shell.send("\n")
+            self._shell.send("\r")
             resp = self._drain(2.0)
             clean = self._strip_ansi(resp)
 
@@ -3023,7 +3024,8 @@ class FtdSnortStats:
             if self._shell.recv_ready():
                 self._shell.recv(65535)
 
-            self._shell.send(f"{cmd}\n")
+            # Cisco CLISH requires \r (Enter), NOT \n, to execute commands
+            self._shell.send(f"{cmd}\r")
 
             output = ""
             deadline = time.time() + timeout
