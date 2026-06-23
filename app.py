@@ -2889,8 +2889,17 @@ _CANARY_SIDS = ["1000001", "1000006"]  # TCP and UDP canary rules
 
 class FtdSnortStats:
     """SSH into FTD CLISH to read 'show snort statistics' for live verdict.
-    Uses the same interactive-shell approach as RemoteSnortMonitor to handle
-    the FTD's CLISH environment."""
+    Uses silence-based output collection: waits until data stops flowing
+    rather than trying to detect the CLISH prompt (which is wrapped in
+    unpredictable ANSI sequences)."""
+
+    # Comprehensive ANSI/VT100 stripping — covers all FTD CLISH sequences
+    _ANSI_RE = re.compile(
+        r'\x1b\[\??[0-9;]*[a-zA-Z]'  # CSI sequences: \x1b[...X and \x1b[?...X
+        r'|\x1b\][^\x07]*\x07'        # OSC sequences: \x1b]...BEL
+        r'|\x1b[=>()#]'                # Simple escapes: \x1b= \x1b> \x1b( etc
+        r'|\r'                          # Carriage returns
+    )
 
     def __init__(self, host, port=22, username="admin", password=""):
         self.host = host
@@ -2900,7 +2909,8 @@ class FtdSnortStats:
         self._client = None
         self._shell = None
         self._last_reconnect = 0
-        self._reconnect_cooldown = 30  # seconds between reconnect attempts
+        self._reconnect_cooldown = 30
+        self._connected = False
 
     def connect(self):
         try:
@@ -2916,112 +2926,137 @@ class FtdSnortStats:
                 password=self.password, timeout=10,
                 look_for_keys=False, allow_agent=False,
             )
-            # Open interactive shell for CLISH commands
             self._shell = self._client.invoke_shell(width=200, height=50)
-            self._drain(3.0)  # eat welcome banner
-            # Disable CLISH paging so show commands don't block at --More--
+            banner = self._drain(3.0)
+            print(f"[FtdSnortStats] Banner ({len(banner)} chars): {repr(banner[:120])}")
+
+            # Disable CLISH paging
             self._shell.send("terminal pager 0\n")
-            self._drain(2.0)
-            print(f"[FtdSnortStats] Connected to {self.host}:{self.port}")
-            return True
+            pager_out = self._drain(2.0)
+            print(f"[FtdSnortStats] Pager response: {repr(self._strip_ansi(pager_out).strip()[:100])}")
+
+            # Verify CLISH works with a quick test command
+            test = self._clish_exec_raw("show version", timeout=5)
+            clean_test = self._strip_ansi(test) if test else ""
+            if "Version" in clean_test or "version" in clean_test or "Cisco" in clean_test or len(clean_test) > 20:
+                print(f"[FtdSnortStats] CLISH verified on {self.host}:{self.port} ({len(clean_test)} chars)")
+                self._connected = True
+                return True
+            else:
+                print(f"[FtdSnortStats] CLISH verify FAILED. Got: {repr(clean_test[:200])}")
+                self._connected = True  # still try to use it
+                return True
         except Exception as e:
             print(f"[FtdSnortStats] Connection failed: {e}")
+            import traceback; traceback.print_exc()
             return False
 
     def _reconnect(self):
-        """Attempt to re-establish SSH if session dropped."""
         print("[FtdSnortStats] Reconnecting...")
         self.close()
         return self.connect()
 
     def _drain(self, seconds=1.0):
-        import time as _t
         buf = ""
-        deadline = _t.time() + seconds
-        while _t.time() < deadline:
-            _t.sleep(0.1)
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            time.sleep(0.1)
             if self._shell and self._shell.recv_ready():
                 buf += self._shell.recv(65535).decode("utf-8", errors="ignore")
         return buf
 
-    _ANSI_RE = None
-
     @classmethod
     def _strip_ansi(cls, text):
-        import re as _re
-        if cls._ANSI_RE is None:
-            cls._ANSI_RE = _re.compile(r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b\[\?[0-9;]*[a-zA-Z]|\x1b[=>]|\r')
         return cls._ANSI_RE.sub('', text)
 
-    def _clish_exec(self, cmd, timeout=6):
-        """Run a CLISH command and return stripped output."""
-        import time as _t
+    def _clish_exec_raw(self, cmd, timeout=5, silence=1.0):
+        """Send a CLISH command and collect output using silence detection.
+        Returns raw output string (before ANSI stripping).
+        Waits until no new data arrives for `silence` seconds."""
         if not self._shell or self._shell.closed:
             return None
         try:
+            # Flush any pending data
             if self._shell.recv_ready():
                 self._shell.recv(65535)
             self._shell.send(f"{cmd}\n")
             output = ""
-            deadline = _t.time() + timeout
-            while _t.time() < deadline:
-                _t.sleep(0.15)
+            deadline = time.time() + timeout
+            last_data = time.time()
+            while time.time() < deadline:
+                time.sleep(0.1)
                 if self._shell.recv_ready():
                     chunk = self._shell.recv(65535).decode("utf-8", errors="ignore")
                     output += chunk
-                    # Strip ANSI FIRST, then check for CLISH prompt
-                    clean = self._strip_ansi(output)
-                    stripped = clean.rstrip()
-                    if stripped:
-                        last_line = stripped.split("\n")[-1].strip()
-                        if last_line.endswith(">") and len(last_line) < 40:
-                            break
-            clean = self._strip_ansi(output)
-            return clean if clean.strip() else None
+                    last_data = time.time()
+                elif output and (time.time() - last_data) >= silence:
+                    # No new data for `silence` seconds — command complete
+                    break
+            return output
         except Exception as e:
             print(f"[FtdSnortStats] exec failed: {e}")
             return None
 
     def get_stats(self):
         """Run 'show snort statistics' and parse key counters.
-        Returns dict: {passed, blocked, bypassed_down, bypassed_busy, portscan} or None."""
-        import time as _t
-        raw = self._clish_exec("show snort statistics")
+        Returns dict with keys: passed, blocked, bypassed_down, bypassed_busy."""
+        raw = self._clish_exec_raw("show snort statistics", timeout=5, silence=1.0)
         if not raw:
-            # Only attempt reconnect if cooldown has elapsed
-            now = _t.time()
+            # Attempt reconnect with cooldown
+            now = time.time()
             if (now - self._last_reconnect) >= self._reconnect_cooldown:
                 self._last_reconnect = now
+                print("[FtdSnortStats] No output — attempting reconnect")
                 if self._reconnect():
-                    raw = self._clish_exec("show snort statistics")
+                    raw = self._clish_exec_raw("show snort statistics", timeout=5, silence=1.0)
             if not raw:
+                print("[FtdSnortStats] get_stats failed: no output")
                 return None
+
+        clean = self._strip_ansi(raw)
+        print(f"[FtdSnortStats] Raw output ({len(raw)} chars), clean ({len(clean)} chars)")
+        # Log first 300 chars for debugging
+        print(f"[FtdSnortStats] Clean output: {repr(clean[:300])}")
+
         stats = {}
-        for line in raw.split("\n"):
-            line = line.strip()
-            if "Passed Packets" in line:
+        for line in clean.split("\n"):
+            lo = line.strip().lower()
+            if not lo:
+                continue
+            # Case-insensitive matching for resilience
+            if "passed packets" in lo:
                 stats["passed"] = self._parse_int(line)
-            elif "Blocked Packets" in line:
+            elif "blocked packets" in lo:
                 stats["blocked"] = self._parse_int(line)
-            elif "Packets bypassed (Snort Down)" in line:
+            elif "packets bypassed" in lo and "down" in lo:
                 stats["bypassed_down"] = self._parse_int(line)
-            elif "Packets bypassed (Snort Busy)" in line:
+            elif "packets bypassed" in lo and "busy" in lo:
                 stats["bypassed_busy"] = self._parse_int(line)
-            elif "Portscan Events" in line:
+            elif "portscan" in lo:
                 stats["portscan"] = self._parse_int(line)
+
+        if stats:
+            print(f"[FtdSnortStats] Parsed: {stats}")
+        else:
+            print(f"[FtdSnortStats] WARNING: No stats parsed from output!")
+            # Print all non-empty lines to help debug
+            lines = [l.strip() for l in clean.split("\n") if l.strip()]
+            for l in lines[:15]:
+                print(f"  | {l}")
         return stats if stats else None
 
     def clear_stats(self):
-        """Run 'clear snort statistics' to reset counters."""
-        self._clish_exec("clear snort statistics")
+        out = self._clish_exec_raw("clear snort statistics", timeout=4, silence=0.8)
+        clean = self._strip_ansi(out) if out else ""
+        print(f"[FtdSnortStats] clear_stats response: {repr(clean.strip()[:100])}")
 
     @staticmethod
     def _parse_int(line):
-        import re as _re
-        m = _re.search(r'(\d+)\s*$', line.strip())
+        m = re.search(r'(\d+)\s*$', line.strip())
         return int(m.group(1)) if m else 0
 
     def close(self):
+        self._connected = False
         if self._shell:
             try:
                 self._shell.close()
@@ -3390,7 +3425,7 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes, ft
                 update["ftd_stats"] = ftd_stats_snap
             multiattack_state.update(update)
 
-            time.sleep(3 if use_ftd_ssh else 2)  # slightly slower polling for SSH
+            time.sleep(2)
 
         # Final stats
         for p in _multiattack_procs:
