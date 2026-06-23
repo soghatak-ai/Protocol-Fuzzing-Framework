@@ -1799,11 +1799,6 @@
                         <div class="ma-stat-value" id="ma-total-pkts">0</div>
                         <div class="ma-stat-sub" id="ma-total-bytes">0 B</div>
                     </div>
-                    <div class="ma-stat">
-                        <div class="ma-stat-label">Snort Blocked</div>
-                        <div class="ma-stat-value" id="ma-alerts">0</div>
-                        <div class="ma-stat-sub" id="ma-canary-info">Canary: 0/0</div>
-                    </div>
                 </div>
 
                 <div class="ma-stats-grid" id="ma-ftd-stats-row" style="display:none;margin-top:8px;">
@@ -1822,14 +1817,6 @@
                     <div class="ma-stat">
                         <div class="ma-stat-label">Clean Passed</div>
                         <div class="ma-stat-value" style="color:var(--accent-green);" id="ma-ftd-clean">0</div>
-                    </div>
-                    <div class="ma-stat">
-                        <div class="ma-stat-label">Bypassed (Down)</div>
-                        <div class="ma-stat-value" id="ma-ftd-bypass-down">0</div>
-                    </div>
-                    <div class="ma-stat">
-                        <div class="ma-stat-label">Bypassed (Busy)</div>
-                        <div class="ma-stat-value" id="ma-ftd-bypass-busy">0</div>
                     </div>
                 </div>
 
@@ -3482,8 +3469,6 @@
             document.getElementById('ma-mbps').textContent = (d.mbps || 0).toFixed(1);
             document.getElementById('ma-total-pkts').textContent = formatNum(d.total_packets || 0);
             document.getElementById('ma-total-bytes').textContent = maFormatBytes(d.total_bytes || 0);
-            document.getElementById('ma-alerts').textContent = formatNum(d.snort_alerts || 0);
-            document.getElementById('ma-canary-info').textContent = `Canary: ${d.canary_detected||0}/${cs}`;
 
             // FTD SSH stats
             const ftd = d.ftd_stats;
@@ -3494,8 +3479,6 @@
                 document.getElementById('ma-ftd-blocked').textContent = formatNum(ftd.blocked || 0);
                 document.getElementById('ma-ftd-alerts').textContent = (ftd.alerts != null) ? formatNum(ftd.alerts) : 'n/a';
                 document.getElementById('ma-ftd-clean').textContent = (ftd.clean_passed != null) ? formatNum(ftd.clean_passed) : formatNum(ftd.passed || 0);
-                document.getElementById('ma-ftd-bypass-down').textContent = formatNum(ftd.bypassed_down || 0);
-                document.getElementById('ma-ftd-bypass-busy').textContent = formatNum(ftd.bypassed_busy || 0);
                 // Inspection rate = % of traffic Snort is actually inspecting (not bypassing)
                 const inspected = (ftd.passed || 0) + (ftd.blocked || 0);
                 const totalTraffic = inspected + (ftd.bypassed_down || 0) + (ftd.bypassed_busy || 0);
@@ -3506,8 +3489,6 @@
                     bar.style.width = Math.min(parseFloat(inspRate), 100) + '%';
                     bar.style.background = ftd.bypassed_down > 0 ? 'var(--accent-red)' : parseFloat(inspRate) >= 99 ? 'var(--accent-green)' : 'var(--accent-orange)';
                 }
-                const alShown = (ftd.alerts != null) ? formatNum(ftd.alerts) : 'n/a';
-                document.getElementById('ma-canary-info').textContent = `IPS Alerts: ${alShown} | Drops: ${formatNum(ftd.blocked||0)}`;
             }
 
             // Per-protocol table
