@@ -1235,7 +1235,7 @@
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
                     Stop
                 </button>
-                <select id="proto-select" class="proto-select" title="Target protocol">
+                <select id="proto-select" class="proto-select" title="Target protocol" onchange="updateLivePort(this.value)">
                     <option value="dns">DNS</option>
                     <option value="ftp">FTP</option>
                     <option value="http">HTTP</option>
@@ -1923,6 +1923,18 @@
                 const res = await fetch('/api/ai/weights');
                 cachedWeights = await res.json();
             } catch(e) { console.error('Failed to fetch weights:', e); }
+        }
+
+        const PROTO_PORTS = {
+            dns:53, ftp:21, http:80, smtp:25, ssh:22, smb2:445, smb3:445,
+            http2:80, dcerpc:135, dhcp:67, dhcpv6:547, snmp:161, icmp:0,
+            icmpv6:0, sip:5060, mgcp:2427, rtsp:554, radius:1812,
+            tacacs:49, ldap:389, cifs:445, sunrpc:111, telnet:23, tftp:69
+        };
+        function updateLivePort(proto) {
+            const port = PROTO_PORTS[proto] || 53;
+            document.getElementById('cfg-server-port').value = port;
+            document.getElementById('cfg-server-port').placeholder = String(port);
         }
 
         function setMode(mode) {
