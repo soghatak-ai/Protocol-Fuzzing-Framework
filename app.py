@@ -2888,16 +2888,21 @@ _CANARY_SIDS = ["1000001", "1000006"]  # TCP and UDP canary rules
 
 
 class FtdSnortStats:
-    """SSH into FTD, escalate to expert→root bash, then run CLISH commands
-    non-interactively via 'clish -c' for reliable output.
+    """SSH into FTD interactive CLISH and run 'show snort statistics'.
 
-    Uses the SAME proven approach as RemoteSnortMonitor:
-    - Interactive shell with TERM=dumb + custom PS1
-    - Echo start/end markers for bulletproof output parsing
-    - No ANSI codes, no prompt detection, no timing hacks
+    Strategy: Stay in CLISH (the only shell that supports 'show snort').
+    Use PROMPT-BASED completion: after sending a command, wait for the
+    CLISH prompt (ends with '>') to reappear.  Distinguish the echo
+    line from the completion prompt by checking it does NOT contain
+    the command text.
     """
 
-    _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07|\r')
+    _ANSI_RE = re.compile(
+        r'\x1b\[\??[0-9;]*[a-zA-Z]'   # CSI sequences
+        r'|\x1b\][^\x07]*\x07'         # OSC sequences
+        r'|\x1b[=>()#]'                # simple escapes
+        r'|\r'                          # carriage returns
+    )
 
     def __init__(self, host, port=22, username="admin", password="", log_fn=None):
         self.host = host
@@ -2906,7 +2911,7 @@ class FtdSnortStats:
         self.password = password
         self._client = None
         self._shell = None
-        self._snort_pid = None
+        self._prompt = None  # e.g. "FTD-2>"
         self._log_fn = log_fn or (lambda msg: None)
 
     def _log(self, msg):
@@ -2927,45 +2932,34 @@ class FtdSnortStats:
                 password=self.password, timeout=10,
                 look_for_keys=False, allow_agent=False,
             )
-            shell = self._client.invoke_shell(width=200, height=50)
-            self._drain(shell, 2.0)  # eat CLISH banner
+            self._shell = self._client.invoke_shell(width=200, height=50)
 
-            # Escalate: CLISH → expert → root bash
-            shell.send("expert\n")
-            self._drain(shell, 3.0)
+            # Eat banner and capture the CLISH prompt
+            banner = self._drain(4.0)
+            clean = self._strip_ansi(banner)
+            self._log(f"Banner ({len(clean)}c)")
 
-            shell.send("sudo su -\n")
-            sudo_out = self._drain(shell, 2.0)
-            if "assword" in sudo_out:
-                shell.send(f"{self.password}\n")
-                self._drain(shell, 1.5)
+            # Find prompt: last non-empty line ending with >
+            for line in reversed(clean.split("\n")):
+                s = line.strip()
+                if s.endswith(">") and len(s) < 50:
+                    self._prompt = s
+                    break
 
-            # Set clean prompt, disable echo
-            shell.send("export TERM=dumb; export PS1='FTD$ '; stty -echo 2>/dev/null\n")
-            self._drain(shell, 1.0)
-
-            # Verify bash works
-            shell.send("echo FTDCHECK\n")
-            verify = self._drain(shell, 2.0)
-            clean = self._strip_ansi(verify)
-
-            if "FTDCHECK" in clean:
-                self._shell = shell
-                self._log("Root bash shell established and verified")
+            if self._prompt:
+                self._log(f"CLISH prompt: '{self._prompt}'")
             else:
-                self._shell = shell
-                self._log(f"Shell verify warning — got: {repr(clean[:80])}")
+                self._log(f"WARNING: could not detect prompt from banner: {repr(clean[-100:])}")
 
-            # Find Snort PID
-            pid_out = self._exec("pgrep -f 'snort' | head -1")
-            if pid_out and pid_out.strip():
-                try:
-                    self._snort_pid = int(pid_out.strip())
-                    self._log(f"Snort PID: {self._snort_pid}")
-                except ValueError:
-                    self._log(f"Could not parse Snort PID: {repr(pid_out)}")
+            # Disable paging
+            self._clish_exec("terminal pager 0")
+
+            # Verify with show version
+            ver = self._clish_exec("show version", timeout=15)
+            if ver and len(ver) > 10:
+                self._log(f"CLISH verified ({len(ver)}c)")
             else:
-                self._log("Snort PID not found (pgrep returned empty)")
+                self._log(f"CLISH verify short: {repr((ver or '')[:80])}")
 
             return True
         except Exception as e:
@@ -2973,86 +2967,116 @@ class FtdSnortStats:
             import traceback; traceback.print_exc()
             return False
 
-    def _drain(self, shell, seconds=1.0):
+    def _drain(self, seconds=3.0):
         buf = ""
         deadline = time.time() + seconds
         while time.time() < deadline:
             time.sleep(0.1)
-            if shell.recv_ready():
-                buf += shell.recv(65535).decode("utf-8", errors="ignore")
+            if self._shell and self._shell.recv_ready():
+                buf += self._shell.recv(65535).decode("utf-8", errors="ignore")
         return buf
 
     @classmethod
     def _strip_ansi(cls, text):
         return cls._ANSI_RE.sub('', text)
 
-    def _exec(self, cmd, timeout=10):
-        """Run a bash command using echo markers — same as RemoteSnortMonitor.
-        Returns clean stdout string, or None on failure."""
+    def _is_prompt(self, line):
+        """Check if a line looks like the CLISH prompt."""
+        s = line.strip()
+        if not s.endswith(">"):
+            return False
+        if len(s) > 50:
+            return False
+        # If we know the exact prompt, use it
+        if self._prompt and s == self._prompt:
+            return True
+        # Fallback: short line ending with >
+        return len(s) < 40
+
+    def _clish_exec(self, cmd, timeout=20):
+        """Send a CLISH command and wait for the prompt to reappear.
+
+        How it works:
+        1. Clear buffer, send cmd
+        2. CLISH echoes: "hostname> show snort statistics"
+        3. CLISH processes (1-15+ seconds under load)
+        4. Output lines arrive
+        5. Prompt reappears: "hostname>"
+        6. We detect step 5 because the prompt line does NOT
+           contain the command text (unlike the echo in step 2)
+
+        Returns the output text between the echo and the prompt.
+        """
         if not self._shell or self._shell.closed:
             return None
         try:
-            ts = int(time.time() * 1000) % 999999
-            marker_s = f"XSTART{ts}X"
-            marker_e = f"XEND{ts}X"
-
+            # Flush any stale data
             if self._shell.recv_ready():
                 self._shell.recv(65535)
 
-            self._shell.send(f"echo {marker_s}; {cmd}; echo {marker_e}\n")
+            self._shell.send(f"{cmd}\n")
 
             output = ""
             deadline = time.time() + timeout
+            cmd_keyword = cmd.strip().split()[0].lower()  # e.g. "show", "clear", "terminal"
+
             while time.time() < deadline:
                 time.sleep(0.1)
                 if self._shell.recv_ready():
                     chunk = self._shell.recv(65535).decode("utf-8", errors="ignore")
                     output += chunk
-                    if marker_e in output:
-                        break
 
+                    # Check: did the completion prompt appear?
+                    clean = self._strip_ansi(output)
+                    lines = clean.split("\n")
+                    # Look at last non-empty line
+                    for line in reversed(lines):
+                        stripped = line.strip()
+                        if stripped:
+                            # Is it a prompt line that does NOT contain
+                            # the command text? (echo line DOES contain it)
+                            if self._is_prompt(stripped) and cmd_keyword not in stripped.lower():
+                                # Command complete! Extract output
+                                return self._extract_output(clean, cmd)
+                            break  # only check the last non-empty line
+
+            # Timeout — return what we have
+            self._log(f"CLISH timeout ({timeout}s) for '{cmd}'")
             clean = self._strip_ansi(output)
-            if marker_e not in clean:
-                return None
+            return self._extract_output(clean, cmd) if clean.strip() else None
 
-            # Extract text between markers
-            lines = clean.split("\n")
-            result = []
-            collecting = False
-            for line in lines:
-                stripped = line.strip()
-                if marker_e in stripped:
-                    break
-                if collecting:
-                    result.append(stripped)
-                if marker_s in stripped:
-                    collecting = True
-
-            return "\n".join(result).strip()
         except Exception as e:
             self._log(f"exec failed: {e}")
             return None
 
+    def _extract_output(self, clean_text, cmd):
+        """Extract command output: skip the echo line and the trailing prompt."""
+        lines = clean_text.split("\n")
+        result = []
+        skip_echo = True
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            # Skip the first line that contains the command (echo)
+            if skip_echo and cmd.strip().lower()[:20] in stripped.lower():
+                skip_echo = False
+                continue
+            # Skip prompt lines
+            if self._is_prompt(stripped):
+                continue
+            result.append(stripped)
+        return "\n".join(result).strip()
+
     def get_stats(self):
-        """Get Snort statistics via 'clish -c' from root bash.
-        Returns dict: {passed, blocked, bypassed_down, bypassed_busy, snort_alive}."""
-        # Check if Snort is alive
-        stats = {}
-        if self._snort_pid:
-            alive_out = self._exec(f"ps -p {self._snort_pid} -o pid= 2>/dev/null")
-            stats["snort_alive"] = bool(alive_out and alive_out.strip())
-        else:
-            stats["snort_alive"] = None
-
-        # Get statistics via non-interactive clish
-        raw = self._exec('clish -c "show snort statistics" 2>/dev/null')
+        """Run 'show snort statistics' and parse key counters.
+        Returns dict: {passed, blocked, bypassed_down, bypassed_busy}."""
+        raw = self._clish_exec("show snort statistics", timeout=20)
         if not raw:
-            self._log(f"clish -c returned empty (snort_alive={stats.get('snort_alive')})")
-            return stats if stats.get("snort_alive") is not None else None
+            self._log("get_stats: no output")
+            return None
 
-        self._log(f"Got stats ({len(raw)}c)")
-        print(f"[FtdSnortStats] Output: {repr(raw[:400])}")
-
+        stats = {}
         for line in raw.split("\n"):
             lo = line.strip().lower()
             if not lo:
@@ -3067,17 +3091,17 @@ class FtdSnortStats:
                 stats["bypassed_busy"] = self._parse_int(line)
 
         if "passed" in stats or "blocked" in stats:
-            self._log(f"Parsed: passed={stats.get('passed',0)}, blocked={stats.get('blocked',0)}, "
-                       f"bypass_down={stats.get('bypassed_down',0)}, bypass_busy={stats.get('bypassed_busy',0)}")
+            self._log(f"passed={stats.get('passed',0)} blocked={stats.get('blocked',0)} "
+                       f"byp_down={stats.get('bypassed_down',0)} byp_busy={stats.get('bypassed_busy',0)}")
         else:
             lines = [l.strip() for l in raw.split("\n") if l.strip()]
             preview = " | ".join(lines[:6])
-            self._log(f"Parse failed — output: {preview[:200]}")
+            self._log(f"Parse fail ({len(raw)}c): {preview[:200]}")
         return stats if ("passed" in stats or "blocked" in stats) else None
 
     def clear_stats(self):
-        out = self._exec('clish -c "clear snort statistics" 2>/dev/null')
-        self._log(f"clear_stats: {repr((out or '')[:60])}")
+        out = self._clish_exec("clear snort statistics", timeout=15)
+        self._log(f"clear_stats done")
 
     @staticmethod
     def _parse_int(line):
@@ -3394,7 +3418,7 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes, ft
 
             if use_ftd_ssh and ftd_monitor:
                 ftd_stats_snap = ftd_monitor.get_stats()
-                if ftd_stats_snap and "passed" in ftd_stats_snap:
+                if ftd_stats_snap:
                     passed = ftd_stats_snap.get("passed", 0)
                     blocked = ftd_stats_snap.get("blocked", 0)
                     bypassed_down = ftd_stats_snap.get("bypassed_down", 0)
@@ -3403,9 +3427,7 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes, ft
                     total_traffic = total_inspected + bypassed_down + bypassed_busy
                     alerts = blocked
 
-                    if ftd_stats_snap.get("snort_alive") is False:
-                        verdict = "BLINDED"
-                    elif total_traffic == 0:
+                    if total_traffic == 0:
                         verdict = "WARMING"
                     elif bypassed_down > 0:
                         verdict = "BLINDED"
