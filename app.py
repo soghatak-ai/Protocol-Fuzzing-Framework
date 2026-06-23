@@ -2889,19 +2889,19 @@ _CANARY_SIDS = ["1000001", "1000006"]  # TCP and UDP canary rules
 
 class FtdSnortStats:
     """SSH into FTD CLISH to read 'show snort statistics' for live verdict.
-    Uses silence-based output collection: waits until data stops flowing
-    rather than trying to detect the CLISH prompt (which is wrapped in
-    unpredictable ANSI sequences)."""
+    Uses silence-based output collection with a minimum wait time:
+    CLISH takes 1-2s to process commands, so we must wait before
+    checking for silence, or we'll break on the command echo."""
 
     # Comprehensive ANSI/VT100 stripping — covers all FTD CLISH sequences
     _ANSI_RE = re.compile(
-        r'\x1b\[\??[0-9;]*[a-zA-Z]'  # CSI sequences: \x1b[...X and \x1b[?...X
-        r'|\x1b\][^\x07]*\x07'        # OSC sequences: \x1b]...BEL
-        r'|\x1b[=>()#]'                # Simple escapes: \x1b= \x1b> \x1b( etc
+        r'\x1b\[\??[0-9;]*[a-zA-Z]'  # CSI: \x1b[...X and \x1b[?...X
+        r'|\x1b\][^\x07]*\x07'        # OSC: \x1b]...BEL
+        r'|\x1b[=>()#]'                # Simple: \x1b= \x1b> \x1b( etc
         r'|\r'                          # Carriage returns
     )
 
-    def __init__(self, host, port=22, username="admin", password=""):
+    def __init__(self, host, port=22, username="admin", password="", log_fn=None):
         self.host = host
         self.port = port
         self.username = username
@@ -2911,12 +2911,18 @@ class FtdSnortStats:
         self._last_reconnect = 0
         self._reconnect_cooldown = 30
         self._connected = False
+        self._log_fn = log_fn or (lambda msg: None)
+
+    def _log(self, msg):
+        """Log to both console and event log (if callback provided)."""
+        print(f"[FtdSnortStats] {msg}")
+        self._log_fn(f"[FTD] {msg}")
 
     def connect(self):
         try:
             import paramiko
         except ImportError:
-            print("[FtdSnortStats] paramiko not installed")
+            self._log("paramiko not installed")
             return False
         try:
             self._client = paramiko.SSHClient()
@@ -2928,31 +2934,30 @@ class FtdSnortStats:
             )
             self._shell = self._client.invoke_shell(width=200, height=50)
             banner = self._drain(3.0)
-            print(f"[FtdSnortStats] Banner ({len(banner)} chars): {repr(banner[:120])}")
+            self._log(f"Banner received ({len(banner)} chars)")
 
             # Disable CLISH paging
             self._shell.send("terminal pager 0\n")
-            pager_out = self._drain(2.0)
-            print(f"[FtdSnortStats] Pager response: {repr(self._strip_ansi(pager_out).strip()[:100])}")
+            self._drain(2.0)
 
-            # Verify CLISH works with a quick test command
-            test = self._clish_exec_raw("show version", timeout=5)
+            # Verify CLISH works with a test command
+            test = self._clish_exec_raw("show version", timeout=8, min_wait=3.0)
             clean_test = self._strip_ansi(test) if test else ""
-            if "Version" in clean_test or "version" in clean_test or "Cisco" in clean_test or len(clean_test) > 20:
-                print(f"[FtdSnortStats] CLISH verified on {self.host}:{self.port} ({len(clean_test)} chars)")
+            if len(clean_test) > 10:
+                self._log(f"CLISH verified ({len(clean_test)} chars)")
                 self._connected = True
                 return True
             else:
-                print(f"[FtdSnortStats] CLISH verify FAILED. Got: {repr(clean_test[:200])}")
-                self._connected = True  # still try to use it
+                self._log(f"CLISH verify WARNING — short response ({len(clean_test)} chars): {repr(clean_test[:80])}")
+                self._connected = True
                 return True
         except Exception as e:
-            print(f"[FtdSnortStats] Connection failed: {e}")
+            self._log(f"Connection failed: {e}")
             import traceback; traceback.print_exc()
             return False
 
     def _reconnect(self):
-        print("[FtdSnortStats] Reconnecting...")
+        self._log("Reconnecting...")
         self.close()
         return self.connect()
 
@@ -2969,61 +2974,75 @@ class FtdSnortStats:
     def _strip_ansi(cls, text):
         return cls._ANSI_RE.sub('', text)
 
-    def _clish_exec_raw(self, cmd, timeout=5, silence=1.0):
-        """Send a CLISH command and collect output using silence detection.
-        Returns raw output string (before ANSI stripping).
-        Waits until no new data arrives for `silence` seconds."""
+    def _clish_exec_raw(self, cmd, timeout=8, min_wait=2.5, silence=0.8):
+        """Send a CLISH command and collect output.
+
+        CRITICAL TIMING:
+        - CLISH echoes the command immediately (~50ms)
+        - Then takes 1-2s to process before sending output
+        - Without min_wait, silence detection triggers on the
+          echo gap and returns before output even starts
+
+        Args:
+            cmd:      CLISH command string
+            timeout:  Max total wait (seconds)
+            min_wait: Always wait at least this long before
+                      allowing silence detection to trigger
+            silence:  After min_wait, break when no new data
+                      for this many seconds
+        """
         if not self._shell or self._shell.closed:
             return None
         try:
-            # Flush any pending data
             if self._shell.recv_ready():
                 self._shell.recv(65535)
             self._shell.send(f"{cmd}\n")
             output = ""
-            deadline = time.time() + timeout
-            last_data = time.time()
+            start = time.time()
+            deadline = start + timeout
+            last_data = start
             while time.time() < deadline:
                 time.sleep(0.1)
                 if self._shell.recv_ready():
                     chunk = self._shell.recv(65535).decode("utf-8", errors="ignore")
                     output += chunk
                     last_data = time.time()
-                elif output and (time.time() - last_data) >= silence:
-                    # No new data for `silence` seconds — command complete
-                    break
-            return output
+                else:
+                    elapsed = time.time() - start
+                    gap = time.time() - last_data
+                    # Only check silence AFTER min_wait has passed
+                    if elapsed >= min_wait and output and gap >= silence:
+                        break
+            return output if output else None
         except Exception as e:
-            print(f"[FtdSnortStats] exec failed: {e}")
+            self._log(f"exec failed: {e}")
             return None
 
     def get_stats(self):
         """Run 'show snort statistics' and parse key counters.
         Returns dict with keys: passed, blocked, bypassed_down, bypassed_busy."""
-        raw = self._clish_exec_raw("show snort statistics", timeout=5, silence=1.0)
+        raw = self._clish_exec_raw("show snort statistics", timeout=8, min_wait=2.5, silence=0.8)
         if not raw:
-            # Attempt reconnect with cooldown
             now = time.time()
             if (now - self._last_reconnect) >= self._reconnect_cooldown:
                 self._last_reconnect = now
-                print("[FtdSnortStats] No output — attempting reconnect")
+                self._log("No output — reconnecting")
                 if self._reconnect():
-                    raw = self._clish_exec_raw("show snort statistics", timeout=5, silence=1.0)
+                    raw = self._clish_exec_raw("show snort statistics", timeout=8, min_wait=2.5, silence=0.8)
             if not raw:
-                print("[FtdSnortStats] get_stats failed: no output")
+                self._log("get_stats: no output")
                 return None
 
         clean = self._strip_ansi(raw)
-        print(f"[FtdSnortStats] Raw output ({len(raw)} chars), clean ({len(clean)} chars)")
-        # Log first 300 chars for debugging
-        print(f"[FtdSnortStats] Clean output: {repr(clean[:300])}")
+        # Debug: log what we received
+        print(f"[FtdSnortStats] Raw={len(raw)}c, Clean={len(clean)}c")
+        print(f"[FtdSnortStats] Output: {repr(clean[:400])}")
 
         stats = {}
         for line in clean.split("\n"):
             lo = line.strip().lower()
             if not lo:
                 continue
-            # Case-insensitive matching for resilience
             if "passed packets" in lo:
                 stats["passed"] = self._parse_int(line)
             elif "blocked packets" in lo:
@@ -3038,17 +3057,16 @@ class FtdSnortStats:
         if stats:
             print(f"[FtdSnortStats] Parsed: {stats}")
         else:
-            print(f"[FtdSnortStats] WARNING: No stats parsed from output!")
-            # Print all non-empty lines to help debug
+            self._log("WARNING: could not parse stats from CLISH output")
             lines = [l.strip() for l in clean.split("\n") if l.strip()]
-            for l in lines[:15]:
+            for l in lines[:10]:
                 print(f"  | {l}")
         return stats if stats else None
 
     def clear_stats(self):
-        out = self._clish_exec_raw("clear snort statistics", timeout=4, silence=0.8)
+        out = self._clish_exec_raw("clear snort statistics", timeout=6, min_wait=2.0, silence=0.8)
         clean = self._strip_ansi(out) if out else ""
-        print(f"[FtdSnortStats] clear_stats response: {repr(clean.strip()[:100])}")
+        self._log(f"clear_stats done ({len(clean)} chars)")
 
     @staticmethod
     def _parse_int(line):
@@ -3206,6 +3224,7 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes, ft
                 port=ftd_config.get("port", 22),
                 username=ftd_config.get("username", "admin"),
                 password=ftd_config.get("password", ""),
+                log_fn=_multiattack_log,
             )
             if ftd_monitor.connect():
                 use_ftd_ssh = True
@@ -3425,7 +3444,7 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes, ft
                 update["ftd_stats"] = ftd_stats_snap
             multiattack_state.update(update)
 
-            time.sleep(2)
+            time.sleep(1 if use_ftd_ssh else 2)
 
         # Final stats
         for p in _multiattack_procs:
