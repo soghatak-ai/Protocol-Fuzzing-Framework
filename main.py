@@ -404,19 +404,46 @@ def _remote_watchdog(monitor):
     if baseline_mem is None:
         log_event("WARNING", "Could not read remote Snort memory — process monitoring limited to liveness.")
 
+    consecutive_failures = 0
+    max_failures = 3
+
     while fuzzer_state["running"]:
         time.sleep(2.0)
         alive = monitor.is_alive()
-        if alive is False:
-            fuzzer_state["anomaly_detected"] = "REMOTE_SNORT_CRASH"
-            fuzzer_state["status"] = "crash_detected"
-            fuzzer_state["trigger_detail"] = (
-                f"Snort PID {monitor.snort_pid} on {monitor.host} stopped responding. "
-                "Process vanished \u2014 likely crashed or killed by the FTD watchdog."
-            )
-            fuzzer_state["running"] = False
-            log_event("CRITICAL", f"Remote Snort crash on {monitor.host} (PID {monitor.snort_pid})")
-            break
+
+        if alive is True:
+            consecutive_failures = 0
+        elif alive is None:
+            pass
+        elif alive is False:
+            new_pid = monitor.find_snort_pid()
+            if new_pid:
+                log_event("INFO",
+                    f"Snort PID rotated on {monitor.host}: {monitor.snort_pid} → {new_pid} (normal FTD behavior)")
+                monitor.update_pid(new_pid)
+                fuzzer_state["snort_pid"] = new_pid
+                consecutive_failures = 0
+                baseline_mem = None
+                mem = monitor.get_memory_mb()
+                if mem is not None:
+                    baseline_mem = mem
+                    fuzzer_state["baseline_mem_mb"] = round(mem, 2)
+                continue
+
+            consecutive_failures += 1
+            log_event("WARNING",
+                f"Snort PID {monitor.snort_pid} not found on {monitor.host} "
+                f"({consecutive_failures}/{max_failures} before crash declaration)")
+            if consecutive_failures >= max_failures:
+                fuzzer_state["anomaly_detected"] = "REMOTE_SNORT_CRASH"
+                fuzzer_state["status"] = "crash_detected"
+                fuzzer_state["trigger_detail"] = (
+                    f"Snort PID {monitor.snort_pid} on {monitor.host} not found after "
+                    f"{max_failures} consecutive checks. No snort3 process found \u2014 likely crashed."
+                )
+                fuzzer_state["running"] = False
+                log_event("CRITICAL", f"Remote Snort crash on {monitor.host} (PID {monitor.snort_pid}) — confirmed after {max_failures} checks")
+                break
 
         mem = monitor.get_memory_mb()
         if mem is not None:
