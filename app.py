@@ -2907,6 +2907,10 @@ class FtdSnortStats:
         self._shell = None
         self._stats_cmd = None   # bash command that yields stats
         self._clear_cmd = None   # bash command that clears stats
+        self._alert_glob = None  # glob for per-instance perfmon base CSVs
+        self._alert_files = []   # resolved perf_monitor_base.csv paths (1 per instance)
+        self._alert_col = None   # 0-based column index of detection.alerts
+        self._alert_baseline = 0 # summed alert count captured at connect (for deltas)
         self._log_fn = log_fn or (lambda msg: None)
 
     def _log(self, msg):
@@ -2949,6 +2953,8 @@ class FtdSnortStats:
 
             # Probe: find a working way to pipe commands into clish
             self._probe_stats_command()
+            # Probe: locate Snort perfmon CSV that tracks alert counts
+            self._probe_alert_source()
             return True
         except Exception as e:
             self._log(f"Connection failed: {e}")
@@ -2978,6 +2984,83 @@ class FtdSnortStats:
             else:
                 self._log(f"  no data: {repr((out or '')[:100])}")
         self._log("WARNING: no working pipe-to-clish command found")
+
+    def _probe_alert_source(self):
+        """Locate Snort3 perfmon base CSVs and the 'detection.alerts' column.
+
+        FTD runs one Snort instance per core, each writing its own
+        perf_monitor_base.csv:
+          /ngfw/var/sf/detection_engines/<UUID>/instance-N/perf_monitor_base.csv
+        The 'detection.alerts' column counts events that triggered an
+        IPS alert.  Alerts must be SUMMED across all instances.
+
+        We glob (not hardcode the UUID), read one header to find the
+        column index dynamically, then record a baseline for deltas.
+        """
+        try:
+            glob = ("/ngfw/var/sf/detection_engines/*/instance-*/"
+                    "perf_monitor_base.csv")
+            listing = self._exec(f'ls {glob} 2>/dev/null', timeout=15)
+            files = [l.strip() for l in (listing or "").split("\n")
+                     if l.strip().endswith("perf_monitor_base.csv")]
+            if not files:
+                self._log("No perf_monitor_base.csv found \u2014 alerts n/a")
+                return
+            self._alert_glob = glob
+            self._alert_files = files
+            self._log(f"Found {len(files)} perfmon base file(s)")
+
+            # Detect the detection.alerts column from one header
+            header = self._exec(f'head -1 "{files[0]}" 2>/dev/null', timeout=10)
+            if not header or "," not in header:
+                self._log("Could not read perfmon header")
+                return
+            cols = [c.strip().lstrip("#").strip() for c in header.split(",")]
+            idx = None
+            for want in ("detection.alerts", "detection.total_alerts"):
+                if want in cols:
+                    idx = cols.index(want)
+                    break
+            if idx is None:  # fallback: a detection.* alert col (not the limit)
+                for i, c in enumerate(cols):
+                    cl = c.lower()
+                    if "detection" in cl and "alert" in cl and "limit" not in cl:
+                        idx = i
+                        break
+            if idx is None:
+                self._log("No detection.alerts column in perfmon header")
+                return
+
+            self._alert_col = idx
+            self._alert_baseline = self.get_alerts(absolute=True) or 0
+            self._log(f"Alert col[{idx}]='{cols[idx]}', "
+                       f"{len(files)} instances, baseline={self._alert_baseline}")
+        except Exception as e:
+            self._log(f"alert probe failed: {e}")
+
+    def get_alerts(self, absolute=False):
+        """Sum 'detection.alerts' across all Snort instances.
+        If absolute=False, returns the delta since connect baseline.
+        Returns None if no alert source is configured/readable."""
+        if not self._alert_glob or self._alert_col is None:
+            return None
+        # tail -q -n1 prints the last line of EACH matched file (no headers)
+        out = self._exec(f'tail -q -n1 {self._alert_glob} 2>/dev/null', timeout=12)
+        if not out:
+            return None
+        total = 0
+        got_any = False
+        for line in out.split("\n"):
+            parts = line.split(",")
+            if self._alert_col < len(parts):
+                try:
+                    total += int(float(parts[self._alert_col].strip()))
+                    got_any = True
+                except (ValueError, IndexError):
+                    pass
+        if not got_any:
+            return None
+        return total if absolute else max(total - self._alert_baseline, 0)
 
     def _drain(self, shell, seconds=2.0):
         buf = ""
@@ -3072,8 +3155,17 @@ class FtdSnortStats:
                 stats["bypassed_busy"] = self._parse_int(line)
 
         if "passed" in stats or "blocked" in stats:
-            self._log(f"passed={stats.get('passed',0)} blocked={stats.get('blocked',0)} "
-                       f"byp_down={stats.get('bypassed_down',0)} byp_busy={stats.get('bypassed_busy',0)}")
+            passed = stats.get("passed", 0)
+            # Alert events from perfmon CSV (delta since connect), if available
+            alerts = self.get_alerts(absolute=False)
+            if alerts is not None:
+                stats["alerts"] = alerts
+                # Truly clean = passed that neither blocked nor alerted
+                stats["clean_passed"] = max(passed - alerts, 0)
+            self._log(f"passed={passed} blocked={stats.get('blocked',0)} "
+                       f"byp_down={stats.get('bypassed_down',0)} byp_busy={stats.get('bypassed_busy',0)}"
+                       + (f" alerts={alerts} clean_passed={stats['clean_passed']}"
+                          if alerts is not None else " (alerts: n/a)"))
         else:
             lines = [l.strip() for l in raw.split("\n") if l.strip()]
             preview = " | ".join(lines[:6])
