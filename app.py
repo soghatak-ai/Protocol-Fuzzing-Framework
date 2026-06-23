@@ -2932,12 +2932,13 @@ class FtdSnortStats:
                 password=self.password, timeout=10,
                 look_for_keys=False, allow_agent=False,
             )
-            self._shell = self._client.invoke_shell(width=200, height=50)
+            self._shell = self._client.invoke_shell(width=511, height=2048)
 
-            # Eat banner and capture the CLISH prompt
-            banner = self._drain(4.0)
-            clean = self._strip_ansi(banner)
-            self._log(f"Banner ({len(clean)}c)")
+            # Eat banner, then send a newline to elicit a fresh prompt
+            self._drain(3.0)
+            self._shell.send("\n")
+            resp = self._drain(2.0)
+            clean = self._strip_ansi(resp)
 
             # Find prompt: last non-empty line ending with >
             for line in reversed(clean.split("\n")):
@@ -2949,10 +2950,10 @@ class FtdSnortStats:
             if self._prompt:
                 self._log(f"CLISH prompt: '{self._prompt}'")
             else:
-                self._log(f"WARNING: could not detect prompt from banner: {repr(clean[-100:])}")
+                self._log(f"WARNING: no prompt detected: {repr(clean[-120:])}")
 
-            # Disable paging
-            self._clish_exec("terminal pager 0")
+            # Disable paging (height=2048 above also helps avoid pager)
+            self._clish_exec("terminal pager 0", timeout=10)
 
             # Verify with show version
             ver = self._clish_exec("show version", timeout=15)
@@ -2978,7 +2979,15 @@ class FtdSnortStats:
 
     @classmethod
     def _strip_ansi(cls, text):
-        return cls._ANSI_RE.sub('', text)
+        # Remove CSI/OSC/charset escape sequences
+        text = re.sub(r'\x1b\[[0-9;?]*[ -/]*[@-~]', '', text)  # CSI
+        text = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)', '', text)  # OSC
+        text = re.sub(r'\x1b[=>()#%][0-9A-Za-z]?', '', text)  # charset/keypad
+        text = re.sub(r'\x1b[78DEHMc]', '', text)  # save/restore cursor, etc.
+        text = re.sub(r'\x1b.', '', text)  # any remaining ESC + char
+        # Strip all remaining control chars except \n and \t
+        text = ''.join(c for c in text if c in '\n\t' or ord(c) >= 32)
+        return text
 
     def _is_prompt(self, line):
         """Check if a line looks like the CLISH prompt."""
@@ -3026,23 +3035,32 @@ class FtdSnortStats:
                     chunk = self._shell.recv(65535).decode("utf-8", errors="ignore")
                     output += chunk
 
-                    # Check: did the completion prompt appear?
                     clean = self._strip_ansi(output)
+
+                    # Handle pager: FTD shows "--More--" or "<--- More --->"
+                    # waiting for input. Send space to continue.
+                    tail = clean[-60:]
+                    if "More" in tail and ("--" in tail or "<" in tail):
+                        self._shell.send(" ")
+                        # Remove the pager marker so we don't re-trigger
+                        output = re.sub(r'<?-+\s*[Mm]ore\s*-+>?', '', output)
+                        continue
+
+                    # Check: did the completion prompt appear?
                     lines = clean.split("\n")
-                    # Look at last non-empty line
                     for line in reversed(lines):
                         stripped = line.strip()
                         if stripped:
-                            # Is it a prompt line that does NOT contain
-                            # the command text? (echo line DOES contain it)
+                            # Prompt line that does NOT contain command text
+                            # (the echo line DOES contain it)
                             if self._is_prompt(stripped) and cmd_keyword not in stripped.lower():
-                                # Command complete! Extract output
                                 return self._extract_output(clean, cmd)
                             break  # only check the last non-empty line
 
             # Timeout — return what we have
-            self._log(f"CLISH timeout ({timeout}s) for '{cmd}'")
             clean = self._strip_ansi(output)
+            tail = clean.strip()[-150:]
+            self._log(f"CLISH timeout ({timeout}s) '{cmd}' — got {len(clean)}c, tail={repr(tail)}")
             return self._extract_output(clean, cmd) if clean.strip() else None
 
         except Exception as e:
