@@ -2899,6 +2899,8 @@ class FtdSnortStats:
         self.password = password
         self._client = None
         self._shell = None
+        self._last_reconnect = 0
+        self._reconnect_cooldown = 30  # seconds between reconnect attempts
 
     def connect(self):
         try:
@@ -2942,9 +2944,18 @@ class FtdSnortStats:
                 buf += self._shell.recv(65535).decode("utf-8", errors="ignore")
         return buf
 
-    def _clish_exec(self, cmd, timeout=8):
+    _ANSI_RE = None
+
+    @classmethod
+    def _strip_ansi(cls, text):
+        import re as _re
+        if cls._ANSI_RE is None:
+            cls._ANSI_RE = _re.compile(r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b\[\?[0-9;]*[a-zA-Z]|\x1b[=>]|\r')
+        return cls._ANSI_RE.sub('', text)
+
+    def _clish_exec(self, cmd, timeout=6):
         """Run a CLISH command and return stripped output."""
-        import time as _t, re as _re
+        import time as _t
         if not self._shell or self._shell.closed:
             return None
         try:
@@ -2954,20 +2965,19 @@ class FtdSnortStats:
             output = ""
             deadline = _t.time() + timeout
             while _t.time() < deadline:
-                _t.sleep(0.2)
+                _t.sleep(0.15)
                 if self._shell.recv_ready():
                     chunk = self._shell.recv(65535).decode("utf-8", errors="ignore")
                     output += chunk
-                    # CLISH prompt: ">" or "hostname>" at end of output
-                    # Check last non-empty line is a short prompt ending with ">"
-                    stripped = output.rstrip()
+                    # Strip ANSI FIRST, then check for CLISH prompt
+                    clean = self._strip_ansi(output)
+                    stripped = clean.rstrip()
                     if stripped:
                         last_line = stripped.split("\n")[-1].strip()
                         if last_line.endswith(">") and len(last_line) < 40:
                             break
-            # Strip ANSI escape codes
-            clean = _re.sub(r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07|\r', '', output)
-            return clean
+            clean = self._strip_ansi(output)
+            return clean if clean.strip() else None
         except Exception as e:
             print(f"[FtdSnortStats] exec failed: {e}")
             return None
@@ -2975,11 +2985,15 @@ class FtdSnortStats:
     def get_stats(self):
         """Run 'show snort statistics' and parse key counters.
         Returns dict: {passed, blocked, bypassed_down, bypassed_busy, portscan} or None."""
+        import time as _t
         raw = self._clish_exec("show snort statistics")
         if not raw:
-            # SSH may have dropped — try reconnect once
-            if self._reconnect():
-                raw = self._clish_exec("show snort statistics")
+            # Only attempt reconnect if cooldown has elapsed
+            now = _t.time()
+            if (now - self._last_reconnect) >= self._reconnect_cooldown:
+                self._last_reconnect = now
+                if self._reconnect():
+                    raw = self._clish_exec("show snort statistics")
             if not raw:
                 return None
         stats = {}
