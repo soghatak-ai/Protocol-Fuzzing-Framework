@@ -2909,6 +2909,7 @@ class FtdSnortStats:
         self._clear_cmd = None   # bash command that clears stats
         self._alert_glob = None  # glob for per-instance perfmon base CSVs
         self._alert_files = []   # resolved perf_monitor_base.csv paths (1 per instance)
+        self._alert_arg = ""     # explicit space-joined quoted file paths for tail/awk
         self._alert_col = None   # 0-based column index of detection.alerts
         self._alert_baseline = 0 # summed alert count at connect (cumulative mode only)
         self._alert_cumulative = True  # detected: True=running total, False=per-interval
@@ -3009,17 +3010,23 @@ class FtdSnortStats:
         column index dynamically, then record a baseline for deltas.
         """
         try:
+            # Enumerate with `find` (traverses as root) instead of a shell
+            # glob, which fails to expand when the dirs aren't listable by
+            # the calling shell.
             glob = ("/ngfw/var/sf/detection_engines/*/instance-*/"
                     "perf_monitor_base.csv")
-            listing = self._exec(f'{self._sudo}ls {glob} 2>&1', timeout=15)
+            listing = self._exec(
+                f'{self._sudo}find /ngfw/var/sf/detection_engines '
+                f'-name perf_monitor_base.csv 2>&1', timeout=20)
             files = [l.strip() for l in (listing or "").split("\n")
                      if l.strip().endswith("perf_monitor_base.csv")]
             if not files:
                 self._log(f"No perf_monitor_base.csv found \u2014 alerts n/a "
-                           f"(ls said: {repr((listing or '')[:120])})")
+                           f"(find said: {repr((listing or '')[:160])})")
                 return
             self._alert_glob = glob
             self._alert_files = files
+            self._alert_arg = " ".join(f'"{f}"' for f in files)
             self._log(f"Found {len(files)} perfmon base file(s)")
 
             # Detect the detection.alerts column from one header
@@ -3100,7 +3107,7 @@ class FtdSnortStats:
         """After an attack, block until perfmon writes a NEW sample row so
         the final interval's alerts are captured on disk.  Returns True if
         a new row appeared, False on timeout / no source."""
-        if not self._alert_glob or self._alert_col is None:
+        if not self._alert_arg or self._alert_col is None:
             return False
         # Allow ~1.5 sample intervals plus a small buffer (cap at 6 min)
         if timeout is None:
@@ -3133,7 +3140,7 @@ class FtdSnortStats:
 
     def _sum_last_rows(self):
         """Sum detection.alerts from the last row of each instance CSV."""
-        out = self._exec(f'{self._sudo}tail -q -n1 {self._alert_glob} 2>/dev/null', timeout=12)
+        out = self._exec(f'{self._sudo}tail -q -n1 {self._alert_arg} 2>/dev/null', timeout=12)
         if not out:
             return None
         total, got = 0, False
@@ -3149,7 +3156,7 @@ class FtdSnortStats:
 
     def _latest_timestamp(self):
         """Largest #timestamp (field 1) currently present across instances."""
-        out = self._exec(f'{self._sudo}tail -q -n1 {self._alert_glob} 2>/dev/null', timeout=12)
+        out = self._exec(f'{self._sudo}tail -q -n1 {self._alert_arg} 2>/dev/null', timeout=12)
         mx = 0
         for line in (out or "").split("\n"):
             parts = line.split(",")
@@ -3167,7 +3174,7 @@ class FtdSnortStats:
         Per-interval mode: sum of detection.alerts across ALL rows newer
                            than the baseline timestamp, over all instances.
         """
-        if not self._alert_glob or self._alert_col is None:
+        if not self._alert_arg or self._alert_col is None:
             return None
 
         if not self._alert_cumulative:
@@ -3176,7 +3183,7 @@ class FtdSnortStats:
             t = 0 if absolute else self._alert_since_ts
             cmd = (f"{self._sudo}awk -F',' -v t={t} 'FNR>1 && ($1+0)>t "
                    f"{{s+=${awk_col}}} END{{print s+0}}' "
-                   f"{self._alert_glob} 2>/dev/null")
+                   f"{self._alert_arg} 2>/dev/null")
             out = self._exec(cmd, timeout=15)
             if not out:
                 return None
