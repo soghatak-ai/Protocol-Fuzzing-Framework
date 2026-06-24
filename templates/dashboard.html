@@ -1098,6 +1098,44 @@
         .ai-summary-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; margin-bottom: 16px; }
         .ai-summary-card h3 { font-size: 15px; color: var(--text-primary); margin-bottom: 8px; }
         .ai-summary-card p { font-size: 12px; color: var(--text-secondary); line-height: 1.6; }
+        /* Trigger Packets (per-vuln LLM-generated wire payloads) */
+        .tp-generate-btn { font-size: 11px; padding: 6px 12px; border-radius: 6px; background: rgba(96,165,250,0.10); color: var(--accent-blue); border: 1px solid rgba(96,165,250,0.35); cursor: pointer; font-weight: 600; transition: all 0.15s; }
+        .tp-generate-btn:hover { background: rgba(96,165,250,0.20); border-color: var(--accent-blue); }
+        .tp-generate-btn:disabled { opacity: 0.55; cursor: wait; }
+        .tp-list { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+        .tp-card { background: rgba(255,255,255,0.025); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; display: flex; gap: 10px; align-items: flex-start; transition: border-color 0.15s, background 0.15s; }
+        .tp-card.selected { border-color: var(--accent-green); background: rgba(74,222,128,0.06); }
+        .tp-checkbox { margin-top: 2px; accent-color: var(--accent-green); cursor: pointer; }
+        .tp-body { flex: 1; min-width: 0; }
+        .tp-row { display: flex; gap: 10px; align-items: center; font-size: 12px; }
+        .tp-name { color: var(--text-primary); font-weight: 600; }
+        .tp-meta { color: var(--text-muted); font-size: 10px; display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+        .tp-meta b { color: var(--text-secondary); font-weight: 500; }
+        .tp-desc { font-size: 11px; color: var(--text-secondary); margin-top: 4px; line-height: 1.5; }
+        .tp-hex { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--accent-cyan); background: rgba(0,0,0,0.25); padding: 6px 8px; border-radius: 4px; margin-top: 6px; word-break: break-all; max-height: 90px; overflow-y: auto; display: none; }
+        .tp-hex.open { display: block; }
+        .tp-hex-toggle { font-size: 10px; color: var(--accent-cyan); cursor: pointer; background: none; border: none; padding: 0; margin-top: 4px; }
+
+        /* Per-vuln packet sender controls */
+        .ps-field { display: flex; flex-direction: column; gap: 2px; }
+        .ps-field label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }
+        .ps-field input, .ps-field select { background: rgba(0,0,0,0.25); border: 1px solid var(--border); border-radius: 5px; color: var(--text-primary); padding: 5px 7px; font-size: 11px; font-family: inherit; }
+        .ps-btn { padding: 6px 14px; border-radius: 6px; font-size: 11px; font-weight: 600; border: 1px solid; cursor: pointer; transition: all 0.15s; }
+        .ps-btn.send { background: rgba(74,222,128,0.10); color: var(--accent-green); border-color: rgba(74,222,128,0.40); }
+        .ps-btn.send:hover:not(:disabled) { background: rgba(74,222,128,0.22); }
+        .ps-btn.stop { background: rgba(248,113,113,0.10); color: var(--accent-red); border-color: rgba(248,113,113,0.40); }
+        .ps-btn.stop:hover:not(:disabled) { background: rgba(248,113,113,0.22); }
+        .ps-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+        .ps-actions { display: flex; gap: 6px; }
+        .ps-log { margin-top: 10px; max-height: 180px; overflow-y: auto; background: rgba(0,0,0,0.28); border: 1px solid var(--border); border-radius: 5px; padding: 6px 8px; font-family: 'JetBrains Mono', monospace; font-size: 10px; line-height: 1.5; }
+        .ps-log:empty { display: none; }
+        .ps-log .ok { color: var(--accent-green); }
+        .ps-log .err { color: var(--accent-red); }
+        .ps-log .info { color: var(--text-muted); }
+        .ps-log .head { color: var(--accent-cyan); }
+        .ps-stats { font-size: 10px; color: var(--text-muted); margin-top: 6px; }
+        .ps-stats b { color: var(--text-primary); }
+
         .ai-vulns-more { font-size: 12px; color: var(--accent-blue); cursor: pointer; background: rgba(96,165,250,0.06); border: 1px solid var(--border); border-radius: 8px; padding: 10px 18px; margin: 8px 0 16px; display: flex; align-items: center; justify-content: center; gap: 6px; transition: all 0.2s; font-weight: 600; }
         .ai-vulns-more:hover { background: rgba(96,165,250,0.12); border-color: var(--accent-blue); }
         .ai-vulns-hidden { display: none; }
@@ -1921,7 +1959,253 @@
         let pendingDeleteFile = null;
         let currentMode = 'pipe';
         let currentPayloadMode = 'default';
+        let tabInstanceId = sessionStorage.getItem('fuzzerInstanceId') || null;
         let aiLastResults = null;
+
+        // ───── Trigger-Packet selection + sender (AI Analysis page) ─────
+        let aiAllPackets = {};        // pid -> packet object (cached client-side)
+        let aiPacketsByVuln = {};     // vid -> [pid, ...]
+        const vulnSelectedPkts = {}; // vid -> Set of pids
+        const vulnSendCtrls = {};    // vid -> AbortController
+        const vulnSendActive = {};   // vid -> bool
+
+        const TP_LS_KEY = 'aiPacketSender.v1';
+
+        function tpLoadPrefs() {
+            try {
+                const raw = localStorage.getItem(TP_LS_KEY);
+                if (!raw) return {};
+                return JSON.parse(raw) || {};
+            } catch (e) { return {}; }
+        }
+        function tpSavePrefs(patch) {
+            try {
+                const cur = tpLoadPrefs();
+                const next = Object.assign({}, cur, patch);
+                localStorage.setItem(TP_LS_KEY, JSON.stringify(next));
+            } catch (e) {}
+        }
+
+        function updateVulnSendBtn(vid) {
+            const btn = document.getElementById(`vs-send-${vid}`);
+            if (!btn) return;
+            const sel = vulnSelectedPkts[vid] || new Set();
+            btn.disabled = sel.size === 0 || !!vulnSendActive[vid];
+            btn.textContent = `Send (${sel.size})`;
+        }
+
+        function tpCardHtml(pkt) {
+            const vid = pkt.vuln_id;
+            const sel = (vulnSelectedPkts[vid] && vulnSelectedPkts[vid].has(pkt.id)) ? 'selected' : '';
+            const checked = (vulnSelectedPkts[vid] && vulnSelectedPkts[vid].has(pkt.id)) ? 'checked' : '';
+            const split = pkt.send_strategy === 'split_tcp' ? ` · split@${pkt.split_at||1}` : '';
+            return `<div class="tp-card ${sel}" id="tp-card-${pkt.id}" data-pid="${pkt.id}">
+                <input type="checkbox" class="tp-checkbox" ${checked}
+                       onclick="event.stopPropagation(); toggleVulnPacketSelection('${pkt.id}', '${vid}', this.checked)">
+                <div class="tp-body">
+                    <div class="tp-row">
+                        <div class="tp-name">${escHtml(pkt.name || pkt.id)}</div>
+                    </div>
+                    <div class="tp-meta">
+                        <span><b>${escHtml((pkt.protocol||'').toUpperCase())}/${pkt.port || '?'}</b></span>
+                        <span><b>${pkt.size}</b> bytes</span>
+                        ${split ? `<span>${split}</span>` : ''}
+                        <button class="tp-hex-toggle" onclick="event.stopPropagation(); this.closest('.tp-body').querySelector('.tp-hex').classList.toggle('open')">show hex</button>
+                        <button class="tp-hex-toggle" onclick="event.stopPropagation(); navigator.clipboard.writeText('${pkt.hex}')">copy hex</button>
+                        <button class="tp-hex-toggle" style="color:var(--accent-red)" onclick="event.stopPropagation(); deleteTriggerPacket('${pkt.id}')">remove</button>
+                    </div>
+                    <div class="tp-desc">${escHtml(pkt.description || '')}</div>
+                    <div class="tp-hex">${escHtml(pkt.hex)}</div>
+                </div>
+            </div>`;
+        }
+
+        function renderPacketCardsForVuln(vid, packets) {
+            const slot = document.getElementById(`tp-list-${vid}`);
+            if (!slot) return;
+            if (!packets || packets.length === 0) {
+                slot.innerHTML = '';
+                return;
+            }
+            slot.innerHTML = packets.map(tpCardHtml).join('');
+        }
+
+        function toggleVulnPacketSelection(pid, vid, checked) {
+            if (!vulnSelectedPkts[vid]) vulnSelectedPkts[vid] = new Set();
+            if (checked) vulnSelectedPkts[vid].add(pid);
+            else         vulnSelectedPkts[vid].delete(pid);
+            const card = document.getElementById(`tp-card-${pid}`);
+            if (card) card.classList.toggle('selected', checked);
+            updateVulnSendBtn(vid);
+        }
+
+        async function generateTriggerPackets(vid, btn) {
+            const originalText = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = 'Generating...';
+            try {
+                const r = await fetch(`/api/ai/vulns/${encodeURIComponent(vid)}/generate_packets`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({n_packets: 6}),
+                });
+                const data = await r.json();
+                if (!r.ok) {
+                    appendVulnLog(vid, `Generate failed: ${data.error || r.statusText}`, 'err');
+                    return;
+                }
+                const old = aiPacketsByVuln[String(vid)] || [];
+                old.forEach(pid => { delete aiAllPackets[pid]; });
+                vulnSelectedPkts[String(vid)] = new Set();
+                aiPacketsByVuln[String(vid)] = data.packets.map(p => p.id);
+                data.packets.forEach(p => { aiAllPackets[p.id] = p; });
+                renderPacketCardsForVuln(vid, data.packets);
+                updateVulnSendBtn(String(vid));
+                appendVulnLog(vid, `Generated ${data.count} packet${data.count===1?'':'s'}${data.rejected?` (${data.rejected} rejected)`:''}`, 'info');
+            } catch (e) {
+                appendVulnLog(vid, `Generate failed: ${e}`, 'err');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = originalText;
+            }
+        }
+
+        async function deleteTriggerPacket(pid) {
+            try {
+                await fetch(`/api/ai/packets/${encodeURIComponent(pid)}`, {method: 'DELETE'});
+            } catch (e) {}
+            const pkt = aiAllPackets[pid];
+            delete aiAllPackets[pid];
+            if (pkt) {
+                const vid = pkt.vuln_id;
+                const lst = aiPacketsByVuln[vid] || [];
+                aiPacketsByVuln[vid] = lst.filter(x => x !== pid);
+                if (vulnSelectedPkts[vid]) vulnSelectedPkts[vid].delete(pid);
+                updateVulnSendBtn(vid);
+            }
+            const card = document.getElementById(`tp-card-${pid}`);
+            if (card) card.remove();
+        }
+
+        function appendVulnLog(vid, msg, kind) {
+            const log = document.getElementById(`vs-log-${vid}`);
+            if (!log) return;
+            const d = document.createElement('div');
+            d.className = kind || '';
+            d.textContent = msg;
+            log.appendChild(d);
+            log.scrollTop = log.scrollHeight;
+            while (log.childNodes.length > 400) log.removeChild(log.firstChild);
+        }
+
+        function updateVulnStats(vid, html) {
+            const el = document.getElementById(`vs-stats-${vid}`);
+            if (el) el.innerHTML = html;
+        }
+
+        async function startVulnSend(vid) {
+            if (vulnSendActive[vid]) return;
+            const selected = vulnSelectedPkts[vid] || new Set();
+            const pids = Array.from(selected);
+            if (!pids.length) return;
+
+            const target_ip = (document.getElementById(`vs-ip-${vid}`).value || '').trim();
+            if (!target_ip) {
+                appendVulnLog(vid, 'Target IP is required.', 'err');
+                return;
+            }
+            const port = document.getElementById(`vs-port-${vid}`).value || '';
+            const mode = document.getElementById(`vs-mode-${vid}`).value;
+
+            vulnSendActive[vid] = true;
+            document.getElementById(`vs-send-${vid}`).disabled = true;
+            document.getElementById(`vs-stop-${vid}`).disabled = false;
+            appendVulnLog(vid, `Sending ${pids.length} packet(s) to ${target_ip} [${mode}]`, 'head');
+
+            vulnSendCtrls[vid] = new AbortController();
+            let txCount = 0, errCount = 0;
+
+            try {
+                const r = await fetch(`/api/ai/vulns/${encodeURIComponent(vid)}/packets/send/stream`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({packet_ids: pids, target_ip, port_override: port, mode, delay_ms: 0}),
+                    signal: vulnSendCtrls[vid].signal,
+                });
+                if (!r.ok) {
+                    const txt = await r.text();
+                    appendVulnLog(vid, `Send failed: HTTP ${r.status} ${txt.slice(0,200)}`, 'err');
+                    return;
+                }
+                const reader = r.body.getReader();
+                const dec = new TextDecoder();
+                let buf = '';
+                while (true) {
+                    const {done, value} = await reader.read();
+                    if (done) break;
+                    buf += dec.decode(value, {stream: true});
+                    const lines = buf.split('\n');
+                    buf = lines.pop();
+                    for (const line of lines) {
+                        if (!line.trim()) continue;
+                        let evt;
+                        try { evt = JSON.parse(line); } catch (e) { continue; }
+                        if (evt.type === 'start') {
+                            appendVulnLog(vid, `start mode=${evt.mode} count=${evt.count} target=${evt.target_ip}`, 'head');
+                        } else if (evt.type === 'tx') {
+                            txCount++;
+                            if (!evt.ok) errCount++;
+                            appendVulnLog(vid,
+                                `#${evt.iter} ${evt.ok?'OK':'ERR'} ${(evt.protocol||'').toUpperCase()} ${evt.dst} ` +
+                                `${evt.sent}B ${evt.duration_ms}ms · ${(evt.name||'').slice(0,60)}` +
+                                (evt.error ? ` [${evt.error}]` : ''),
+                                evt.ok ? 'ok' : 'err'
+                            );
+                            updateVulnStats(vid, `sent <b>${txCount}</b> · errors <b>${errCount}</b>`);
+                        } else if (evt.type === 'done') {
+                            appendVulnLog(vid, `done · sent ${evt.tx_count} · errors ${evt.errors} · ${evt.elapsed_ms}ms`, 'head');
+                        } else if (evt.type === 'error') {
+                            appendVulnLog(vid, `error: ${evt.error}`, 'err');
+                        }
+                    }
+                }
+            } catch (e) {
+                if (e.name !== 'AbortError') appendVulnLog(vid, `Stream error: ${e}`, 'err');
+            } finally {
+                vulnSendActive[vid] = false;
+                vulnSendCtrls[vid] = null;
+                document.getElementById(`vs-stop-${vid}`).disabled = true;
+                updateVulnSendBtn(vid);
+            }
+        }
+
+        async function stopVulnSend(vid) {
+            try { await fetch(`/api/ai/vulns/${encodeURIComponent(vid)}/packets/send/stop`, {method: 'POST'}); } catch (e) {}
+        }
+
+        async function refreshTriggerPacketsFromServer() {
+            try {
+                const r = await fetch('/api/ai/packets');
+                if (!r.ok) return;
+                const data = await r.json();
+                aiAllPackets = {};
+                aiPacketsByVuln = {};
+                (data.packets || []).forEach(p => { aiAllPackets[p.id] = p; });
+                Object.entries(data.by_vuln || {}).forEach(([vid, pids]) => {
+                    aiPacketsByVuln[vid] = pids;
+                    const pkts = pids.map(pid => aiAllPackets[pid]).filter(Boolean);
+                    renderPacketCardsForVuln(vid, pkts);
+                    if (vulnSelectedPkts[vid]) {
+                        const kept = new Set();
+                        vulnSelectedPkts[vid].forEach(pid => {
+                            if (aiAllPackets[pid]) kept.add(pid);
+                        });
+                        vulnSelectedPkts[vid] = kept;
+                    }
+                    updateVulnSendBtn(vid);
+                });
+            } catch (e) {}
+        }
 
         let stratLabels = {
             smart_dns:        'Smart DNS',
@@ -2149,7 +2433,8 @@
 
         function connectSSE() {
             if (evtSource) evtSource.close();
-            evtSource = new EventSource('/api/stream');
+            const url = tabInstanceId ? '/api/instances/' + tabInstanceId + '/stream' : '/api/stream';
+            evtSource = new EventSource(url);
             evtSource.onmessage = function(e) {
                 try { updateUI(JSON.parse(e.data)); } catch (err) {}
             };
@@ -2200,16 +2485,34 @@
             }
 
             try {
-                const res = await fetch('/api/start', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(body)
-                });
-                const data = await res.json();
-                if (data.error) {
-                    alert(data.error);
-                    document.getElementById('btn-start').disabled = false;
-                    document.getElementById('proto-select').disabled = false;
+                if (currentMode === 'live') {
+                    const res = await fetch('/api/instances', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ protocol: body.protocol, live_config: body.live_config })
+                    });
+                    const data = await res.json();
+                    if (data.error) {
+                        alert(data.error);
+                        document.getElementById('btn-start').disabled = false;
+                        document.getElementById('proto-select').disabled = false;
+                        return;
+                    }
+                    tabInstanceId = data.instance_id;
+                    sessionStorage.setItem('fuzzerInstanceId', tabInstanceId);
+                    connectSSE();
+                } else {
+                    const res = await fetch('/api/start', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body)
+                    });
+                    const data = await res.json();
+                    if (data.error) {
+                        alert(data.error);
+                        document.getElementById('btn-start').disabled = false;
+                        document.getElementById('proto-select').disabled = false;
+                    }
                 }
             } catch (e) { alert('Failed to start: ' + e); }
         }
@@ -2217,9 +2520,14 @@
         async function stopFuzzer() {
             document.getElementById('btn-stop').disabled = true;
             try {
-                const res = await fetch('/api/stop', { method: 'POST' });
+                const url = tabInstanceId ? '/api/instances/' + tabInstanceId + '/stop' : '/api/stop';
+                const res = await fetch(url, { method: 'POST' });
                 const data = await res.json();
                 if (data.error) alert(data.error);
+                if (tabInstanceId) {
+                    sessionStorage.removeItem('fuzzerInstanceId');
+                    tabInstanceId = null;
+                }
             } catch (e) { alert('Failed to stop: ' + e); }
         }
 
@@ -2518,10 +2826,11 @@
             const VULN_PREVIEW = 5;
             const vulnCardHtml = (v) => {
                 const confColor = (v.confidence || 0) >= 90 ? 'var(--accent-green)' : (v.confidence || 0) >= 70 ? 'var(--accent-yellow)' : 'var(--accent-orange)';
-                return `<div class="ai-vuln-card" onclick="this.classList.toggle('open')">
-                    <div class="ai-vuln-header">
+                const vid = (v.original_id != null ? v.original_id : (v.id != null ? v.id : '?'));
+                return `<div class="ai-vuln-card" data-vid="${vid}">
+                    <div class="ai-vuln-header" onclick="this.parentElement.classList.toggle('open')" style="cursor:pointer;">
                         <div class="ai-vuln-left">
-                            <div class="ai-vuln-id ${v.severity}">${v.original_id || v.id || '?'}</div>
+                            <div class="ai-vuln-id ${v.severity}">${vid}</div>
                             <div>
                                 <div class="ai-vuln-title">${escHtml(v.bug_class)} in ${escHtml(v.function)}</div>
                                 <div class="ai-vuln-sub">Lines ${v.line_range}${v.confidence ? ` · <span style="color:${confColor}">${v.confidence}% confidence</span>` : ''}</div>
@@ -2540,7 +2849,7 @@
                         </div>
                         ${v.strategy_reasoning ? `<div class="ai-vuln-section"><div class="ai-vuln-label">Strategy Match</div><div class="ai-vuln-text">${escHtml(v.strategy_reasoning)}</div></div>` : ''}
                         ${v.payload_hex ? `<div class="ai-vuln-section">
-                            <div class="ai-vuln-label">Exploit Payload</div>
+                            <div class="ai-vuln-label">Exploit Payload (LLM example)</div>
                             <div class="ai-payload-block">
                                 <div class="ai-payload-header">
                                     <span>${escHtml(v.payload_description || 'Raw hex payload')}</span>
@@ -2552,6 +2861,35 @@
                         <div class="ai-meta-row">
                             <span class="ai-meta-tag"><strong>Protocol:</strong> ${v.protocol || '?'}/${v.port || '?'}</span>
                             ${v.preconditions ? `<span class="ai-meta-tag"><strong>Precondition:</strong> ${escHtml(v.preconditions)}</span>` : ''}
+                        </div>
+                        <div class="ai-vuln-section" style="margin-top:14px; padding-top:12px; border-top:1px solid var(--border);">
+                            <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+                                <div>
+                                    <div class="ai-vuln-label">Trigger Packets</div>
+                                    <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">Ask the AI to craft 5&ndash;6 wire-ready packets that drive execution into this exact function.</div>
+                                </div>
+                                <button class="tp-generate-btn" data-vid="${vid}" onclick="event.stopPropagation(); generateTriggerPackets('${vid}', this)">Generate Trigger Packets</button>
+                            </div>
+                            <div class="tp-list" id="tp-list-${vid}" data-vid="${vid}"></div>
+                            <div class="vuln-sender" id="vs-${vid}" style="margin-top:10px; padding:10px 12px; background:rgba(0,0,0,0.15); border:1px solid var(--border); border-radius:6px;">
+                                <div style="display:grid; grid-template-columns:1.4fr 0.8fr 1fr 0.8fr auto auto; gap:8px; align-items:end;">
+                                    <div class="ps-field"><label>Target IP</label>
+                                        <input type="text" class="vs-target-ip" id="vs-ip-${vid}" placeholder="192.168.41.100" value="${escHtml(tpLoadPrefs().target_ip || '')}"
+                                               oninput="tpSavePrefs({target_ip: this.value})"></div>
+                                    <div class="ps-field"><label>Port (override)</label>
+                                        <input type="number" class="vs-port" id="vs-port-${vid}" placeholder="from packet" value="${tpLoadPrefs().port || ''}"
+                                               oninput="tpSavePrefs({port: this.value})" title="Leave blank to use each packet's own port (e.g. 445 for SMB)"></div>
+                                    <div class="ps-field"><label>Mode</label>
+                                        <select class="vs-mode" id="vs-mode-${vid}">
+                                            <option value="send_once">Single pass</option>
+                                            <option value="round_robin" selected>Continuous flood</option>
+                                        </select></div>
+                                    <button class="ps-btn send vs-send-btn" id="vs-send-${vid}" onclick="event.stopPropagation(); startVulnSend('${vid}')" disabled>Send</button>
+                                    <button class="ps-btn stop vs-stop-btn" id="vs-stop-${vid}" onclick="event.stopPropagation(); stopVulnSend('${vid}')" disabled>Stop</button>
+                                </div>
+                                <div class="ps-stats" id="vs-stats-${vid}"></div>
+                                <div class="ps-log" id="vs-log-${vid}"></div>
+                            </div>
                         </div>
                     </div>
                 </div>`;
@@ -2647,6 +2985,7 @@
             }
 
             area.innerHTML = html;
+            refreshTriggerPacketsFromServer();
         }
 
         function aiRenderWeightComparison(rec) {
@@ -3532,7 +3871,14 @@
             }
         }
 
-        connectSSE();
+        if (tabInstanceId) {
+            fetch('/api/instances/' + tabInstanceId)
+                .then(r => { if (!r.ok) { sessionStorage.removeItem('fuzzerInstanceId'); tabInstanceId = null; } })
+                .catch(() => { sessionStorage.removeItem('fuzzerInstanceId'); tabInstanceId = null; })
+                .finally(() => { connectSSE(); });
+        } else {
+            connectSSE();
+        }
         fetchWeights();
         aiRefreshWeightStatus();
         aiLoadHistory();

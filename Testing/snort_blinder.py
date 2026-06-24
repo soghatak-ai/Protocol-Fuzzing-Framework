@@ -47,6 +47,12 @@ UDP_SEND_TIMEOUT = 0.05
 CANARY_PAYLOAD = b"GET /EICAR-STANDARD-ANTIVIRUS-TEST-FILE! HTTP/1.1\r\nHost: target\r\n\r\n"
 CANARY_SID = "1000001"
 
+# Detection string embedded into a fraction of flood payloads so IPS alerts
+# scale with packet volume.  Defaults to the EICAR content substring matched by
+# canary rules SID 1000001 (tcp) / 1000006 (udp).  Override via --inject-string.
+INJECT_STRING = b"EICAR-STANDARD-ANTIVIRUS-TEST-FILE!"
+INJECT_RATE = 0.0  # 0.0-1.0 fraction of payloads that carry INJECT_STRING (--inject-rate)
+
 ATTACKER = "kali_attacker"
 FIREWALL = "snort_firewall"
 SNORT_LOG = "/var/log/snort/alert_fast.txt"
@@ -204,13 +210,19 @@ def build_payload_pool(proto, mutator, dns_classes=None):
     for _ in range(PAYLOAD_POOL_SIZE):
         try:
             if proto == "dns" and dns_classes:
-                pool.append(gen_dns_payload(dns_classes)[:MAX_PAYLOAD_SIZE])
+                p = gen_dns_payload(dns_classes)[:MAX_PAYLOAD_SIZE]
             elif mutator:
-                pool.append(gen_mutated_payload(mutator))
+                p = gen_mutated_payload(mutator)
             else:
-                pool.append(b"\x00" * 64)
+                p = b"\x00" * 64
         except Exception:
-            pool.append(b"\x00" * 64)
+            p = b"\x00" * 64
+        # Embed the detection string in a fraction of payloads so content-match
+        # IPS rules fire in proportion to flood volume.  Prepended so it always
+        # survives the MAX_PAYLOAD_SIZE truncation.
+        if INJECT_RATE > 0 and random.random() < INJECT_RATE:
+            p = (INJECT_STRING + p)[:MAX_PAYLOAD_SIZE]
+        pool.append(p)
     return pool
 
 
@@ -442,7 +454,12 @@ INTENSITY_PRESETS = {
 
 # -- Flood engine main --------------------------------------------------------
 def run_flood(target, duration, phase_duration, intensity=1,
-              proto_filter=None, stats_file_override=None):
+              proto_filter=None, stats_file_override=None,
+              inject_rate=0.0, inject_string=None):
+    global INJECT_RATE, INJECT_STRING
+    INJECT_RATE = max(0.0, min(1.0, inject_rate))
+    if inject_string:
+        INJECT_STRING = inject_string.encode() if isinstance(inject_string, str) else inject_string
     preset = INTENSITY_PRESETS.get(intensity, INTENSITY_PRESETS[1])
 
     # Filter protocols if subset specified
@@ -474,6 +491,9 @@ def run_flood(target, duration, phase_duration, intensity=1,
           flush=True)
     print(f"  Protocols: {', '.join(sorted(active_reg.keys()))}", flush=True)
     print(f"  Stats file: {sf}", flush=True)
+    if INJECT_RATE > 0:
+        print(f"  [*] Detection injection: {INJECT_RATE*100:.0f}% of payloads carry "
+              f"{INJECT_STRING.decode(errors='replace')!r}", flush=True)
 
     # Import mutators
     print("  [*] Importing mutators...", flush=True)
@@ -899,12 +919,18 @@ def main():
                         help="Stats JSON path override (flood mode only)")
     parser.add_argument("--processes", type=int, default=None,
                         help="Number of parallel flood processes (overrides auto)")
+    parser.add_argument("--inject-rate", type=float, default=0.0,
+                        help="Fraction (0.0-1.0) of flood payloads to embed the "
+                             "detection string into (so IPS alerts scale with volume)")
+    parser.add_argument("--inject-string", type=str, default=None,
+                        help="Detection string to embed (default: EICAR content)")
     args = parser.parse_args()
 
     if args.flood:
         pf = set(args.protocols.split(",")) if args.protocols else None
         run_flood(args.target, args.duration, args.phase_duration,
-                  args.intensity, proto_filter=pf, stats_file_override=args.stats_file)
+                  args.intensity, proto_filter=pf, stats_file_override=args.stats_file,
+                  inject_rate=args.inject_rate, inject_string=args.inject_string)
     else:
         run_orchestrator(args.duration, args.phase_duration, args.intensity,
                          n_processes_override=args.processes)

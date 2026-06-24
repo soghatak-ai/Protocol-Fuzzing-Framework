@@ -19,6 +19,8 @@ try:
 except ImportError:
     _PYMONGO_AVAILABLE = False
 from main import (fuzzer_state, event_log, reset_state, run_fuzzer, run_fuzzer_live,
+                  create_instance, get_instance, list_instances, destroy_instance,
+                  run_instance_live, FuzzerInstance,
                   log_event, ai_weights, DNS_STRATEGY_NAMES, DNS_DEFAULT_WEIGHTS,
                   FTP_STRATEGY_NAMES, FTP_DEFAULT_WEIGHTS,
                   HTTP_STRATEGY_NAMES, HTTP_DEFAULT_WEIGHTS,
@@ -379,6 +381,26 @@ def db_add_messages(conv_id, messages):
         )
     except Exception as e:
         print(f"[DB] add_messages failed: {e}")
+
+
+def db_save_trigger_packets(conv_id, trigger_packets, vuln_packets):
+    """Persist trigger packets into the conversation document."""
+    if not mongo_ok() or not conv_id:
+        return
+    try:
+        safe_tp = json.loads(json.dumps(trigger_packets, default=str))
+        safe_vp = json.loads(json.dumps(vuln_packets, default=str))
+        _conversations.update_one(
+            {"_id": conv_id},
+            {"$set": {
+                "trigger_packets": safe_tp,
+                "vuln_packets": safe_vp,
+                "updated_at": datetime.now(timezone.utc),
+            }},
+        )
+        print(f"[DB] Trigger packets saved ({len(trigger_packets)} packets) → conv {conv_id}")
+    except Exception as e:
+        print(f"[DB] save_trigger_packets failed: {e}")
 
 
 def db_delete_conversation(conv_id):
@@ -1154,6 +1176,38 @@ analysis_state = {
     "results": None,
     "status": "idle",
     "error": None,
+    "trigger_packets": {},   # pid -> packet dict
+    "vuln_packets": {},      # str(vuln_id) -> [pid, ...]
+}
+
+
+# ---------------------------------------------------------------------------
+# Per-vulnerability trigger-packet sender tracking
+# ---------------------------------------------------------------------------
+_vuln_senders = {}          # vid -> sender state dict
+_vuln_sender_threads = {}   # vid -> Thread
+_vuln_sender_locks = {}     # vid -> Lock (created on demand)
+_vuln_senders_global_lock = threading.Lock()
+
+
+def _get_vuln_sender_lock(vid):
+    """Return or create a per-vuln Lock under the global lock."""
+    with _vuln_senders_global_lock:
+        if vid not in _vuln_sender_locks:
+            _vuln_sender_locks[vid] = threading.Lock()
+        return _vuln_sender_locks[vid]
+
+
+_DEFAULT_SENDER_STATE = {
+    "running": False,
+    "stop_requested": False,
+    "tx_count": 0,
+    "errors_count": 0,
+    "current_packet_id": None,
+    "started_at": None,
+    "mode": None,
+    "target_ip": None,
+    "selected_count": 0,
 }
 
 
@@ -1319,6 +1373,170 @@ def api_stop():
     fuzzer_state["running"] = False
     log_event("WARNING", "Stop requested from UI")
     return jsonify({"status": "stopping"})
+
+
+# ── Multi-instance API ────────────────────────────────────────────────────
+
+@app.route("/api/instances", methods=["GET"])
+def api_instances_list():
+    """List all fuzzer instances."""
+    result = []
+    for inst in list_instances():
+        st = inst.get_state()
+        result.append({
+            "id": inst.id,
+            "protocol": inst.protocol,
+            "status": st.get("status", "idle"),
+            "running": st.get("running", False),
+            "iteration": st.get("iteration", 0),
+            "packets_per_sec": st.get("packets_per_sec", 0),
+        })
+    return jsonify(result)
+
+
+@app.route("/api/instances", methods=["POST"])
+def api_instance_create():
+    """Create a new fuzzer instance and start it."""
+    body = request.json or {}
+    protocol = body.get("protocol", "dns").lower()
+    valid_protos = ("dns", "ftp", "http", "smtp", "ssh", "smb2", "smb3",
+                    "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp",
+                    "icmpv6", "sip", "mgcp", "rtsp", "radius", "tacacs",
+                    "ldap", "cifs", "sunrpc", "telnet", "tftp")
+    if protocol not in valid_protos:
+        protocol = "dns"
+
+    live_config = body.get("live_config", {})
+    if not live_config.get("server_ip"):
+        return jsonify({"error": "live_config.server_ip is required"}), 400
+
+    inst = create_instance(protocol=protocol, config=live_config)
+    inst.reset_state()
+    inst.state["protocol"] = protocol
+
+    inst.start_as_process()
+    return jsonify({"status": "started", "instance_id": inst.id, "protocol": protocol}), 201
+
+
+@app.route("/api/instances/<instance_id>", methods=["GET"])
+def api_instance_status(instance_id):
+    """Get status of a specific instance."""
+    inst = get_instance(instance_id)
+    if not inst:
+        return jsonify({"error": "Instance not found"}), 404
+
+    state = inst.get_state()
+    elapsed = 0
+    if state.get("start_time"):
+        if state.get("running"):
+            elapsed = time.time() - state["start_time"]
+        else:
+            elapsed = state.get("_frozen_elapsed", 0)
+    hours, rem = divmod(int(elapsed), 3600)
+    mins, secs = divmod(rem, 60)
+
+    protocol = inst.protocol
+    labels = _labels_for(protocol)
+
+    data = {
+        "instance_id": inst.id,
+        "protocol": protocol,
+        "iteration": state.get("iteration", 0),
+        "status": state.get("status", "idle"),
+        "running": state.get("running", False),
+        "anomaly_detected": state.get("anomaly_detected"),
+        "current_strategy": state.get("current_strategy", ""),
+        "baseline_mem_mb": state.get("baseline_mem_mb"),
+        "peak_mem_mb": state.get("peak_mem_mb"),
+        "current_mem_mb": state.get("current_mem_mb"),
+        "snort_pid": state.get("snort_pid"),
+        "total_crashes": state.get("total_crashes", 0),
+        "last_crash_time": state.get("last_crash_time"),
+        "last_crash_type": state.get("last_crash_type"),
+        "packets_per_sec": state.get("packets_per_sec", 0),
+        "strategy_stats": state.get("strategy_stats", {}),
+        "strategy_labels": labels,
+        "runtime": f"{hours:02d}:{mins:02d}:{secs:02d}",
+        "trigger_detail": state.get("trigger_detail"),
+        "bandit_stats": inst.get_bandit_stats(),
+        "events": inst.get_events(),
+    }
+    return jsonify(data)
+
+
+@app.route("/api/instances/<instance_id>/stop", methods=["POST"])
+def api_instance_stop(instance_id):
+    """Stop a specific instance."""
+    inst = get_instance(instance_id)
+    if not inst:
+        return jsonify({"error": "Instance not found"}), 404
+    st = inst.get_state()
+    if not st.get("running"):
+        return jsonify({"error": "Instance is not running"}), 400
+    inst.request_stop()
+    return jsonify({"status": "stopping", "instance_id": instance_id})
+
+
+@app.route("/api/instances/<instance_id>", methods=["DELETE"])
+def api_instance_destroy(instance_id):
+    """Destroy a fuzzer instance."""
+    ok = destroy_instance(instance_id)
+    if not ok:
+        return jsonify({"error": "Instance not found"}), 404
+    return jsonify({"status": "destroyed", "instance_id": instance_id})
+
+
+@app.route("/api/instances/<instance_id>/stream")
+def api_instance_stream(instance_id):
+    """SSE stream for a specific instance."""
+    inst = get_instance(instance_id)
+    if not inst:
+        return jsonify({"error": "Instance not found"}), 404
+
+    def generate():
+        while True:
+            state = inst.get_state()
+            elapsed = 0
+            if state.get("start_time"):
+                if state.get("running"):
+                    elapsed = time.time() - state["start_time"]
+                else:
+                    elapsed = state.get("_frozen_elapsed", 0)
+            hours, rem = divmod(int(elapsed), 3600)
+            mins, secs = divmod(rem, 60)
+
+            protocol = inst.protocol
+            labels = _labels_for(protocol)
+            data = {
+                "instance_id": inst.id,
+                "protocol": protocol,
+                "iteration": state.get("iteration", 0),
+                "status": state.get("status", "idle"),
+                "running": state.get("running", False),
+                "anomaly_detected": state.get("anomaly_detected"),
+                "current_strategy": state.get("current_strategy", ""),
+                "baseline_mem_mb": state.get("baseline_mem_mb"),
+                "peak_mem_mb": state.get("peak_mem_mb"),
+                "current_mem_mb": state.get("current_mem_mb"),
+                "snort_pid": state.get("snort_pid"),
+                "total_crashes": state.get("total_crashes", 0),
+                "last_crash_time": state.get("last_crash_time"),
+                "last_crash_type": state.get("last_crash_type"),
+                "packets_per_sec": state.get("packets_per_sec", 0),
+                "strategy_stats": state.get("strategy_stats", {}),
+                "strategy_labels": labels,
+                "runtime": f"{hours:02d}:{mins:02d}:{secs:02d}",
+                "trigger_detail": state.get("trigger_detail"),
+                "bandit_stats": inst.get_bandit_stats(),
+                "events": inst.get_events(),
+            }
+            yield f"data: {json.dumps(data)}\n\n"
+            if not state.get("running") and state.get("status") != "running":
+                yield f"data: {json.dumps(data)}\n\n"
+                break
+            time.sleep(0.5)
+
+    return Response(generate(), mimetype="text/event-stream")
 
 
 @app.route("/api/crashes")
@@ -2238,11 +2456,35 @@ def ai_history_get(conv_id):
     conv = db_get_conversation(conv_id)
     if not conv:
         return jsonify({"error": "Conversation not found"}), 404
+
+    # Rehydrate analysis_state so vuln-bound endpoints (trigger-packet
+    # generation, chat) operate on the same vulns the UI is rendering.
+    # Otherwise _find_vuln() looks in a stale/empty results blob and 404s.
+    analysis = conv.get("analysis", {}) or {}
+    if isinstance(analysis, dict):
+        analysis["conversation_id"] = conv["_id"]
+        analysis_state["results"] = analysis
+        analysis_state["status"] = "done"
+        analysis_state["error"] = None
+        for st in _vuln_senders.values():
+            if st.get("running"):
+                st["stop_requested"] = True
+
+        # Restore trigger packets saved with this conversation (or clear)
+        saved_tp = conv.get("trigger_packets") or {}
+        saved_vp = conv.get("vuln_packets") or {}
+        analysis_state["trigger_packets"].clear()
+        analysis_state["trigger_packets"].update(saved_tp)
+        analysis_state["vuln_packets"].clear()
+        analysis_state["vuln_packets"].update(saved_vp)
+
     return jsonify({
         "id": conv["_id"],
         "title": conv.get("title", "Untitled"),
         "files": conv.get("files", []),
-        "analysis": conv.get("analysis", {}),
+        "analysis": analysis,
+        "trigger_packets": list((conv.get("trigger_packets") or {}).values()),
+        "vuln_packets": conv.get("vuln_packets") or {},
         "messages": conv.get("messages", []),
         "created_at": conv["created_at"].isoformat() if conv.get("created_at") else "",
     })
@@ -2685,12 +2927,618 @@ def ai_resave():
     return jsonify({"error": "MongoDB save failed — check server logs"}), 500
 
 
+# ---------------------------------------------------------------------------
+# Per-vuln Trigger Packet generation + targeted send (AI Analysis page)
+#
+# Flow:
+#   1) UI clicks "Generate Trigger Packets" on a vuln -> POST
+#      /api/ai/vulns/<vid>/generate_packets.  Server queries ChromaDB for the
+#      most relevant chunks for that vuln, builds a prompt, and asks the LLM
+#      for N (default 6) distinct application-layer packets, each as raw hex.
+#   2) Packets are stored under analysis_state["trigger_packets"] keyed by a
+#      short UUID and indexed per-vuln in analysis_state["vuln_packets"].
+#   3) UI lets the user check packets across many vulns, then POST
+#      /api/ai/packets/send/stream with a target IP.  A background thread
+#      walks the selected packets either once (send_once) or round-robin
+#      forever (round_robin), streaming NDJSON tx events back to the UI.
+#      /api/ai/packets/send/stop is the cooperative kill switch.
+# ---------------------------------------------------------------------------
+PACKET_GEN_PROMPT = """You are an elite network-protocol exploit researcher.
+You are given:
+  - A single vulnerability identified by an earlier analysis pass (function,
+    bug class, severity, reasoning, target protocol and port).
+  - A short summary of the wider codebase.
+  - The most-relevant source-code chunks around that vulnerability.
+
+Your task: produce N DISTINCT application-layer packets that would each drive
+execution into the vulnerable function and exercise the bug from a different
+angle.  Use the angles below; pick the most useful ones for this specific
+bug class:
+
+  - Minimal valid baseline that simply reaches the function.
+  - Boundary-condition payload (one unit past the bug threshold).
+  - Deep overflow / extreme value to stress arithmetic and reassembly.
+  - Variant with different field ordering, packing or whitespace.
+  - State-machine variant that drives the parser into the vulnerable state.
+  - Fragmented / partial / split variant when reassembly is in play.
+
+Hard rules for the "hex" field:
+  - It MUST be the EXACT bytes you would put on the wire at the application
+    layer (no Ethernet, no IP, no TCP/UDP header — the transport adds those).
+  - For TCP-DNS include the 2-byte length prefix in the hex.
+  - For TCP-based protocols (HTTP, FTP, SMTP, SMB, DCERPC, ...) the hex is
+    the application payload sent over a single TCP connection.
+  - For UDP-based protocols (DNS, SNMP, DHCP, ...) the hex is the UDP body.
+  - For ICMP / ICMPv6 the hex is the ICMP message starting at the ICMP type.
+  - KEEP EACH PACKET SMALL — target under 2048 bytes (4096 hex characters).
+    Use a compact, representative payload, not a maximum-length flood. For
+    overflow bugs, just exceed the boundary by 32–256 bytes — the wire size
+    is the trigger, the boundary itself is the bug.
+  - The hex string must be even-length and contain ONLY 0-9 a-f A-F.
+
+Hard rules for the JSON envelope:
+  - Keep "name" under 60 characters and "description" under 240 characters.
+    Do NOT restate the vulnerability's reasoning — only say what THIS packet
+    does differently from the others.
+  - Emit the packets in increasing complexity (minimal first, fragmented last).
+  - Output ONE compact JSON object on a single line. No trailing commentary.
+
+Output strict JSON in this exact shape:
+{
+  "packets": [
+    {
+      "name": "short label (<= 80 chars)",
+      "description": "one or two sentences explaining what this packet does and why it triggers the bug",
+      "protocol": "tcp" | "udp" | "icmp" | "icmpv6",
+      "port": <int>,
+      "hex": "deadbeef...",
+      "send_strategy": "single" | "split_tcp",
+      "split_at": <int or null, only when send_strategy=split_tcp>
+    }
+  ]
+}
+
+Return ONLY the JSON object.  No prose, no markdown fences.
+"""
+
+_VALID_PROTOS = {"tcp", "udp", "icmp", "icmpv6"}
+
+
+def _normalise_hex(s):
+    """Return a clean lower-case even-length hex string, or None if invalid."""
+    if not isinstance(s, str):
+        return None
+    s = s.strip().replace(" ", "").replace("\n", "").replace("\r", "").replace("\t", "")
+    if s.startswith(("0x", "0X")):
+        s = s[2:]
+    if not s or len(s) % 2 != 0:
+        return None
+    try:
+        bytes.fromhex(s)
+    except ValueError:
+        return None
+    return s.lower()
+
+
+def _find_vuln(vid):
+    """Look up a vuln in the current analysis_state by id or original_id."""
+    results = analysis_state.get("results") or {}
+    target = str(vid)
+    for v in results.get("vulnerabilities", []):
+        if str(v.get("id")) == target or str(v.get("original_id")) == target:
+            return v
+    return None
+
+
+def _generate_trigger_packets_llm(vuln, codebase_summary, n_packets=6):
+    """Call the LLM to produce N trigger packets for a single vulnerability.
+
+    Pulls the most-relevant code chunks for the vuln from ChromaDB to give
+    the model concrete context rather than relying on its earlier guess.
+    """
+    from engine.semantic_search import query_codebase
+    from engine.llm_client import ai_call
+
+    fn = (vuln.get("function") or "").strip()
+    bug = vuln.get("bug_class") or ""
+    proto = vuln.get("protocol") or ""
+    port = vuln.get("port") or ""
+    reasoning = (vuln.get("reasoning") or "")[:800]
+    strategy_reason = (vuln.get("strategy_reasoning") or "")[:400]
+
+    query = " ".join(x for x in [fn, bug, proto, reasoning[:200]] if x)
+    try:
+        hits = query_codebase(query, n_results=10)
+    except Exception:
+        hits = []
+
+    code_parts = []
+    for h in hits[:10]:
+        code_parts.append(
+            f"=== {h.get('file','?')} :: {h.get('name','?')} "
+            f"({h.get('node_type','?')}) "
+            f"L{h.get('start_line','?')}-{h.get('end_line','?')} ===\n"
+            f"{h.get('code','')}\n"
+            f"=== END ==="
+        )
+    code_context = "\n\n".join(code_parts) or "(no code chunks retrieved)"
+    if len(code_context) > 18000:
+        code_context = code_context[:18000] + "\n... [truncated] ..."
+
+    user_prompt = (
+        f"CODEBASE SUMMARY (truncated):\n{(codebase_summary or '')[:1500]}\n\n"
+        f"TARGET VULNERABILITY:\n"
+        f"  function:    {fn}\n"
+        f"  bug_class:   {bug}\n"
+        f"  severity:    {vuln.get('severity','?')}\n"
+        f"  protocol:    {proto}\n"
+        f"  port:        {port}\n"
+        f"  line_range:  {vuln.get('line_range','?')}\n"
+        f"  reasoning:   {reasoning}\n"
+        f"  strategy:    {vuln.get('matched_strategy','?')} ({strategy_reason})\n\n"
+        f"RELEVANT CODE CHUNKS:\n{code_context}\n\n"
+        f"Now produce {n_packets} distinct trigger packets per the system instructions."
+    )
+
+    print(f"[gen_packets] vuln '{fn}' ({bug}) — calling Azure LLM "
+          f"with {len(hits)} chunks (~{len(user_prompt)//1024} KB prompt)")
+    _t0 = time.time()
+    # GPT-5 is a reasoning model: completion_tokens covers both the hidden
+    # reasoning trace and the visible JSON, so we match the Explorer budget
+    # (65536) to leave room for both even on heavy bugs.
+    result, _model = ai_call(PACKET_GEN_PROMPT, user_prompt,
+                             max_tokens=65536, timeout=600)
+    print(f"[gen_packets] vuln '{fn}' — LLM returned in {time.time()-_t0:.1f}s")
+
+    if not isinstance(result, dict):
+        return []
+
+    pkts = result.get("packets")
+    if not isinstance(pkts, list):
+        # Tolerate the model returning the list under a different top-level key.
+        for v in result.values():
+            if isinstance(v, list) and v and isinstance(v[0], dict) and \
+                    ("hex" in v[0] or "payload_hex" in v[0]):
+                pkts = v
+                break
+
+    # Truncated-JSON recovery: when GPT-5 hits the completion-token cap mid
+    # array, llm_client wraps the raw text in {"raw_response": ..., "parse_error": True}.
+    # Walk the partial array, balance braces, and salvage whatever full packet
+    # objects already finished serialising.
+    if (not pkts) and result.get("parse_error") and result.get("raw_response"):
+        salvaged = _recover_packets_from_truncated_json(result["raw_response"])
+        if salvaged:
+            print(f"[gen_packets] vuln '{fn}' — recovered {len(salvaged)} packets "
+                  f"from truncated JSON")
+            pkts = salvaged
+
+    return pkts or []
+
+
+def _recover_packets_from_truncated_json(raw: str):
+    """Salvage complete packet objects from a JSON response that was cut off.
+
+    The model usually emits ``{"packets": [{...}, {...}, {...truncated``.
+    We locate the opening ``[`` of the packets array, then scan forward with a
+    bracket / string-state counter, peeling off each top-level ``{...}`` whose
+    closing brace we actually saw. Returns the list of recovered dicts (may
+    be empty).
+    """
+    if not isinstance(raw, str) or not raw:
+        return []
+    # Find "packets":[
+    key_idx = raw.find('"packets"')
+    if key_idx < 0:
+        return []
+    open_idx = raw.find('[', key_idx)
+    if open_idx < 0:
+        return []
+
+    out = []
+    depth = 0
+    in_str = False
+    escape = False
+    obj_start = None
+    i = open_idx + 1  # skip the opening [
+    n = len(raw)
+    while i < n:
+        c = raw[i]
+        if escape:
+            escape = False
+        elif c == '\\':
+            escape = True
+        elif c == '"':
+            in_str = not in_str
+        elif not in_str:
+            if c == '{':
+                if depth == 0:
+                    obj_start = i
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0 and obj_start is not None:
+                    chunk = raw[obj_start:i + 1]
+                    try:
+                        out.append(json.loads(chunk))
+                    except Exception:
+                        pass
+                    obj_start = None
+            elif c == ']' and depth == 0:
+                break
+        i += 1
+    return out
+
+
+def _store_packets_for_vuln(vid, raw_packets):
+    """Validate, assign ids, and replace any previous packets for this vuln."""
+    stored = []
+    pid_list = []
+    rejected = 0
+    for raw in raw_packets:
+        if not isinstance(raw, dict):
+            rejected += 1
+            continue
+        hex_str = _normalise_hex(raw.get("hex") or raw.get("payload_hex"))
+        if not hex_str:
+            rejected += 1
+            continue
+        proto = (raw.get("protocol") or "").lower().strip()
+        if proto not in _VALID_PROTOS:
+            rejected += 1
+            continue
+        try:
+            port = int(raw.get("port") or 0)
+        except (TypeError, ValueError):
+            port = 0
+        send_strategy = (raw.get("send_strategy") or "single").lower()
+        if send_strategy not in ("single", "split_tcp"):
+            send_strategy = "single"
+        split_at = raw.get("split_at")
+        try:
+            split_at = int(split_at) if split_at is not None else None
+        except (TypeError, ValueError):
+            split_at = None
+
+        pid = uuid.uuid4().hex[:12]
+        pkt = {
+            "id": pid,
+            "vuln_id": str(vid),
+            "name": (raw.get("name") or f"packet-{pid[:6]}")[:120],
+            "description": (raw.get("description") or "")[:600],
+            "protocol": proto,
+            "port": port,
+            "hex": hex_str,
+            "size": len(hex_str) // 2,
+            "send_strategy": send_strategy,
+            "split_at": split_at,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        analysis_state["trigger_packets"][pid] = pkt
+        pid_list.append(pid)
+        stored.append(pkt)
+
+    # Replace previous packets for this vuln (drop their entries from the global map too)
+    for old_pid in analysis_state["vuln_packets"].get(str(vid), []):
+        analysis_state["trigger_packets"].pop(old_pid, None)
+    analysis_state["vuln_packets"][str(vid)] = pid_list
+    return stored, rejected
+
+
+def _send_one_packet(pkt, target_ip, port_override, interface, transport=None):
+    """Drive LiveNetworkTransport to put one packet on the wire.
+
+    If *transport* is supplied (a pre-existing LiveNetworkTransport), TCP
+    packets are sent via its persistent connection.  Otherwise a fresh
+    transport (and socket) is created for each call.
+    """
+    from transport.network import LiveNetworkTransport
+
+    proto = pkt["protocol"]
+    port = port_override if port_override else pkt.get("port") or 0
+    data = bytes.fromhex(pkt["hex"])
+    start = time.time()
+    err = None
+    sent = 0
+
+    try:
+        tx = transport or LiveNetworkTransport(target_ip, port or 0, interface or None)
+        if proto == "udp":
+            tx.send_udp(data, port=port or None)
+            sent = len(data)
+        elif proto == "tcp":
+            if transport:
+                tx.send_persistent_tcp(
+                    data, port=port or None,
+                    split_at=(pkt.get("split_at")
+                              if pkt.get("send_strategy") == "split_tcp" else None),
+                )
+            else:
+                if pkt.get("send_strategy") == "split_tcp":
+                    tx.send_split_tcp(data, split_at=pkt.get("split_at") or 1)
+                else:
+                    tx.send_tcp(data, port=port or None)
+            sent = len(data)
+        elif proto == "icmp":
+            tx.send_icmp(data)
+            sent = len(data)
+        elif proto == "icmpv6":
+            tx.send_icmpv6(data, dst_ipv6=target_ip)
+            sent = len(data)
+        else:
+            err = f"unsupported protocol: {proto}"
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"
+
+    return {
+        "type": "tx",
+        "packet_id": pkt["id"],
+        "name": pkt.get("name"),
+        "vuln_id": pkt.get("vuln_id"),
+        "protocol": proto,
+        "dst": (f"{target_ip}:{port}" if port else target_ip),
+        "size": len(data),
+        "sent": sent,
+        "ok": err is None,
+        "error": err,
+        "duration_ms": int((time.time() - start) * 1000),
+    }
+
+
+def _packet_sender_loop(vid, packets, target_ip, port_override, interface,
+                        mode, delay_ms, q):
+    """Background worker: walks packets in send_once or round_robin mode."""
+    from transport.network import LiveNetworkTransport
+
+    state = _vuln_senders[vid]
+    has_tcp = any(p["protocol"] == "tcp" for p in packets)
+    persistent_tx = None
+    if mode == "round_robin" and has_tcp:
+        persistent_tx = LiveNetworkTransport(target_ip, port_override or 0, interface or None)
+
+    try:
+        state.update({
+            "running": True,
+            "stop_requested": False,
+            "tx_count": 0,
+            "errors_count": 0,
+            "started_at": time.time(),
+            "mode": mode,
+            "target_ip": target_ip,
+            "selected_count": len(packets),
+            "current_packet_id": None,
+        })
+        q.put({"type": "start", "count": len(packets), "mode": mode,
+               "target_ip": target_ip, "delay_ms": delay_ms, "vuln_id": vid})
+
+        def _interruptible_sleep(ms):
+            if ms <= 0:
+                return
+            end = time.time() + ms / 1000.0
+            while time.time() < end and not state["stop_requested"]:
+                time.sleep(min(0.05, max(0.0, end - time.time())))
+
+        if mode == "round_robin":
+            i = 0
+            while not state["stop_requested"]:
+                pkt = packets[i % len(packets)]
+                state["current_packet_id"] = pkt["id"]
+                tx = persistent_tx if pkt["protocol"] == "tcp" and persistent_tx else None
+                evt = _send_one_packet(pkt, target_ip, port_override, interface, transport=tx)
+                state["tx_count"] += 1
+                if not evt["ok"]:
+                    state["errors_count"] += 1
+                evt["iter"] = i + 1
+                q.put(evt)
+                i += 1
+                _interruptible_sleep(delay_ms)
+        else:  # send_once
+            for i, pkt in enumerate(packets):
+                if state["stop_requested"]:
+                    break
+                state["current_packet_id"] = pkt["id"]
+                evt = _send_one_packet(pkt, target_ip, port_override, interface, transport=None)
+                state["tx_count"] += 1
+                if not evt["ok"]:
+                    state["errors_count"] += 1
+                evt["iter"] = i + 1
+                q.put(evt)
+                if i < len(packets) - 1:
+                    _interruptible_sleep(delay_ms)
+    except Exception as e:
+        traceback.print_exc()
+        q.put({"type": "error", "error": f"{type(e).__name__}: {e}"})
+    finally:
+        if persistent_tx:
+            persistent_tx.close_persistent_tcp()
+        q.put({
+            "type": "done",
+            "vuln_id": vid,
+            "tx_count": state["tx_count"],
+            "errors": state["errors_count"],
+            "elapsed_ms": int((time.time() - (state["started_at"] or time.time())) * 1000),
+        })
+        state["running"] = False
+        state["current_packet_id"] = None
+
+
+@app.route("/api/ai/vulns/<vid>/generate_packets", methods=["POST"])
+def api_ai_generate_packets(vid):
+    if not AZURE_OPENAI_API_KEY:
+        return jsonify({"error": "AZURE_OPENAI_API_KEY not set in .env"}), 500
+    body = request.json or {}
+    try:
+        n = int(body.get("n_packets") or 6)
+    except (TypeError, ValueError):
+        n = 6
+    n = max(1, min(n, 10))
+
+    vuln = _find_vuln(vid)
+    if not vuln:
+        return jsonify({"error": f"Vulnerability {vid} not found"}), 404
+
+    results = analysis_state.get("results") or {}
+    summary = results.get("codebase_summary") or results.get("file_summary") or ""
+
+    try:
+        raw_packets = _generate_trigger_packets_llm(vuln, summary, n_packets=n)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": f"LLM call failed: {e}"}), 500
+
+    stored, rejected = _store_packets_for_vuln(vid, raw_packets)
+    if not stored:
+        return jsonify({
+            "error": "LLM returned no valid packets",
+            "raw_count": len(raw_packets),
+            "rejected": rejected,
+        }), 502
+
+    conv_id = results.get("conversation_id")
+    if conv_id:
+        db_save_trigger_packets(
+            conv_id,
+            dict(analysis_state["trigger_packets"]),
+            dict(analysis_state["vuln_packets"]),
+        )
+
+    return jsonify({
+        "vuln_id": str(vid),
+        "packets": stored,
+        "count": len(stored),
+        "rejected": rejected,
+    })
+
+
+@app.route("/api/ai/packets", methods=["GET"])
+def api_ai_packets_list():
+    return jsonify({
+        "packets": list(analysis_state["trigger_packets"].values()),
+        "by_vuln": analysis_state["vuln_packets"],
+    })
+
+
+@app.route("/api/ai/packets/<pid>", methods=["DELETE"])
+def api_ai_packet_delete(pid):
+    pkt = analysis_state["trigger_packets"].pop(pid, None)
+    if not pkt:
+        return jsonify({"error": "Packet not found"}), 404
+    vid = pkt["vuln_id"]
+    lst = analysis_state["vuln_packets"].get(vid, [])
+    if pid in lst:
+        lst.remove(pid)
+        analysis_state["vuln_packets"][vid] = lst
+
+    conv_id = (analysis_state.get("results") or {}).get("conversation_id")
+    if conv_id:
+        db_save_trigger_packets(
+            conv_id,
+            dict(analysis_state["trigger_packets"]),
+            dict(analysis_state["vuln_packets"]),
+        )
+
+    return jsonify({"status": "deleted"})
+
+
+@app.route("/api/ai/vulns/<vid>/packets/send/stream", methods=["POST"])
+def api_ai_packets_send_stream(vid):
+    lock = _get_vuln_sender_lock(vid)
+    with lock:
+        state = _vuln_senders.get(vid)
+        if state and state["running"]:
+            return jsonify({"error": f"Sender for vuln {vid} is already running"}), 409
+
+        body = request.json or {}
+        pids = body.get("packet_ids") or []
+        if not isinstance(pids, list) or not pids:
+            return jsonify({"error": "packet_ids must be a non-empty list"}), 400
+
+        target_ip = (body.get("target_ip") or "").strip()
+        if not target_ip:
+            return jsonify({"error": "target_ip is required"}), 400
+
+        port_override = body.get("port_override")
+        try:
+            port_override = (int(port_override)
+                             if port_override not in (None, "", 0, "0") else None)
+        except (TypeError, ValueError):
+            port_override = None
+
+        interface = (body.get("interface") or "").strip() or None
+
+        mode = (body.get("mode") or "round_robin").lower()
+        if mode not in ("send_once", "round_robin"):
+            mode = "round_robin"
+
+        try:
+            delay_ms = max(0, int(body.get("delay_ms") or 50))
+        except (TypeError, ValueError):
+            delay_ms = 50
+
+        packets = [analysis_state["trigger_packets"].get(p) for p in pids]
+        packets = [p for p in packets if p]
+        if not packets:
+            return jsonify({"error": "No valid packets resolved from packet_ids"}), 400
+
+        _vuln_senders[vid] = dict(_DEFAULT_SENDER_STATE)
+        cur_state = _vuln_senders[vid]
+        q = queue.Queue(maxsize=4096)
+
+        def gen():
+            while True:
+                try:
+                    evt = q.get(timeout=15.0)
+                except queue.Empty:
+                    yield "\n"
+                    if not cur_state["running"]:
+                        break
+                    continue
+                yield json.dumps(evt) + "\n"
+                if evt.get("type") == "done":
+                    break
+
+        t = threading.Thread(
+            target=_packet_sender_loop,
+            args=(vid, packets, target_ip, port_override, interface,
+                  mode, delay_ms, q),
+            daemon=True,
+        )
+        _vuln_sender_threads[vid] = t
+        t.start()
+
+    log_event("INFO",
+              f"Packet sender started for vuln {vid} "
+              f"({mode}, {len(packets)} packets -> {target_ip})")
+    return Response(gen(), mimetype="application/x-ndjson")
+
+
+@app.route("/api/ai/vulns/<vid>/packets/send/stop", methods=["POST"])
+def api_ai_packets_send_stop(vid):
+    state = _vuln_senders.get(vid)
+    if not state or not state["running"]:
+        return jsonify({"error": f"No send in progress for vuln {vid}"}), 400
+    state["stop_requested"] = True
+    log_event("WARNING", f"Packet sender stop requested for vuln {vid}")
+    return jsonify({"status": "stopping"})
+
+
+@app.route("/api/ai/vulns/<vid>/packets/send/status", methods=["GET"])
+def api_ai_packets_send_status(vid):
+    state = _vuln_senders.get(vid, dict(_DEFAULT_SENDER_STATE))
+    return jsonify(state)
+
+
 @app.route("/api/ai/clear", methods=["POST"])
 def ai_clear():
+    for st in _vuln_senders.values():
+        if st.get("running"):
+            st["stop_requested"] = True
     analysis_state["files"].clear()
     analysis_state["results"] = None
     analysis_state["status"] = "idle"
     analysis_state["error"] = None
+    analysis_state["trigger_packets"].clear()
+    analysis_state["vuln_packets"].clear()
     return jsonify({"status": "cleared"})
 
 
@@ -3562,6 +4410,10 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes, ft
         # Resolve script directory
         script_dir = os.path.dirname(os.path.abspath(__file__))
 
+        # Fraction of flood payloads that carry the detection string (EICAR
+        # content) so IPS alerts scale with packet volume.  Set 0 to disable.
+        inject_rate = 0.1
+
         # Launch flood sub-processes directly on this machine
         stats_files = []
         _multiattack_procs = []
@@ -3573,7 +4425,8 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes, ft
                 f"cd {script_dir} && python3 Testing/snort_blinder.py "
                 f"--flood --target {target_ip} --duration {duration} "
                 f"--phase-duration 15 --intensity {intensity} "
-                f"--protocols {proto_list} --stats-file {sf}"
+                f"--protocols {proto_list} --stats-file {sf} "
+                f"--inject-rate {inject_rate}"
             )
             proc = _subprocess.Popen(
                 ["bash", "-c", flood_cmd],

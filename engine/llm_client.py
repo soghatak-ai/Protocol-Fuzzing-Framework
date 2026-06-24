@@ -9,7 +9,7 @@ import os
 import json
 import time
 
-from openai import AzureOpenAI
+from openai import AzureOpenAI, APITimeoutError, APIConnectionError, RateLimitError, InternalServerError
 
 
 def ai_call(system_prompt: str, user_prompt: str,
@@ -65,8 +65,20 @@ def ai_call(system_prompt: str, user_prompt: str,
 
         except Exception as e:
             last_err = e
-            err_str = str(e)
-            if "429" in err_str or "rate" in err_str.lower() or "timeout" in err_str.lower():
+            err_str = str(e).lower()
+            transient_exc = isinstance(
+                e,
+                (APITimeoutError, APIConnectionError, RateLimitError, InternalServerError),
+            )
+            transient_msg = (
+                "429" in err_str
+                or "rate" in err_str
+                or "timeout" in err_str
+                or "timed out" in err_str
+                or "connection" in err_str
+                or "temporar" in err_str  # "temporarily unavailable"
+            )
+            if transient_exc or transient_msg:
                 wait = min(2 ** attempt + 5, 60)
                 print(f"[LLM] Retry {attempt+1}/{max_retries} after {wait}s — {type(e).__name__}: {e}")
                 time.sleep(wait)

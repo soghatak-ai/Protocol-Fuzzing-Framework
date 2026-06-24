@@ -161,6 +161,283 @@ sunrpc_bandit = UCB1Bandit(SUNRPC_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.
 telnet_bandit = UCB1Bandit(TELNET_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 tftp_bandit = UCB1Bandit(TFTP_STRATEGY_NAMES, crash_boost=0.5, decay_rate=0.1)
 
+import uuid as _uuid
+import copy as _copy
+import multiprocessing as _mp
+
+_mp_ctx = _mp.get_context("spawn")
+
+_PROTOCOL_STRATEGIES = {
+    "dns": DNS_STRATEGY_NAMES,
+    "ftp": FTP_STRATEGY_NAMES,
+    "http": HTTP_STRATEGY_NAMES,
+    "smtp": SMTP_STRATEGY_NAMES,
+    "ssh": SSH_STRATEGY_NAMES,
+    "smb2": SMB2_STRATEGY_NAMES,
+    "smb3": SMB3_STRATEGY_NAMES,
+    "http2": HTTP2_STRATEGY_NAMES,
+    "dcerpc": DCERPC_STRATEGY_NAMES,
+    "dhcp": DHCP_STRATEGY_NAMES,
+    "dhcpv6": DHCPV6_STRATEGY_NAMES,
+    "snmp": SNMP_STRATEGY_NAMES,
+    "icmp": ICMP_STRATEGY_NAMES,
+    "icmpv6": ICMPV6_STRATEGY_NAMES,
+    "sip": SIP_STRATEGY_NAMES,
+    "mgcp": MGCP_STRATEGY_NAMES,
+    "rtsp": RTSP_STRATEGY_NAMES,
+    "radius": RADIUS_STRATEGY_NAMES,
+    "tacacs": TACACS_STRATEGY_NAMES,
+    "ldap": LDAP_STRATEGY_NAMES,
+    "cifs": CIFS_STRATEGY_NAMES,
+    "sunrpc": SUNRPC_STRATEGY_NAMES,
+    "telnet": TELNET_STRATEGY_NAMES,
+    "tftp": TFTP_STRATEGY_NAMES,
+}
+
+_mp_manager = None
+_mp_manager_lock = threading.Lock()
+
+
+def _get_manager():
+    global _mp_manager
+    if _mp_manager is None:
+        with _mp_manager_lock:
+            if _mp_manager is None:
+                _mp_manager = _mp_ctx.Manager()
+    return _mp_manager
+
+
+_instances = {}           # instance_id -> FuzzerInstance
+_instances_lock = threading.Lock()
+
+
+class FuzzerInstance:
+    """Encapsulates all per-run state for one fuzzer instance."""
+
+    def __init__(self, instance_id=None, protocol="dns", config=None):
+        self.id = instance_id or _uuid.uuid4().hex[:12]
+        self.protocol = protocol
+        self.config = config or {}
+
+        self.state = {
+            "iteration": 0,
+            "last_packet_time": time.time(),
+            "running": False,
+            "protocol": protocol,
+            "anomaly_detected": None,
+            "current_strategy": "",
+            "start_time": None,
+            "run_id": 0,
+            "baseline_mem_mb": None,
+            "peak_mem_mb": None,
+            "current_mem_mb": None,
+            "snort_pid": None,
+            "trigger_detail": None,
+            "status": "idle",
+            "total_crashes": 0,
+            "last_crash_time": None,
+            "last_crash_type": None,
+            "packets_per_sec": 0,
+            "strategy_stats": {},
+            "payload_mode": "default",
+            "payload_override": None,
+        }
+
+        self.event_log = []
+        self.weights = _copy.deepcopy(ai_weights)
+
+        strat_names = _PROTOCOL_STRATEGIES.get(protocol, DNS_STRATEGY_NAMES)
+        self.bandit = UCB1Bandit(strat_names, crash_boost=0.5, decay_rate=0.1)
+
+        self.thread = None
+        self.transport = None
+        self.watchdog_thread = None
+        # Multiprocessing support (populated by start_as_process)
+        self._shared_state = None
+        self._stop_event = None
+        self.process = None
+
+    def log_event(self, level, message):
+        entry = {
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "level": level,
+            "message": message,
+        }
+        self.event_log.append(entry)
+        if len(self.event_log) > 500:
+            self.event_log.pop(0)
+
+    def reset_state(self):
+        protocol = self.state.get("protocol", self.protocol)
+        payload_mode = self.state.get("payload_mode", "default")
+        payload_override = self.state.get("payload_override")
+        self.state.update({
+            "iteration": 0,
+            "last_packet_time": time.time(),
+            "running": False,
+            "protocol": protocol,
+            "anomaly_detected": None,
+            "current_strategy": "",
+            "start_time": None,
+            "run_id": self.state.get("run_id", 0) + 1,
+            "baseline_mem_mb": None,
+            "peak_mem_mb": None,
+            "current_mem_mb": None,
+            "payload_mode": payload_mode,
+            "payload_override": payload_override,
+            "snort_pid": None,
+            "trigger_detail": None,
+            "status": "idle",
+            "last_crash_time": None,
+            "last_crash_type": None,
+            "packets_per_sec": 0,
+            "strategy_stats": {},
+        })
+        self.event_log.clear()
+
+    def save_crash_log(self, iteration, stderr_data, anomaly_type="CRASH", return_code=None):
+        os.makedirs("crashes", exist_ok=True)
+        timestamp = int(time.time())
+        report_path = f"crashes/{self.id}_{anomaly_type}_report_{iteration}_{timestamp}.txt"
+
+        elapsed = time.time() - self.state["start_time"] if self.state["start_time"] else 0
+        hours, rem = divmod(int(elapsed), 3600)
+        mins, secs = divmod(rem, 60)
+
+        with open(report_path, "w") as f:
+            f.write("=" * 70 + "\n")
+            f.write(f"  SNORT FUZZER CRASH REPORT \u2014 {anomaly_type}\n")
+            f.write(f"  Instance: {self.id} | Protocol: {self.protocol}\n")
+            f.write("=" * 70 + "\n\n")
+            f.write("[1] ENVIRONMENT\n")
+            f.write(f"    Timestamp       : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"    Platform        : {platform.system()} {platform.release()} ({platform.machine()})\n")
+            f.write(f"    Python          : {platform.python_version()}\n")
+            f.write(f"    Snort PID       : {self.state.get('snort_pid', 'N/A')}\n\n")
+            f.write("[2] FUZZER STATE AT CRASH\n")
+            f.write(f"    Anomaly Type    : {anomaly_type}\n")
+            f.write(f"    Strategy        : {self.state['current_strategy']}\n")
+            f.write(f"    Iteration       : {iteration:,}\n")
+            f.write(f"    Runtime         : {hours:02d}:{mins:02d}:{secs:02d}\n")
+            f.write(f"    Throughput      : {iteration / max(elapsed, 0.001):,.0f} packets/sec\n\n")
+            f.write("[3] MEMORY ANALYSIS\n")
+            f.write(f"    Baseline RSS    : {self.state.get('baseline_mem_mb', 'N/A')} MB\n")
+            f.write(f"    Current RSS     : {self.state.get('current_mem_mb', 'N/A')} MB\n")
+            f.write(f"    Peak RSS        : {self.state.get('peak_mem_mb', 'N/A')} MB\n")
+            baseline = self.state.get('baseline_mem_mb')
+            current = self.state.get('current_mem_mb')
+            if baseline and current:
+                growth = current - baseline
+                f.write(f"    Memory Growth   : +{growth:.2f} MB ({growth/baseline*100:.1f}% over baseline)\n")
+            f.write("\n")
+            f.write("[4] TRIGGER DETAIL\n")
+            f.write(f"    {self.state.get('trigger_detail', 'No additional detail captured.')}\n\n")
+            f.write("[5] PROCESS EXIT\n")
+            f.write(f"    Return Code     : {return_code}\n")
+            signal_map = {-2: "SIGINT", -6: "SIGABRT", -9: "SIGKILL", -11: "SIGSEGV", -15: "SIGTERM"}
+            if return_code and return_code < 0:
+                f.write(f"    Signal          : {signal_map.get(return_code, f'Signal {abs(return_code)}')}\n")
+            f.write("\n")
+            stderr_text = stderr_data.decode('utf-8', errors='ignore').strip()
+            f.write("[6] SNORT STDERR OUTPUT\n")
+            if stderr_text:
+                f.write("    " + "\n    ".join(stderr_text.splitlines()) + "\n")
+            else:
+                f.write("    (no stderr output captured)\n")
+            f.write("\n")
+
+        self.state["total_crashes"] = self.state.get("total_crashes", 0) + 1
+        self.state["last_crash_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.state["last_crash_type"] = anomaly_type
+        self.log_event("CRITICAL", f"{anomaly_type} detected at iteration {iteration:,}")
+        self.log_event("INFO", f"Crash report saved: {report_path}")
+        print(f"\n[!!!] [{self.id}] {anomaly_type} DETECTED AT ITERATION {iteration:,} [!!!]")
+        print(f"[+] Diagnostic trace saved to: {report_path}")
+
+    # ── Multiprocessing helpers ───────────────────────────────────────────
+
+    def start_as_process(self):
+        """Start this instance as a separate OS process (bypasses GIL)."""
+        mgr = _get_manager()
+        self._shared_state = mgr.dict(self.state)
+        self._stop_event = _mp_ctx.Event()
+
+        self.process = _mp_ctx.Process(
+            target=_run_instance_mp,
+            args=(self.protocol, self.config, dict(self.weights),
+                  self._shared_state, self._stop_event),
+            daemon=True,
+        )
+        self.process.start()
+
+    def request_stop(self):
+        """Signal the instance to stop (works for both thread and process)."""
+        if self._stop_event:
+            self._stop_event.set()
+        else:
+            self.state["running"] = False
+
+    def get_state(self):
+        """Return current state snapshot (reads from Manager proxy in process mode)."""
+        if self._shared_state is not None:
+            try:
+                return dict(self._shared_state)
+            except Exception:
+                return dict(self.state)
+        return dict(self.state)
+
+    def get_events(self):
+        """Return recent event log entries."""
+        if self._shared_state is not None:
+            try:
+                return list(self._shared_state.get("_events_snapshot", []))
+            except Exception:
+                return list(self.event_log[-20:])
+        return list(self.event_log[-20:])
+
+    def get_bandit_stats(self):
+        """Return bandit statistics (from shared state in process mode)."""
+        if self._shared_state is not None:
+            try:
+                return self._shared_state.get("_bandit_stats", {})
+            except Exception:
+                return {}
+        return self.bandit.get_stats(
+            base_weights=self.weights.get(self.protocol, {}))
+
+    def is_alive(self):
+        if self.process:
+            return self.process.is_alive()
+        if self.thread:
+            return self.thread.is_alive()
+        return False
+
+
+# ── Instance registry functions ───────────────────────────────────────────
+
+def create_instance(protocol="dns", config=None):
+    inst = FuzzerInstance(protocol=protocol, config=config or {})
+    with _instances_lock:
+        _instances[inst.id] = inst
+    return inst
+
+def get_instance(instance_id):
+    return _instances.get(instance_id)
+
+def list_instances():
+    return list(_instances.values())
+
+def destroy_instance(instance_id):
+    with _instances_lock:
+        inst = _instances.pop(instance_id, None)
+    if inst:
+        inst.request_stop()
+        if inst.process and inst.process.is_alive():
+            inst.process.join(timeout=3)
+            if inst.process.is_alive():
+                inst.process.terminate()
+    return inst is not None
+
 
 def _bandit_for(protocol):
     if protocol == "ftp":
@@ -1307,6 +1584,7 @@ def run_fuzzer_live(config: dict):
     fuzzer_state["running"] = True
     iface_label = interface or "default route"
     log_event("INFO", f"Live fuzzer started → {server_ip}:{server_port} via {iface_label} ({protocol.upper()})")
+    log_event("INFO", "Live TCP delivery mode: persistent sockets with reconnect-on-close.")
     print(f"[+] Live network fuzzer → {server_ip}:{server_port} (iface: {iface_label})")
 
     if ftd_ip and snort_pid:
@@ -1355,7 +1633,7 @@ def run_fuzzer_live(config: dict):
                 strategy = _ftp_strategy
                 fuzzer_state["current_strategy"] = strategy
                 fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
-                live_transport.send_tcp(_ftp_payload)
+                live_transport.send_persistent_tcp(_ftp_payload)
                 fuzzer_state["iteration"] += 1
             elif protocol == "http":
                 if iteration == 1 or (iteration - 1) % 50 == 0:
@@ -1367,7 +1645,7 @@ def run_fuzzer_live(config: dict):
                 # client->server bytes. Request-side strategies test the on-path
                 # http_inspect request parser; response-side (resp_*) evasions are
                 # best exercised in pipe mode via wrap_tcp_response_session.
-                live_transport.send_tcp(_http_payload, port=80)
+                live_transport.send_persistent_tcp(_http_payload, port=80)
                 fuzzer_state["iteration"] += 1
             elif protocol == "smtp":
                 if iteration == 1 or (iteration - 1) % 50 == 0:
@@ -1377,7 +1655,7 @@ def run_fuzzer_live(config: dict):
                 fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
                 # Live mode is the CLIENT: client->server SMTP commands/DATA drive
                 # the on-path smtp inspector. Default SMTP port is 25.
-                live_transport.send_tcp(_smtp_payload, port=25)
+                live_transport.send_persistent_tcp(_smtp_payload, port=25)
                 fuzzer_state["iteration"] += 1
             elif protocol == "ssh":
                 if iteration == 1 or (iteration - 1) % 50 == 0:
@@ -1387,7 +1665,7 @@ def run_fuzzer_live(config: dict):
                 fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
                 # Live mode is the CLIENT: client->server SSH handshake bytes drive
                 # the on-path ssh inspector. Default SSH port is 22.
-                live_transport.send_tcp(_ssh_payload, port=22)
+                live_transport.send_persistent_tcp(_ssh_payload, port=22)
                 fuzzer_state["iteration"] += 1
             elif protocol in ("smb2", "smb3"):
                 if iteration == 1 or (iteration - 1) % 50 == 0:
@@ -1395,7 +1673,7 @@ def run_fuzzer_live(config: dict):
                 strategy = _smb_strategy
                 fuzzer_state["current_strategy"] = strategy
                 fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
-                live_transport.send_tcp(_smb_payload, port=445)
+                live_transport.send_persistent_tcp(_smb_payload, port=445)
                 fuzzer_state["iteration"] += 1
             elif protocol == "http2":
                 if iteration == 1 or (iteration - 1) % 50 == 0:
@@ -1403,7 +1681,7 @@ def run_fuzzer_live(config: dict):
                 strategy = _h2_strategy
                 fuzzer_state["current_strategy"] = strategy
                 fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
-                live_transport.send_tcp(_h2_payload, port=80)
+                live_transport.send_persistent_tcp(_h2_payload, port=80)
                 fuzzer_state["iteration"] += 1
             elif protocol == "dcerpc":
                 if iteration == 1 or (iteration - 1) % 50 == 0:
@@ -1411,7 +1689,7 @@ def run_fuzzer_live(config: dict):
                 strategy = _dcerpc_strategy
                 fuzzer_state["current_strategy"] = strategy
                 fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
-                live_transport.send_tcp(_dcerpc_payload, port=135)
+                live_transport.send_persistent_tcp(_dcerpc_payload, port=135)
                 fuzzer_state["iteration"] += 1
             elif protocol == "dhcp":
                 if iteration == 1 or (iteration - 1) % 50 == 0:
@@ -1485,7 +1763,7 @@ def run_fuzzer_live(config: dict):
                 strategy = _rtsp_strategy
                 fuzzer_state["current_strategy"] = strategy
                 fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
-                live_transport.send_tcp(_rtsp_payload, port=_rtsp_dst_port)
+                live_transport.send_persistent_tcp(_rtsp_payload, port=_rtsp_dst_port)
                 fuzzer_state["iteration"] += 1
             elif protocol == "radius":
                 if iteration == 1 or (iteration - 1) % 50 == 0:
@@ -1501,7 +1779,7 @@ def run_fuzzer_live(config: dict):
                 strategy = _tacacs_strategy
                 fuzzer_state["current_strategy"] = strategy
                 fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
-                live_transport.send_tcp(_tacacs_payload, port=_tacacs_dst_port)
+                live_transport.send_persistent_tcp(_tacacs_payload, port=_tacacs_dst_port)
                 fuzzer_state["iteration"] += 1
             elif protocol == "ldap":
                 if iteration == 1 or (iteration - 1) % 50 == 0:
@@ -1509,7 +1787,7 @@ def run_fuzzer_live(config: dict):
                 strategy = _ldap_strategy
                 fuzzer_state["current_strategy"] = strategy
                 fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
-                live_transport.send_tcp(_ldap_payload, port=_ldap_dst_port)
+                live_transport.send_persistent_tcp(_ldap_payload, port=_ldap_dst_port)
                 fuzzer_state["iteration"] += 1
             elif protocol == "cifs":
                 if iteration == 1 or (iteration - 1) % 50 == 0:
@@ -1517,7 +1795,7 @@ def run_fuzzer_live(config: dict):
                 strategy = _cifs_strategy
                 fuzzer_state["current_strategy"] = strategy
                 fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
-                live_transport.send_tcp(_cifs_payload, port=_cifs_dst_port)
+                live_transport.send_persistent_tcp(_cifs_payload, port=_cifs_dst_port)
                 fuzzer_state["iteration"] += 1
             elif protocol == "sunrpc":
                 if iteration == 1 or (iteration - 1) % 50 == 0:
@@ -1528,7 +1806,7 @@ def run_fuzzer_live(config: dict):
                 _tcp_strats = ("record_marking_abuse", "tcp_segmentation_evasion",
                                "nfs_compound_overflow")
                 if strategy in _tcp_strats:
-                    live_transport.send_tcp(_sunrpc_payload, port=_sunrpc_dst_port)
+                    live_transport.send_persistent_tcp(_sunrpc_payload, port=_sunrpc_dst_port)
                 else:
                     live_transport.send_udp(_sunrpc_payload, port=_sunrpc_dst_port)
                 fuzzer_state["iteration"] += 1
@@ -1538,7 +1816,7 @@ def run_fuzzer_live(config: dict):
                 strategy = _telnet_strategy
                 fuzzer_state["current_strategy"] = strategy
                 fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
-                live_transport.send_tcp(_telnet_payload, port=_telnet_dst_port)
+                live_transport.send_persistent_tcp(_telnet_payload, port=_telnet_dst_port)
                 fuzzer_state["iteration"] += 1
             elif protocol == "tftp":
                 if iteration == 1 or (iteration - 1) % 50 == 0:
@@ -1559,7 +1837,7 @@ def run_fuzzer_live(config: dict):
                     live_transport.send_udp(bo_payload, port=31337)
                 elif strategy == "dce_smb":
                     smb_payload = DCESmbMutator.mutate()
-                    live_transport.send_tcp(smb_payload, port=445)
+                    live_transport.send_persistent_tcp(smb_payload, port=445)
                     time.sleep(0.001)
                 else:
                     mutated_bytes, tcp_payload, split_at = _build_dns_mutation(strategy, seed_message)
@@ -1567,9 +1845,9 @@ def run_fuzzer_live(config: dict):
                         live_transport.send_udp(mutated_bytes)
                     elif tcp_payload is not None:
                         if split_at is not None:
-                            live_transport.send_split_tcp(tcp_payload, split_at)
+                            live_transport.send_persistent_tcp(tcp_payload, split_at=split_at)
                         else:
-                            live_transport.send_tcp(tcp_payload)
+                            live_transport.send_persistent_tcp(tcp_payload)
                         time.sleep(0.001)
 
             fuzzer_state["last_packet_time"] = time.time()
@@ -1594,6 +1872,7 @@ def run_fuzzer_live(config: dict):
         print(f"\n[!] Live fuzzer error: {e}")
 
     finally:
+        live_transport.close_persistent_tcp()
         fuzzer_state["running"] = False
         fuzzer_state["status"] = "stopped" if not fuzzer_state["anomaly_detected"] else "crash_detected"
         if fuzzer_state.get("anomaly_detected"):
@@ -1607,6 +1886,610 @@ def run_fuzzer_live(config: dict):
                 return_code=None,
             )
         log_event("INFO", "Live network fuzzer stopped.")
+
+
+def _instance_remote_watchdog(monitor, instance):
+    """SSH-based watchdog for a FuzzerInstance on a remote FTD host.
+    Mirrors _remote_watchdog() but operates on instance.state."""
+    state = instance.state
+    baseline_mem = None
+    for _ in range(5):
+        mem = monitor.get_memory_mb()
+        if mem is not None:
+            baseline_mem = mem
+            state["baseline_mem_mb"] = round(mem, 2)
+            state["peak_mem_mb"] = round(mem, 2)
+            instance.log_event("INFO", f"Remote watchdog baseline: {mem:.2f} MB on {monitor.host}")
+            break
+        time.sleep(1.0)
+
+    if baseline_mem is None:
+        instance.log_event("WARNING", "Could not read remote Snort memory \u2014 process monitoring limited to liveness.")
+
+    consecutive_failures = 0
+    max_failures = 3
+
+    while state["running"]:
+        time.sleep(2.0)
+        alive = monitor.is_alive()
+
+        if alive is True:
+            consecutive_failures = 0
+        elif alive is None:
+            pass
+        elif alive is False:
+            new_pid = monitor.find_snort_pid()
+            if new_pid:
+                instance.log_event("INFO",
+                    f"Snort PID rotated on {monitor.host}: {monitor.snort_pid} \u2192 {new_pid} (normal FTD behavior)")
+                monitor.update_pid(new_pid)
+                state["snort_pid"] = new_pid
+                consecutive_failures = 0
+                baseline_mem = None
+                mem = monitor.get_memory_mb()
+                if mem is not None:
+                    baseline_mem = mem
+                    state["baseline_mem_mb"] = round(mem, 2)
+                continue
+
+            consecutive_failures += 1
+            instance.log_event("WARNING",
+                f"Snort PID {monitor.snort_pid} not found on {monitor.host} "
+                f"({consecutive_failures}/{max_failures} before crash declaration)")
+            if consecutive_failures >= max_failures:
+                state["anomaly_detected"] = "REMOTE_SNORT_CRASH"
+                state["status"] = "crash_detected"
+                state["trigger_detail"] = (
+                    f"Snort PID {monitor.snort_pid} on {monitor.host} not found after "
+                    f"{max_failures} consecutive checks. No snort3 process found \u2014 likely crashed."
+                )
+                state["running"] = False
+                instance.log_event("CRITICAL", f"Remote Snort crash on {monitor.host} (PID {monitor.snort_pid}) \u2014 confirmed after {max_failures} checks")
+                break
+
+        mem = monitor.get_memory_mb()
+        if mem is not None:
+            state["current_mem_mb"] = round(mem, 2)
+            if mem > (state.get("peak_mem_mb") or 0):
+                state["peak_mem_mb"] = round(mem, 2)
+            if baseline_mem and (mem - baseline_mem) > 4096.0:
+                state["anomaly_detected"] = "REMOTE_MEMORY_LEAK"
+                state["status"] = "crash_detected"
+                state["running"] = False
+                instance.log_event("CRITICAL", f"Remote memory bloat: +{mem - baseline_mem:.2f} MB")
+                break
+
+    monitor.close()
+
+
+def _run_instance_mp(protocol, config, weights_dict, shared_state, stop_event):
+    """multiprocessing.Process target — runs the fuzzer in its own OS process."""
+    inst = FuzzerInstance(protocol=protocol, config=config)
+    inst.weights = weights_dict
+
+    def _sync(local_state, local_events):
+        snap = dict(local_state)
+        snap["_bandit_stats"] = inst.bandit.get_stats(
+            base_weights=inst.weights.get(protocol, {}))
+        snap["_events_snapshot"] = list(local_events[-20:])
+        try:
+            shared_state.update(snap)
+        except Exception:
+            pass
+
+    try:
+        run_instance_live(inst, _sync_fn=_sync, _stop_check=stop_event.is_set)
+    except Exception as exc:
+        inst.log_event("ERROR", f"Fuzzer crashed: {exc}")
+        inst.state["status"] = "error"
+        inst.state["running"] = False
+    finally:
+        _sync(inst.state, inst.event_log)
+
+
+def run_instance_live(instance, _sync_fn=None, _stop_check=None):
+    """Live-mode fuzzer loop for a FuzzerInstance. Mirrors run_fuzzer_live but
+    reads/writes instance.state instead of the global fuzzer_state.
+    Optional _sync_fn(state, events) syncs local state to a Manager proxy.
+    Optional _stop_check() returns True when an external stop is requested."""
+    from monitor.remote_monitor import RemoteSnortMonitor
+
+    config = instance.config
+    server_ip = config.get("server_ip", "127.0.0.1")
+    server_port = int(config.get("server_port", 53))
+    interface = config.get("interface") or None
+    ftd_ip = config.get("ftd_ip") or None
+    ftd_user = config.get("ftd_user", "admin")
+    ftd_pass = config.get("ftd_pass", "")
+    ftd_ssh_port = int(config.get("ftd_ssh_port", 22))
+    snort_pid = config.get("snort_pid")
+
+    state = instance.state
+    protocol = instance.protocol
+    bandit = instance.bandit
+    weights = instance.weights
+    live_transport = LiveNetworkTransport(server_ip, server_port, interface)
+    instance.transport = live_transport
+
+    if protocol == "ftp":
+        ftp_mutator_inst = FtpMutator(external_weights=weights.get("ftp"), bandit=bandit)
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        seed_message = None
+    elif protocol == "http":
+        ftp_mutator_inst = None
+        http_mutator_inst = HttpMutator(external_weights=weights.get("http"), bandit=bandit)
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        seed_message = None
+    elif protocol == "smtp":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = SmtpMutator(external_weights=weights.get("smtp"), bandit=bandit)
+        smb_mutator_inst = None
+        seed_message = None
+    elif protocol == "ssh":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        ssh_mutator_inst = SshMutator(external_weights=weights.get("ssh"), bandit=bandit)
+        smb_mutator_inst = None
+        seed_message = None
+    elif protocol == "smb2":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = Smb2Mutator(external_weights=weights.get("smb2"), bandit=bandit)
+        seed_message = None
+    elif protocol == "smb3":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = Smb3Mutator(external_weights=weights.get("smb3"), bandit=bandit)
+        http2_mutator_inst = None
+        seed_message = None
+    elif protocol == "http2":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        http2_mutator_inst = Http2Mutator(external_weights=weights.get("http2"), bandit=bandit)
+        seed_message = None
+    elif protocol == "dcerpc":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        dcerpc_mutator_inst = DcerpcMutator(external_weights=weights.get("dcerpc"), bandit=bandit)
+        seed_message = None
+    elif protocol == "dhcp":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        dhcp_mutator_inst = DhcpMutator(external_weights=weights.get("dhcp"), bandit=bandit)
+        seed_message = None
+    elif protocol == "dhcpv6":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        dhcpv6_mutator_inst = Dhcpv6Mutator(external_weights=weights.get("dhcpv6"), bandit=bandit)
+        seed_message = None
+    elif protocol == "snmp":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        snmp_mutator_inst = SnmpMutator(external_weights=weights.get("snmp"), bandit=bandit)
+        seed_message = None
+    elif protocol == "icmp":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        icmp_mutator_inst = IcmpMutator(external_weights=weights.get("icmp"), bandit=bandit)
+        seed_message = None
+    elif protocol == "icmpv6":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        icmpv6_mutator_inst = Icmpv6Mutator(external_weights=weights.get("icmpv6"), bandit=bandit)
+        seed_message = None
+    elif protocol == "sip":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        sip_mutator_inst = SipMutator(external_weights=weights.get("sip"), bandit=bandit)
+        seed_message = None
+    elif protocol == "mgcp":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        mgcp_mutator_inst = MgcpMutator(external_weights=weights.get("mgcp"), bandit=bandit)
+        seed_message = None
+    elif protocol == "rtsp":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        rtsp_mutator_inst = RtspMutator(external_weights=weights.get("rtsp"), bandit=bandit)
+        seed_message = None
+    elif protocol == "radius":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        radius_mutator_inst = RadiusMutator(external_weights=weights.get("radius"), bandit=bandit)
+        seed_message = None
+    elif protocol == "tacacs":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        tacacs_mutator_inst = TacacsMutator(external_weights=weights.get("tacacs"), bandit=bandit)
+        seed_message = None
+    elif protocol == "ldap":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        ldap_mutator_inst = LdapMutator(external_weights=weights.get("ldap"), bandit=bandit)
+        seed_message = None
+    elif protocol == "cifs":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        cifs_mutator_inst = CifsMutator(external_weights=weights.get("cifs"), bandit=bandit)
+        seed_message = None
+    elif protocol == "sunrpc":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        sunrpc_mutator_inst = SunrpcMutator(external_weights=weights.get("sunrpc"), bandit=bandit)
+        seed_message = None
+    elif protocol == "telnet":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        telnet_mutator_inst = TelnetMutator(external_weights=weights.get("telnet"), bandit=bandit)
+        seed_message = None
+    elif protocol == "tftp":
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        tftp_mutator_inst = TftpMutator(external_weights=weights.get("tftp"), bandit=bandit)
+        seed_message = None
+    else:
+        ftp_mutator_inst = None
+        http_mutator_inst = None
+        smtp_mutator_inst = None
+        smb_mutator_inst = None
+        seed_question = DNSQuestion(qname="example.com")
+        seed_message = DNSMessage(header=DNSHeader(), questions=[seed_question])
+
+    state["start_time"] = time.time()
+    state["status"] = "running"
+    state["running"] = True
+    iface_label = interface or "default route"
+    instance.log_event("INFO", f"Live fuzzer started \u2192 {server_ip}:{server_port} via {iface_label} ({protocol.upper()})")
+    instance.log_event("INFO", "Live TCP delivery mode: persistent sockets with reconnect-on-close.")
+    print(f"[+] [{instance.id}] Live network fuzzer \u2192 {server_ip}:{server_port} (iface: {iface_label})")
+
+    if ftd_ip and snort_pid:
+        snort_pid = int(snort_pid)
+        state["snort_pid"] = snort_pid
+        monitor = RemoteSnortMonitor(ftd_ip, snort_pid, ftd_user, ftd_pass, ftd_ssh_port)
+        if monitor.connect():
+            instance.log_event("INFO", f"SSH monitor connected to {ftd_ip} \u2014 watching PID {snort_pid}")
+            print(f"[+] [{instance.id}] Remote Snort monitor active: {ftd_ip} PID {snort_pid}")
+            wdog = threading.Thread(target=_instance_remote_watchdog, args=(monitor, instance), daemon=True)
+            wdog.start()
+            instance.watchdog_thread = wdog
+        else:
+            instance.log_event("WARNING", f"SSH to {ftd_ip} failed \u2014 running without remote monitoring")
+            monitor = None
+    else:
+        monitor = None
+        instance.log_event("WARNING", "No FTD IP / Snort PID provided \u2014 fire-and-forget mode (no health tracking)")
+
+    _ftp_payload, _ftp_strategy = None, None
+    _http_payload, _http_strategy = None, None
+    _smtp_payload, _smtp_strategy = None, None
+    _ssh_payload, _ssh_strategy = None, None
+    _smb_payload, _smb_strategy = None, None
+    _h2_payload, _h2_strategy = None, None
+    _dcerpc_payload, _dcerpc_strategy = None, None
+    _dhcp_payload, _dhcp_strategy, _dhcp_dst_port = None, None, None
+    _dhcpv6_payload, _dhcpv6_strategy, _dhcpv6_dst_port = None, None, None
+    _snmp_payload, _snmp_strategy, _snmp_dst_port = None, None, None
+    _icmp_data, _icmp_strategy, _icmp_pkt_type = None, None, None
+    _v6_data, _v6_strategy, _v6_pkt_type, _v6_src, _v6_dst = None, None, None, None, None
+    _sip_payload, _sip_strategy, _sip_dst_port = None, None, None
+    _rtsp_payload, _rtsp_strategy, _rtsp_dst_port = None, None, None
+    _radius_payload, _radius_strategy, _radius_dst_port = None, None, None
+    _tacacs_payload, _tacacs_strategy, _tacacs_dst_port = None, None, None
+    _ldap_payload, _ldap_strategy, _ldap_dst_port = None, None, None
+    _telnet_payload, _telnet_strategy, _telnet_dst_port = None, None, None
+
+    _mp_last_sync = time.time()
+
+    try:
+        while state["running"] and not state["anomaly_detected"]:
+            if _stop_check and _stop_check():
+                state["running"] = False
+                break
+
+            state["iteration"] += 1
+            iteration = state["iteration"]
+
+            if protocol == "ftp":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _ftp_payload, _ftp_strategy = ftp_mutator_inst.mutate()
+                strategy = _ftp_strategy
+                state["current_strategy"] = strategy
+                state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_persistent_tcp(_ftp_payload)
+                state["iteration"] += 1
+            elif protocol == "http":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _http_payload, _http_strategy = http_mutator_inst.mutate()
+                strategy = _http_strategy
+                state["current_strategy"] = strategy
+                state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_persistent_tcp(_http_payload, port=80)
+                state["iteration"] += 1
+            elif protocol == "smtp":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _smtp_payload, _smtp_strategy = smtp_mutator_inst.mutate()
+                strategy = _smtp_strategy
+                state["current_strategy"] = strategy
+                state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_persistent_tcp(_smtp_payload, port=25)
+                state["iteration"] += 1
+            elif protocol == "ssh":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _ssh_payload, _ssh_strategy = ssh_mutator_inst.mutate()
+                strategy = _ssh_strategy
+                state["current_strategy"] = strategy
+                state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_persistent_tcp(_ssh_payload, port=22)
+                state["iteration"] += 1
+            elif protocol in ("smb2", "smb3"):
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _smb_payload, _smb_strategy = smb_mutator_inst.mutate()
+                strategy = _smb_strategy
+                state["current_strategy"] = strategy
+                state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_persistent_tcp(_smb_payload, port=445)
+                state["iteration"] += 1
+            elif protocol == "http2":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _h2_payload, _h2_strategy = http2_mutator_inst.mutate()
+                strategy = _h2_strategy
+                state["current_strategy"] = strategy
+                state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_persistent_tcp(_h2_payload, port=80)
+                state["iteration"] += 1
+            elif protocol == "dcerpc":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _dcerpc_payload, _dcerpc_strategy = dcerpc_mutator_inst.mutate()
+                strategy = _dcerpc_strategy
+                state["current_strategy"] = strategy
+                state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_persistent_tcp(_dcerpc_payload, port=135)
+                state["iteration"] += 1
+            elif protocol == "dhcp":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _dhcp_payload, _dhcp_strategy, _dhcp_dst_port = dhcp_mutator_inst.mutate()
+                strategy = _dhcp_strategy
+                state["current_strategy"] = strategy
+                state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_udp(_dhcp_payload, port=_dhcp_dst_port)
+                state["iteration"] += 1
+            elif protocol == "dhcpv6":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _dhcpv6_payload, _dhcpv6_strategy, _dhcpv6_dst_port = dhcpv6_mutator_inst.mutate()
+                strategy = _dhcpv6_strategy
+                state["current_strategy"] = strategy
+                state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_udp(_dhcpv6_payload, port=_dhcpv6_dst_port)
+                state["iteration"] += 1
+            elif protocol == "snmp":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _snmp_payload, _snmp_strategy, _snmp_dst_port = snmp_mutator_inst.mutate()
+                strategy = _snmp_strategy
+                state["current_strategy"] = strategy
+                state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_udp(_snmp_payload, port=_snmp_dst_port)
+                state["iteration"] += 1
+            elif protocol == "icmp":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _icmp_data, _icmp_strategy, _icmp_pkt_type = icmp_mutator_inst.mutate()
+                strategy = _icmp_strategy
+                state["current_strategy"] = strategy
+                state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
+                if _icmp_pkt_type in ("icmp", "raw_ip"):
+                    live_transport.send_icmp(_icmp_data)
+                else:
+                    for frag_data, frag_off, frag_mf, frag_id, frag_proto in _icmp_data:
+                        live_transport.send_icmp(frag_data)
+                state["iteration"] += 1
+            elif protocol == "icmpv6":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _v6_data, _v6_strategy, _v6_pkt_type, _v6_src, _v6_dst = icmpv6_mutator_inst.mutate()
+                strategy = _v6_strategy
+                state["current_strategy"] = strategy
+                state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
+                if _v6_pkt_type == "icmpv6":
+                    live_transport.send_icmpv6(_v6_data, dst_ipv6=server_ip)
+                elif _v6_pkt_type == "fragments":
+                    for frag_pkt in _v6_data:
+                        live_transport.send_icmpv6(frag_pkt, dst_ipv6=server_ip)
+                else:
+                    live_transport.send_icmpv6(_v6_data, dst_ipv6=server_ip)
+                state["iteration"] += 1
+            elif protocol == "sip":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _sip_payload, _sip_strategy, _sip_dst_port = sip_mutator_inst.mutate()
+                strategy = _sip_strategy
+                state["current_strategy"] = strategy
+                state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_udp(_sip_payload, port=_sip_dst_port)
+                state["iteration"] += 1
+            elif protocol == "mgcp":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _mgcp_payload, _mgcp_strategy, _mgcp_dst_port = mgcp_mutator_inst.mutate()
+                strategy = _mgcp_strategy
+                state["current_strategy"] = strategy
+                state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_udp(_mgcp_payload, port=_mgcp_dst_port)
+                state["iteration"] += 1
+            elif protocol == "rtsp":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _rtsp_payload, _rtsp_strategy, _rtsp_dst_port = rtsp_mutator_inst.mutate()
+                strategy = _rtsp_strategy
+                state["current_strategy"] = strategy
+                state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_persistent_tcp(_rtsp_payload, port=_rtsp_dst_port)
+                state["iteration"] += 1
+            elif protocol == "radius":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _radius_payload, _radius_strategy, _radius_dst_port = radius_mutator_inst.mutate()
+                strategy = _radius_strategy
+                state["current_strategy"] = strategy
+                state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_udp(_radius_payload, port=_radius_dst_port)
+                state["iteration"] += 1
+            elif protocol == "tacacs":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _tacacs_payload, _tacacs_strategy, _tacacs_dst_port = tacacs_mutator_inst.mutate()
+                strategy = _tacacs_strategy
+                state["current_strategy"] = strategy
+                state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_persistent_tcp(_tacacs_payload, port=_tacacs_dst_port)
+                state["iteration"] += 1
+            elif protocol == "ldap":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _ldap_payload, _ldap_strategy, _ldap_dst_port = ldap_mutator_inst.mutate()
+                strategy = _ldap_strategy
+                state["current_strategy"] = strategy
+                state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_persistent_tcp(_ldap_payload, port=_ldap_dst_port)
+                state["iteration"] += 1
+            elif protocol == "cifs":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _cifs_payload, _cifs_strategy, _cifs_dst_port = cifs_mutator_inst.mutate()
+                strategy = _cifs_strategy
+                state["current_strategy"] = strategy
+                state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_persistent_tcp(_cifs_payload, port=_cifs_dst_port)
+                state["iteration"] += 1
+            elif protocol == "sunrpc":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _sunrpc_payload, _sunrpc_strategy, _sunrpc_dst_port = sunrpc_mutator_inst.mutate()
+                strategy = _sunrpc_strategy
+                state["current_strategy"] = strategy
+                state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
+                _tcp_strats = ("record_marking_abuse", "tcp_segmentation_evasion",
+                               "nfs_compound_overflow")
+                if strategy in _tcp_strats:
+                    live_transport.send_persistent_tcp(_sunrpc_payload, port=_sunrpc_dst_port)
+                else:
+                    live_transport.send_udp(_sunrpc_payload, port=_sunrpc_dst_port)
+                state["iteration"] += 1
+            elif protocol == "telnet":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _telnet_payload, _telnet_strategy, _telnet_dst_port = telnet_mutator_inst.mutate()
+                strategy = _telnet_strategy
+                state["current_strategy"] = strategy
+                state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_persistent_tcp(_telnet_payload, port=_telnet_dst_port)
+                state["iteration"] += 1
+            elif protocol == "tftp":
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    _tftp_payload, _tftp_strategy, _tftp_dst_port = tftp_mutator_inst.mutate()
+                strategy = _tftp_strategy
+                state["current_strategy"] = strategy
+                state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
+                live_transport.send_udp(_tftp_payload, port=_tftp_dst_port)
+                state["iteration"] += 1
+            else:
+                dns_w = weights.get("dns", {})
+                strategy = bandit.select_with_weights(dns_w)
+                state["current_strategy"] = strategy
+                state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
+
+                if strategy == "back_orifice":
+                    bo_payload = BackOrificeMutator.mutate()
+                    live_transport.send_udp(bo_payload, port=31337)
+                elif strategy == "dce_smb":
+                    smb_payload = DCESmbMutator.mutate()
+                    live_transport.send_persistent_tcp(smb_payload, port=445)
+                    time.sleep(0.001)
+                else:
+                    mutated_bytes, tcp_payload, split_at = _build_dns_mutation(strategy, seed_message)
+                    if mutated_bytes is not None:
+                        live_transport.send_udp(mutated_bytes)
+                    elif tcp_payload is not None:
+                        if split_at is not None:
+                            live_transport.send_persistent_tcp(tcp_payload, split_at=split_at)
+                        else:
+                            live_transport.send_persistent_tcp(tcp_payload)
+                        time.sleep(0.001)
+
+            state["last_packet_time"] = time.time()
+
+            bandit.update(strategy, 0.0)
+
+            stat_interval = 500 if protocol in ("ftp", "http", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6", "sip", "mgcp", "radius", "tacacs", "ldap", "cifs", "sunrpc", "telnet", "tftp") else 10000
+
+            _now = time.time()
+            _iter_sync = state["iteration"] % stat_interval == 0
+            _time_sync = _sync_fn and (_now - _mp_last_sync >= 0.5)
+
+            if _iter_sync or _time_sync:
+                elapsed = _now - state["start_time"] if state["start_time"] else 1
+                state["packets_per_sec"] = int(state["iteration"] / max(elapsed, 0.001))
+                state["_frozen_elapsed"] = elapsed
+                if _iter_sync:
+                    status = "ANOMALY" if state["anomaly_detected"] else "Secure"
+                    print(f"[*] [{instance.id}] Sent {iteration} live mutations... (Target Status: {status})")
+                if _sync_fn:
+                    _sync_fn(state, instance.event_log)
+                    _mp_last_sync = _now
+
+    except KeyboardInterrupt:
+        instance.log_event("WARNING", f"Live fuzzer halted manually at iteration {state['iteration']}")
+        print(f"\n[*] [{instance.id}] Live fuzzer halted. Total packets sent: {state['iteration']}")
+
+    except Exception as e:
+        instance.log_event("ERROR", f"Live fuzzer error: {e}")
+        print(f"\n[!] [{instance.id}] Live fuzzer error: {e}")
+
+    finally:
+        live_transport.close_persistent_tcp()
+        state["running"] = False
+        state["status"] = "stopped" if not state["anomaly_detected"] else "crash_detected"
+        if state.get("anomaly_detected"):
+            bandit.update(state.get("current_strategy", ""), 1.0)
+            instance.save_crash_log(
+                state["iteration"],
+                b"",
+                anomaly_type=state["anomaly_detected"],
+                return_code=None,
+            )
+        instance.log_event("INFO", "Live network fuzzer stopped.")
+        if _sync_fn:
+            _sync_fn(state, instance.event_log)
 
 
 if __name__ == "__main__":

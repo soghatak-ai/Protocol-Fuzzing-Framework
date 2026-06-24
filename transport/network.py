@@ -300,13 +300,13 @@ class StreamTransport:
 
 class LiveNetworkTransport:
     """
-    Sends real DNS/FTP packets over the network to a target server.
+    Sends real protocol packets over the network to a target server.
     Used in live-network mode: fuzzer → NIC → [FTD/Snort] → server.
 
     UDP strategies send the raw DNS payload directly (no framing).
-    TCP strategies send the 2-byte TCP-DNS length-prefixed payload over a
-    real TCP connection with TCP_NODELAY so each send() call produces a
-    separate TCP segment — exercising Snort's TCP reassembly state machine.
+    TCP strategies can either use one-shot sockets or persistent sockets with
+    TCP_NODELAY so each send() call produces a distinct segment while keeping
+    Snort's stream/app inspector state alive across fuzz iterations.
     """
 
     def __init__(self, server_ip: str, server_port: int = 53,
@@ -314,6 +314,7 @@ class LiveNetworkTransport:
         self.server_ip = server_ip
         self.server_port = server_port
         self.interface = interface
+        self._persistent_tcp_sockets = {}
 
     def _bind_iface(self, sock: socket.socket):
         """Bind socket to a specific interface (Linux: SO_BINDTODEVICE)."""
@@ -356,6 +357,63 @@ class LiveNetworkTransport:
                     pass
         except OSError:
             pass
+
+    def _persistent_tcp_socket(self, port: int) -> socket.socket:
+        actual_port = port or self.server_port
+        sock = self._persistent_tcp_sockets.get(actual_port)
+        if sock is not None:
+            return sock
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sock.settimeout(1.0)
+        self._bind_iface(sock)
+        sock.connect((self.server_ip, actual_port))
+        sock.settimeout(0.2)
+        self._persistent_tcp_sockets[actual_port] = sock
+        return sock
+
+    def close_persistent_tcp(self, port: int = None):
+        """Close one persistent TCP socket, or all of them when port is omitted."""
+        if port is None:
+            ports = list(self._persistent_tcp_sockets)
+        else:
+            ports = [port or self.server_port]
+
+        for actual_port in ports:
+            sock = self._persistent_tcp_sockets.pop(actual_port, None)
+            if sock is None:
+                continue
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def send_persistent_tcp(self, tcp_payload: bytes, port: int = None,
+                            split_at: int = None) -> bool:
+        """
+        Send over a long-lived TCP connection. If the peer has closed the stream,
+        reconnect once and retry the same payload so fuzzing can continue.
+        """
+        actual_port = port or self.server_port
+        for _attempt in range(2):
+            try:
+                sock = self._persistent_tcp_socket(actual_port)
+                if split_at is not None and len(tcp_payload) > 1:
+                    split_at = max(1, min(split_at, len(tcp_payload) - 1))
+                    sock.sendall(tcp_payload[:split_at])
+                    time.sleep(0.0001)
+                    sock.sendall(tcp_payload[split_at:])
+                else:
+                    sock.sendall(tcp_payload)
+                return True
+            except OSError:
+                self.close_persistent_tcp(actual_port)
+        return False
 
     def send_icmp(self, icmp_payload: bytes):
         """Send raw ICMP payload via raw socket (requires root/CAP_NET_RAW)."""
