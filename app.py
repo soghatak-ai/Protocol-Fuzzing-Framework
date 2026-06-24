@@ -1184,8 +1184,10 @@ analysis_state = {
 # ---------------------------------------------------------------------------
 # Per-vulnerability trigger-packet sender tracking
 # ---------------------------------------------------------------------------
-_vuln_senders = {}          # vid -> sender state dict
-_vuln_sender_threads = {}   # vid -> Thread
+_vuln_senders = {}          # vid -> sender state dict (local snapshot)
+_vuln_sender_procs = {}     # vid -> multiprocessing.Process
+_vuln_sender_shared = {}    # vid -> Manager proxy dict
+_vuln_sender_stops = {}     # vid -> multiprocessing.Event
 _vuln_sender_locks = {}     # vid -> Lock (created on demand)
 _vuln_senders_global_lock = threading.Lock()
 
@@ -1203,6 +1205,7 @@ _DEFAULT_SENDER_STATE = {
     "stop_requested": False,
     "tx_count": 0,
     "errors_count": 0,
+    "packets_per_sec": 0,
     "current_packet_id": None,
     "started_at": None,
     "mode": None,
@@ -3285,81 +3288,109 @@ def _send_one_packet(pkt, target_ip, port_override, interface, transport=None):
     }
 
 
-def _packet_sender_loop(vid, packets, target_ip, port_override, interface,
-                        mode, delay_ms, q):
-    """Background worker: walks packets in send_once or round_robin mode."""
-    from transport.network import LiveNetworkTransport
+def _packet_sender_mp(vid, packets_raw, target_ip, port_override, interface,
+                      mode, delay_ms, shared_state, stop_event):
+    """multiprocessing.Process target — high-speed packet sender.
 
-    state = _vuln_senders[vid]
-    has_tcp = any(p["protocol"] == "tcp" for p in packets)
-    persistent_tx = None
-    if mode == "round_robin" and has_tcp:
-        persistent_tx = LiveNetworkTransport(target_ip, port_override or 0, interface or None)
+    Pre-decodes hex payloads once, reuses a single LiveNetworkTransport for
+    the entire run, and syncs stats to the parent via Manager proxy every 0.5s.
+    """
+    from transport.network import LiveNetworkTransport
+    import time as _time
+
+    tx = LiveNetworkTransport(target_ip, port_override or 0, interface or None)
+
+    prepared = []
+    for p in packets_raw:
+        prepared.append({
+            "id": p["id"],
+            "name": p.get("name"),
+            "vuln_id": p.get("vuln_id"),
+            "protocol": p["protocol"],
+            "data": bytes.fromhex(p["hex"]),
+            "port": port_override if port_override else p.get("port") or 0,
+            "split_at": p.get("split_at"),
+            "send_strategy": p.get("send_strategy"),
+        })
+
+    tx_count = 0
+    errors = 0
+    start_t = _time.time()
+    last_sync = start_t
+    n_pkts = len(prepared)
+
+    def _sync():
+        nonlocal last_sync
+        now = _time.time()
+        elapsed = now - start_t
+        pps = int(tx_count / max(elapsed, 0.001))
+        try:
+            shared_state.update({
+                "running": True,
+                "tx_count": tx_count,
+                "errors_count": errors,
+                "packets_per_sec": pps,
+                "started_at": start_t,
+            })
+        except Exception:
+            pass
+        last_sync = now
+
+    def _send_fast(pkt):
+        nonlocal errors
+        proto = pkt["protocol"]
+        data = pkt["data"]
+        port = pkt["port"]
+        try:
+            if proto == "udp":
+                tx.send_udp(data, port=port or None)
+            elif proto == "tcp":
+                split = pkt["split_at"] if pkt["send_strategy"] == "split_tcp" else None
+                tx.send_persistent_tcp(data, port=port or None, split_at=split)
+            elif proto == "icmp":
+                tx.send_icmp(data)
+            elif proto == "icmpv6":
+                tx.send_icmpv6(data, dst_ipv6=target_ip)
+        except Exception:
+            errors += 1
 
     try:
-        state.update({
-            "running": True,
-            "stop_requested": False,
-            "tx_count": 0,
-            "errors_count": 0,
-            "started_at": time.time(),
-            "mode": mode,
-            "target_ip": target_ip,
-            "selected_count": len(packets),
-            "current_packet_id": None,
-        })
-        q.put({"type": "start", "count": len(packets), "mode": mode,
-               "target_ip": target_ip, "delay_ms": delay_ms, "vuln_id": vid})
-
-        def _interruptible_sleep(ms):
-            if ms <= 0:
-                return
-            end = time.time() + ms / 1000.0
-            while time.time() < end and not state["stop_requested"]:
-                time.sleep(min(0.05, max(0.0, end - time.time())))
+        _sync()
 
         if mode == "round_robin":
             i = 0
-            while not state["stop_requested"]:
-                pkt = packets[i % len(packets)]
-                state["current_packet_id"] = pkt["id"]
-                tx = persistent_tx if pkt["protocol"] == "tcp" and persistent_tx else None
-                evt = _send_one_packet(pkt, target_ip, port_override, interface, transport=tx)
-                state["tx_count"] += 1
-                if not evt["ok"]:
-                    state["errors_count"] += 1
-                evt["iter"] = i + 1
-                q.put(evt)
+            while not stop_event.is_set():
+                _send_fast(prepared[i % n_pkts])
+                tx_count += 1
                 i += 1
-                _interruptible_sleep(delay_ms)
-        else:  # send_once
-            for i, pkt in enumerate(packets):
-                if state["stop_requested"]:
+                now = _time.time()
+                if now - last_sync >= 0.5:
+                    _sync()
+        else:
+            for i, pkt in enumerate(prepared):
+                if stop_event.is_set():
                     break
-                state["current_packet_id"] = pkt["id"]
-                evt = _send_one_packet(pkt, target_ip, port_override, interface, transport=None)
-                state["tx_count"] += 1
-                if not evt["ok"]:
-                    state["errors_count"] += 1
-                evt["iter"] = i + 1
-                q.put(evt)
-                if i < len(packets) - 1:
-                    _interruptible_sleep(delay_ms)
-    except Exception as e:
-        traceback.print_exc()
-        q.put({"type": "error", "error": f"{type(e).__name__}: {e}"})
+                _send_fast(pkt)
+                tx_count += 1
+                now = _time.time()
+                if now - last_sync >= 0.5:
+                    _sync()
+    except Exception:
+        pass
     finally:
-        if persistent_tx:
-            persistent_tx.close_persistent_tcp()
-        q.put({
-            "type": "done",
-            "vuln_id": vid,
-            "tx_count": state["tx_count"],
-            "errors": state["errors_count"],
-            "elapsed_ms": int((time.time() - (state["started_at"] or time.time())) * 1000),
-        })
-        state["running"] = False
-        state["current_packet_id"] = None
+        tx.close_persistent_tcp()
+        elapsed = _time.time() - start_t
+        try:
+            shared_state.update({
+                "running": False,
+                "stop_requested": False,
+                "tx_count": tx_count,
+                "errors_count": errors,
+                "packets_per_sec": int(tx_count / max(elapsed, 0.001)),
+                "current_packet_id": None,
+            })
+        except Exception:
+            pass
 
 
 @app.route("/api/ai/vulns/<vid>/generate_packets", methods=["POST"])
@@ -3444,9 +3475,13 @@ def api_ai_packet_delete(pid):
 def api_ai_packets_send_stream(vid):
     lock = _get_vuln_sender_lock(vid)
     with lock:
-        state = _vuln_senders.get(vid)
-        if state and state["running"]:
-            return jsonify({"error": f"Sender for vuln {vid} is already running"}), 409
+        ss_existing = _vuln_sender_shared.get(vid)
+        if ss_existing:
+            try:
+                if ss_existing.get("running", False):
+                    return jsonify({"error": f"Sender for vuln {vid} is already running"}), 409
+            except Exception:
+                pass
 
         body = request.json or {}
         pids = body.get("packet_ids") or []
@@ -3480,51 +3515,78 @@ def api_ai_packets_send_stream(vid):
         if not packets:
             return jsonify({"error": "No valid packets resolved from packet_ids"}), 400
 
+        from main import _get_manager, _mp_ctx
+
         _vuln_senders[vid] = dict(_DEFAULT_SENDER_STATE)
-        cur_state = _vuln_senders[vid]
-        q = queue.Queue(maxsize=4096)
+        mgr = _get_manager()
+        ss = mgr.dict(dict(_DEFAULT_SENDER_STATE))
+        ss.update({
+            "running": True,
+            "mode": mode,
+            "target_ip": target_ip,
+            "selected_count": len(packets),
+        })
+        stop_evt = _mp_ctx.Event()
 
-        def gen():
-            while True:
-                try:
-                    evt = q.get(timeout=15.0)
-                except queue.Empty:
-                    yield "\n"
-                    if not cur_state["running"]:
-                        break
-                    continue
-                yield json.dumps(evt) + "\n"
-                if evt.get("type") == "done":
-                    break
+        _vuln_sender_shared[vid] = ss
+        _vuln_sender_stops[vid] = stop_evt
 
-        t = threading.Thread(
-            target=_packet_sender_loop,
-            args=(vid, packets, target_ip, port_override, interface,
-                  mode, delay_ms, q),
+        packets_serializable = []
+        for p in packets:
+            packets_serializable.append({
+                "id": p["id"], "name": p.get("name"), "vuln_id": p.get("vuln_id"),
+                "protocol": p["protocol"], "hex": p["hex"],
+                "port": p.get("port"), "split_at": p.get("split_at"),
+                "send_strategy": p.get("send_strategy"),
+            })
+
+        proc = _mp_ctx.Process(
+            target=_packet_sender_mp,
+            args=(vid, packets_serializable, target_ip, port_override,
+                  interface, mode, delay_ms, ss, stop_evt),
             daemon=True,
         )
-        _vuln_sender_threads[vid] = t
-        t.start()
+        _vuln_sender_procs[vid] = proc
+        proc.start()
 
     log_event("INFO",
               f"Packet sender started for vuln {vid} "
               f"({mode}, {len(packets)} packets -> {target_ip})")
-    return Response(gen(), mimetype="application/x-ndjson")
+    return jsonify({
+        "status": "started", "vuln_id": vid, "mode": mode,
+        "count": len(packets), "target_ip": target_ip,
+    })
 
 
 @app.route("/api/ai/vulns/<vid>/packets/send/stop", methods=["POST"])
 def api_ai_packets_send_stop(vid):
-    state = _vuln_senders.get(vid)
-    if not state or not state["running"]:
+    stop_evt = _vuln_sender_stops.get(vid)
+    ss = _vuln_sender_shared.get(vid)
+    if not stop_evt or (ss and not ss.get("running", False)):
         return jsonify({"error": f"No send in progress for vuln {vid}"}), 400
-    state["stop_requested"] = True
+    stop_evt.set()
+    proc = _vuln_sender_procs.get(vid)
+    if proc and proc.is_alive():
+        proc.join(timeout=3)
+        if proc.is_alive():
+            proc.terminate()
     log_event("WARNING", f"Packet sender stop requested for vuln {vid}")
     return jsonify({"status": "stopping"})
 
 
 @app.route("/api/ai/vulns/<vid>/packets/send/status", methods=["GET"])
 def api_ai_packets_send_status(vid):
-    state = _vuln_senders.get(vid, dict(_DEFAULT_SENDER_STATE))
+    ss = _vuln_sender_shared.get(vid)
+    if ss:
+        try:
+            state = dict(ss)
+        except Exception:
+            state = dict(_DEFAULT_SENDER_STATE)
+    else:
+        state = dict(_DEFAULT_SENDER_STATE)
+    proc = _vuln_sender_procs.get(vid)
+    if proc and not proc.is_alive() and state.get("running"):
+        state["running"] = False
     return jsonify(state)
 
 

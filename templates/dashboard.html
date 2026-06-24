@@ -2103,6 +2103,8 @@
             if (el) el.innerHTML = html;
         }
 
+        let vulnPollTimers = {};
+
         async function startVulnSend(vid) {
             if (vulnSendActive[vid]) return;
             const selected = vulnSelectedPkts[vid] || new Set();
@@ -2122,61 +2124,60 @@
             document.getElementById(`vs-stop-${vid}`).disabled = false;
             appendVulnLog(vid, `Sending ${pids.length} packet(s) to ${target_ip} [${mode}]`, 'head');
 
-            vulnSendCtrls[vid] = new AbortController();
-            let txCount = 0, errCount = 0;
-
             try {
                 const r = await fetch(`/api/ai/vulns/${encodeURIComponent(vid)}/packets/send/stream`, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({packet_ids: pids, target_ip, port_override: port, mode, delay_ms: 0}),
-                    signal: vulnSendCtrls[vid].signal,
                 });
                 if (!r.ok) {
                     const txt = await r.text();
                     appendVulnLog(vid, `Send failed: HTTP ${r.status} ${txt.slice(0,200)}`, 'err');
+                    vulnSendActive[vid] = false;
+                    updateVulnSendBtn(vid);
                     return;
                 }
-                const reader = r.body.getReader();
-                const dec = new TextDecoder();
-                let buf = '';
-                while (true) {
-                    const {done, value} = await reader.read();
-                    if (done) break;
-                    buf += dec.decode(value, {stream: true});
-                    const lines = buf.split('\n');
-                    buf = lines.pop();
-                    for (const line of lines) {
-                        if (!line.trim()) continue;
-                        let evt;
-                        try { evt = JSON.parse(line); } catch (e) { continue; }
-                        if (evt.type === 'start') {
-                            appendVulnLog(vid, `start mode=${evt.mode} count=${evt.count} target=${evt.target_ip}`, 'head');
-                        } else if (evt.type === 'tx') {
-                            txCount++;
-                            if (!evt.ok) errCount++;
-                            appendVulnLog(vid,
-                                `#${evt.iter} ${evt.ok?'OK':'ERR'} ${(evt.protocol||'').toUpperCase()} ${evt.dst} ` +
-                                `${evt.sent}B ${evt.duration_ms}ms · ${(evt.name||'').slice(0,60)}` +
-                                (evt.error ? ` [${evt.error}]` : ''),
-                                evt.ok ? 'ok' : 'err'
-                            );
-                            updateVulnStats(vid, `sent <b>${txCount}</b> · errors <b>${errCount}</b>`);
-                        } else if (evt.type === 'done') {
-                            appendVulnLog(vid, `done · sent ${evt.tx_count} · errors ${evt.errors} · ${evt.elapsed_ms}ms`, 'head');
-                        } else if (evt.type === 'error') {
-                            appendVulnLog(vid, `error: ${evt.error}`, 'err');
-                        }
-                    }
-                }
+                appendVulnLog(vid, `Sender process spawned (${mode})`, 'ok');
+                _startVulnPoll(vid);
             } catch (e) {
-                if (e.name !== 'AbortError') appendVulnLog(vid, `Stream error: ${e}`, 'err');
-            } finally {
+                appendVulnLog(vid, `Launch error: ${e}`, 'err');
                 vulnSendActive[vid] = false;
-                vulnSendCtrls[vid] = null;
-                document.getElementById(`vs-stop-${vid}`).disabled = true;
                 updateVulnSendBtn(vid);
             }
+        }
+
+        function _startVulnPoll(vid) {
+            if (vulnPollTimers[vid]) return;
+            vulnPollTimers[vid] = setInterval(async () => {
+                try {
+                    const r = await fetch(`/api/ai/vulns/${encodeURIComponent(vid)}/packets/send/status`);
+                    if (!r.ok) return;
+                    const s = await r.json();
+                    const pps = s.packets_per_sec || 0;
+                    updateVulnStats(vid,
+                        `sent <b>${(s.tx_count||0).toLocaleString()}</b> · ` +
+                        `errors <b>${s.errors_count||0}</b> · ` +
+                        `<b>${pps.toLocaleString()}</b> pps`
+                    );
+                    if (!s.running) {
+                        const elapsed = s.started_at ? Math.round((Date.now()/1000 - s.started_at)*1000) : 0;
+                        appendVulnLog(vid, `done · sent ${(s.tx_count||0).toLocaleString()} · errors ${s.errors_count||0} · ${elapsed}ms · peak ${pps.toLocaleString()} pps`, 'head');
+                        _stopVulnPoll(vid);
+                    }
+                } catch (e) {}
+            }, 500);
+        }
+
+        function _stopVulnPoll(vid) {
+            if (vulnPollTimers[vid]) {
+                clearInterval(vulnPollTimers[vid]);
+                delete vulnPollTimers[vid];
+            }
+            vulnSendActive[vid] = false;
+            vulnSendCtrls[vid] = null;
+            const stopBtn = document.getElementById(`vs-stop-${vid}`);
+            if (stopBtn) stopBtn.disabled = true;
+            updateVulnSendBtn(vid);
         }
 
         async function stopVulnSend(vid) {
