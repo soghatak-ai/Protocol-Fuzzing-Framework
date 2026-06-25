@@ -1170,34 +1170,60 @@ def compute_weights_from_vulns(verified_vulns):
 
     return dns_w, ftp_w, http_w, smtp_w, ssh_w, smb2_w, smb3_w, http2_w, dcerpc_w, dhcp_w, dhcpv6_w, snmp_w, icmp_w, icmpv6_w, sip_w, mgcp_w, rtsp_w, radius_w, tacacs_w, ldap_w, cifs_w, sunrpc_w, telnet_w, tftp_w, "\n".join(reasoning_lines)
 
-# AI analysis state
-analysis_state = {
-    "files": {},
-    "results": None,
-    "status": "idle",
-    "error": None,
-    "trigger_packets": {},   # pid -> packet dict
-    "vuln_packets": {},      # str(vuln_id) -> [pid, ...]
-}
+# ---------------------------------------------------------------------------
+# Per-instance AI analysis state registry
+# ---------------------------------------------------------------------------
+_ai_states = {}             # instance_id -> analysis_state dict
+_ai_states_lock = threading.Lock()
+
+def _new_analysis_state():
+    return {
+        "files": {},
+        "results": None,
+        "status": "idle",
+        "error": None,
+        "trigger_packets": {},
+        "vuln_packets": {},
+    }
+
+def _get_ai_state(iid=None):
+    """Return (instance_id, analysis_state) for the given request.
+
+    If *iid* is None, reads 'iid' from request args/json.  Falls back
+    to a default key '_global' so legacy calls still work.
+    """
+    if iid is None:
+        iid = request.args.get("iid") or (request.json or {}).get("iid") or "_global"
+    with _ai_states_lock:
+        if iid not in _ai_states:
+            _ai_states[iid] = _new_analysis_state()
+        return iid, _ai_states[iid]
+
+# backward-compat alias used by helper functions that accept an explicit state
+analysis_state = _new_analysis_state()
 
 
 # ---------------------------------------------------------------------------
-# Per-vulnerability trigger-packet sender tracking
+# Per-vulnerability trigger-packet sender tracking  (scoped by iid:vid)
 # ---------------------------------------------------------------------------
-_vuln_senders = {}          # vid -> sender state dict (local snapshot)
-_vuln_sender_procs = {}     # vid -> multiprocessing.Process
-_vuln_sender_shared = {}    # vid -> Manager proxy dict
-_vuln_sender_stops = {}     # vid -> multiprocessing.Event
-_vuln_sender_locks = {}     # vid -> Lock (created on demand)
+_vuln_senders = {}          # "iid:vid" -> sender state dict (local snapshot)
+_vuln_sender_procs = {}     # "iid:vid" -> multiprocessing.Process
+_vuln_sender_shared = {}    # "iid:vid" -> Manager proxy dict
+_vuln_sender_stops = {}     # "iid:vid" -> multiprocessing.Event
+_vuln_sender_locks = {}     # "iid:vid" -> Lock (created on demand)
 _vuln_senders_global_lock = threading.Lock()
 
 
-def _get_vuln_sender_lock(vid):
-    """Return or create a per-vuln Lock under the global lock."""
+def _sender_key(iid, vid):
+    """Composite key for sender tracking dicts."""
+    return f"{iid}:{vid}"
+
+def _get_vuln_sender_lock(key):
+    """Return or create a per-sender Lock under the global lock."""
     with _vuln_senders_global_lock:
-        if vid not in _vuln_sender_locks:
-            _vuln_sender_locks[vid] = threading.Lock()
-        return _vuln_sender_locks[vid]
+        if key not in _vuln_sender_locks:
+            _vuln_sender_locks[key] = threading.Lock()
+        return _vuln_sender_locks[key]
 
 
 _DEFAULT_SENDER_STATE = {
@@ -1364,8 +1390,13 @@ def api_start():
             fuzzer_state["status"] = "error"
             fuzzer_state["running"] = False
 
-    fuzzer_thread = threading.Thread(target=_run, daemon=True)
-    fuzzer_thread.start()
+    try:
+        fuzzer_thread = threading.Thread(target=_run, daemon=True)
+        fuzzer_thread.start()
+    except OSError as e:
+        return jsonify({"error": f"Resource limit reached — cannot start: {e}"}), 503
+    except Exception as e:
+        return jsonify({"error": f"Failed to start fuzzer: {e}"}), 500
     return jsonify({"status": "started", "mode": mode})
 
 
@@ -1413,12 +1444,31 @@ def api_instance_create():
     if not live_config.get("server_ip"):
         return jsonify({"error": "live_config.server_ip is required"}), 400
 
-    inst = create_instance(protocol=protocol, config=live_config)
-    inst.reset_state()
-    inst.state["protocol"] = protocol
+    try:
+        inst = create_instance(protocol=protocol, config=live_config)
+        inst.reset_state()
+        inst.state["protocol"] = protocol
+        inst.start_as_process()
+    except OSError as e:
+        return jsonify({"error": f"Resource limit reached — cannot start process: {e}"}), 503
+    except Exception as e:
+        return jsonify({"error": f"Failed to start fuzzer: {e}"}), 500
 
-    inst.start_as_process()
-    return jsonify({"status": "started", "instance_id": inst.id, "protocol": protocol}), 201
+    import time as _t
+    _deadline = _t.time() + 3.0
+    while _t.time() < _deadline:
+        if inst.is_alive():
+            return jsonify({"status": "started", "instance_id": inst.id,
+                            "protocol": protocol}), 201
+        _t.sleep(0.1)
+
+    st = inst.get_state()
+    if st.get("status") == "error":
+        return jsonify({"error": st.get("anomaly_detected",
+                        "Process failed to start — possible resource limit")}), 503
+
+    return jsonify({"status": "started", "instance_id": inst.id,
+                    "protocol": protocol}), 201
 
 
 @app.route("/api/instances/<instance_id>", methods=["GET"])
@@ -1940,15 +1990,16 @@ def api_filesend_stream():
 def ai_upload():
     if "files" not in request.files:
         return jsonify({"error": "No files provided"}), 400
+    iid, astate = _get_ai_state()
     uploaded = request.files.getlist("files")
     for f in uploaded:
         if f.filename:
             content = f.read().decode("utf-8", errors="replace")
-            analysis_state["files"][f.filename] = content
+            astate["files"][f.filename] = content
     return jsonify({
         "status": "ok",
-        "files": list(analysis_state["files"].keys()),
-        "total_lines": sum(c.count("\n") + 1 for c in analysis_state["files"].values()),
+        "files": list(astate["files"].keys()),
+        "total_lines": sum(c.count("\n") + 1 for c in astate["files"].values()),
     })
 
 
@@ -1963,12 +2014,13 @@ def ai_upload_directory():
     if not os.path.isdir(dir_path):
         return jsonify({"error": f"Directory not found: {dir_path}"}), 400
 
+    iid, astate = _get_ai_state()
     try:
         collected = collect_to_dict(dir_path)
         if not collected:
             return jsonify({"error": "No source files found in directory"}), 400
 
-        analysis_state["files"].update(collected)
+        astate["files"].update(collected)
         total_lines = sum(c.count("\n") + 1 for c in collected.values())
         total_size_mb = sum(len(c) for c in collected.values()) / (1024 * 1024)
         print(f"[AI] Directory loaded: {len(collected)} files from {dir_path} ({total_size_mb:.2f} MB)")
@@ -1976,10 +2028,10 @@ def ai_upload_directory():
         return jsonify({
             "status": "ok",
             "new_files": len(collected),
-            "total_files": len(analysis_state["files"]),
+            "total_files": len(astate["files"]),
             "total_lines": total_lines,
             "size_mb": round(total_size_mb, 2),
-            "files": list(analysis_state["files"].keys()),
+            "files": list(astate["files"].keys()),
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1987,17 +2039,19 @@ def ai_upload_directory():
 
 @app.route("/api/ai/files", methods=["GET"])
 def ai_files():
+    iid, astate = _get_ai_state()
     files = []
-    for name, content in analysis_state["files"].items():
+    for name, content in astate["files"].items():
         files.append({"name": name, "lines": content.count("\n") + 1, "size": len(content)})
     return jsonify({"files": files})
 
 
 @app.route("/api/ai/files/<filename>", methods=["DELETE"])
 def ai_delete_file(filename):
-    if filename in analysis_state["files"]:
-        del analysis_state["files"][filename]
-        return jsonify({"status": "removed", "files": list(analysis_state["files"].keys())})
+    iid, astate = _get_ai_state()
+    if filename in astate["files"]:
+        del astate["files"][filename]
+        return jsonify({"status": "removed", "files": list(astate["files"].keys())})
     return jsonify({"error": "File not found"}), 404
 
 
@@ -2059,23 +2113,24 @@ def _ai_call(prompt_text, user_text):
 
 @app.route("/api/ai/analyze", methods=["POST"])
 def ai_analyze():
-    if not analysis_state["files"]:
+    iid, astate = _get_ai_state()
+    if not astate["files"]:
         return jsonify({"error": "No files uploaded"}), 400
     if not AZURE_OPENAI_API_KEY:
         return jsonify({"error": "AZURE_OPENAI_API_KEY not set in .env"}), 500
 
-    analysis_state["status"] = "analyzing"
-    analysis_state["results"] = None
-    analysis_state["error"] = None
+    astate["status"] = "analyzing"
+    astate["results"] = None
+    astate["error"] = None
 
     try:
-        all_files = dict(analysis_state["files"])
+        all_files = dict(astate["files"])
         total_raw = sum(len(v) for v in all_files.values())
         print(f"[AI] ── Input: {len(all_files)} files, {total_raw/1024:.1f} KB, ~{estimate_tokens(total_raw)} tokens (raw)")
 
         # ── STAGE 1: MINIFY (local, instant) ──────────────────────
         print("[AI] ══ STAGE 1: Minifying code (strip comments/blanks) ══")
-        analysis_state["status"] = "analyzing (stage 1/4: minifying)"
+        astate["status"] = "analyzing (stage 1/4: minifying)"
         minified_files = {}
         for path, content in all_files.items():
             minified_files[path] = minify_code(content)
@@ -2085,7 +2140,7 @@ def ai_analyze():
 
         # ── STAGE 2: HOTSPOT FILTER (local, instant) ──────────────
         print("[AI] ══ STAGE 2: Hotspot filtering (dangerous patterns) ══")
-        analysis_state["status"] = "analyzing (stage 2/4: hotspot filtering)"
+        astate["status"] = "analyzing (stage 2/4: hotspot filtering)"
         hotspot_files = hotspot_filter(minified_files)
         total_hotspot = sum(len(v) for v in hotspot_files.values())
         print(f"[AI]   Hotspots: {len(hotspot_files)}/{len(minified_files)} files, {total_hotspot/1024:.1f} KB, ~{estimate_tokens(total_hotspot)} tokens")
@@ -2104,7 +2159,7 @@ def ai_analyze():
         else:
             # ── STAGE 3: REPO MAP TRIAGE (1 API call) ─────────────
             print("[AI] ══ STAGE 3: Repo map triage (LLM picks top-20 files) ══")
-            analysis_state["status"] = "analyzing (stage 3/4: triage)"
+            astate["status"] = "analyzing (stage 3/4: triage)"
             repo_map = extract_repo_map(hotspot_files)
             map_tokens = estimate_tokens(repo_map)
             print(f"[AI]   Repo map: {map_tokens} tokens ({len(hotspot_files)} files)")
@@ -2146,7 +2201,7 @@ def ai_analyze():
 
         # ── STAGE 4: DEEP ANALYSIS (1 API call) ──────────────────
         print("[AI] ══ STAGE 4: Deep vulnerability analysis ══")
-        analysis_state["status"] = "analyzing (stage 4/4: deep analysis)"
+        astate["status"] = "analyzing (stage 4/4: deep analysis)"
         hunter_prompt = f"""Analyze the following source code file(s) for security vulnerabilities.
 For each vulnerability, provide a concrete byte-level payload that would trigger it.
 
@@ -2195,8 +2250,8 @@ For each vulnerability, provide a concrete byte-level payload that would trigger
                 hunter_results,
             )
             hunter_results["conversation_id"] = conv_id
-            analysis_state["results"] = hunter_results
-            analysis_state["status"] = "done"
+            astate["results"] = hunter_results
+            astate["status"] = "done"
             return jsonify({"status": "done", "results": hunter_results, "conversation_id": conv_id})
 
         # ── WEIGHER: DETERMINISTIC PYTHON ─────────────────────────
@@ -2258,23 +2313,24 @@ For each vulnerability, provide a concrete byte-level payload that would trigger
         )
         results["conversation_id"] = conv_id
 
-        analysis_state["results"] = results
-        analysis_state["status"] = "done"
+        astate["results"] = results
+        astate["status"] = "done"
         return jsonify({"status": "done", "results": results, "conversation_id": conv_id})
 
     except Exception as e:
-        analysis_state["status"] = "error"
-        analysis_state["error"] = str(e)
+        astate["status"] = "error"
+        astate["error"] = str(e)
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/ai/results", methods=["GET"])
 def ai_results():
+    iid, astate = _get_ai_state()
     return jsonify({
-        "status": analysis_state["status"],
-        "results": analysis_state["results"],
-        "error": analysis_state["error"],
+        "status": astate["status"],
+        "results": astate["results"],
+        "error": astate["error"],
     })
 
 
@@ -2460,26 +2516,21 @@ def ai_history_get(conv_id):
     if not conv:
         return jsonify({"error": "Conversation not found"}), 404
 
-    # Rehydrate analysis_state so vuln-bound endpoints (trigger-packet
-    # generation, chat) operate on the same vulns the UI is rendering.
-    # Otherwise _find_vuln() looks in a stale/empty results blob and 404s.
+    iid, astate = _get_ai_state()
+
     analysis = conv.get("analysis", {}) or {}
     if isinstance(analysis, dict):
         analysis["conversation_id"] = conv["_id"]
-        analysis_state["results"] = analysis
-        analysis_state["status"] = "done"
-        analysis_state["error"] = None
-        for st in _vuln_senders.values():
-            if st.get("running"):
-                st["stop_requested"] = True
+        astate["results"] = analysis
+        astate["status"] = "done"
+        astate["error"] = None
 
-        # Restore trigger packets saved with this conversation (or clear)
         saved_tp = conv.get("trigger_packets") or {}
         saved_vp = conv.get("vuln_packets") or {}
-        analysis_state["trigger_packets"].clear()
-        analysis_state["trigger_packets"].update(saved_tp)
-        analysis_state["vuln_packets"].clear()
-        analysis_state["vuln_packets"].update(saved_vp)
+        astate["trigger_packets"].clear()
+        astate["trigger_packets"].update(saved_tp)
+        astate["vuln_packets"].clear()
+        astate["vuln_packets"].update(saved_vp)
 
     return jsonify({
         "id": conv["_id"],
@@ -2634,7 +2685,8 @@ def ai_apply_weights():
         results = conv["analysis"]
         print(f"[AI] Loading weights from conversation: {conv.get('title', conv_id)}")
     else:
-        results = analysis_state.get("results")
+        _iid, astate = _get_ai_state()
+        results = astate.get("results")
 
     if not results:
         return jsonify({"error": "No analysis results available. Open a previous analysis or run a new one."}), 400
@@ -2904,19 +2956,21 @@ def ai_reset_weights():
 @app.route("/api/ai/_test_inject", methods=["POST"])
 def ai_test_inject():
     """DEBUG: Inject fake analysis results to test weight pipeline without OpenAI."""
+    iid, astate = _get_ai_state()
     data = request.json
-    analysis_state["results"] = data
-    analysis_state["status"] = "done" if data else "idle"
+    astate["results"] = data
+    astate["status"] = "done" if data else "idle"
     return jsonify({"status": "injected" if data else "cleared"})
 
 
 @app.route("/api/ai/resave", methods=["POST"])
 def ai_resave():
     """Retry saving in-memory analysis results to MongoDB."""
-    results = analysis_state.get("results")
+    iid, astate = _get_ai_state()
+    results = astate.get("results")
     if not results:
         return jsonify({"error": "No results in memory to save"}), 400
-    all_files = dict(analysis_state.get("files", {}))
+    all_files = dict(astate.get("files", {}))
     conv_id = db_create_conversation(
         _derive_title(list(all_files.keys()) if all_files else ["unknown"]),
         compute_codebase_hash(all_files) if all_files else "unknown",
@@ -3023,9 +3077,11 @@ def _normalise_hex(s):
     return s.lower()
 
 
-def _find_vuln(vid):
-    """Look up a vuln in the current analysis_state by id or original_id."""
-    results = analysis_state.get("results") or {}
+def _find_vuln(vid, astate=None):
+    """Look up a vuln in the given analysis state by id or original_id."""
+    if astate is None:
+        astate = analysis_state
+    results = astate.get("results") or {}
     target = str(vid)
     for v in results.get("vulnerabilities", []):
         if str(v.get("id")) == target or str(v.get("original_id")) == target:
@@ -3173,7 +3229,7 @@ def _recover_packets_from_truncated_json(raw: str):
     return out
 
 
-def _store_packets_for_vuln(vid, raw_packets):
+def _store_packets_for_vuln(vid, raw_packets, astate):
     """Validate, assign ids, and replace any previous packets for this vuln."""
     stored = []
     pid_list = []
@@ -3217,14 +3273,13 @@ def _store_packets_for_vuln(vid, raw_packets):
             "split_at": split_at,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        analysis_state["trigger_packets"][pid] = pkt
+        astate["trigger_packets"][pid] = pkt
         pid_list.append(pid)
         stored.append(pkt)
 
-    # Replace previous packets for this vuln (drop their entries from the global map too)
-    for old_pid in analysis_state["vuln_packets"].get(str(vid), []):
-        analysis_state["trigger_packets"].pop(old_pid, None)
-    analysis_state["vuln_packets"][str(vid)] = pid_list
+    for old_pid in astate["vuln_packets"].get(str(vid), []):
+        astate["trigger_packets"].pop(old_pid, None)
+    astate["vuln_packets"][str(vid)] = pid_list
     return stored, rejected
 
 
@@ -3397,6 +3452,7 @@ def _packet_sender_mp(vid, packets_raw, target_ip, port_override, interface,
 def api_ai_generate_packets(vid):
     if not AZURE_OPENAI_API_KEY:
         return jsonify({"error": "AZURE_OPENAI_API_KEY not set in .env"}), 500
+    iid, astate = _get_ai_state()
     body = request.json or {}
     try:
         n = int(body.get("n_packets") or 6)
@@ -3404,11 +3460,11 @@ def api_ai_generate_packets(vid):
         n = 6
     n = max(1, min(n, 10))
 
-    vuln = _find_vuln(vid)
+    vuln = _find_vuln(vid, astate)
     if not vuln:
         return jsonify({"error": f"Vulnerability {vid} not found"}), 404
 
-    results = analysis_state.get("results") or {}
+    results = astate.get("results") or {}
     summary = results.get("codebase_summary") or results.get("file_summary") or ""
 
     try:
@@ -3417,7 +3473,7 @@ def api_ai_generate_packets(vid):
         traceback.print_exc()
         return jsonify({"error": f"LLM call failed: {e}"}), 500
 
-    stored, rejected = _store_packets_for_vuln(vid, raw_packets)
+    stored, rejected = _store_packets_for_vuln(vid, raw_packets, astate)
     if not stored:
         return jsonify({
             "error": "LLM returned no valid packets",
@@ -3429,8 +3485,8 @@ def api_ai_generate_packets(vid):
     if conv_id:
         db_save_trigger_packets(
             conv_id,
-            dict(analysis_state["trigger_packets"]),
-            dict(analysis_state["vuln_packets"]),
+            dict(astate["trigger_packets"]),
+            dict(astate["vuln_packets"]),
         )
 
     return jsonify({
@@ -3443,29 +3499,31 @@ def api_ai_generate_packets(vid):
 
 @app.route("/api/ai/packets", methods=["GET"])
 def api_ai_packets_list():
+    iid, astate = _get_ai_state()
     return jsonify({
-        "packets": list(analysis_state["trigger_packets"].values()),
-        "by_vuln": analysis_state["vuln_packets"],
+        "packets": list(astate["trigger_packets"].values()),
+        "by_vuln": astate["vuln_packets"],
     })
 
 
 @app.route("/api/ai/packets/<pid>", methods=["DELETE"])
 def api_ai_packet_delete(pid):
-    pkt = analysis_state["trigger_packets"].pop(pid, None)
+    iid, astate = _get_ai_state()
+    pkt = astate["trigger_packets"].pop(pid, None)
     if not pkt:
         return jsonify({"error": "Packet not found"}), 404
     vid = pkt["vuln_id"]
-    lst = analysis_state["vuln_packets"].get(vid, [])
+    lst = astate["vuln_packets"].get(vid, [])
     if pid in lst:
         lst.remove(pid)
-        analysis_state["vuln_packets"][vid] = lst
+        astate["vuln_packets"][vid] = lst
 
-    conv_id = (analysis_state.get("results") or {}).get("conversation_id")
+    conv_id = (astate.get("results") or {}).get("conversation_id")
     if conv_id:
         db_save_trigger_packets(
             conv_id,
-            dict(analysis_state["trigger_packets"]),
-            dict(analysis_state["vuln_packets"]),
+            dict(astate["trigger_packets"]),
+            dict(astate["vuln_packets"]),
         )
 
     return jsonify({"status": "deleted"})
@@ -3473,9 +3531,11 @@ def api_ai_packet_delete(pid):
 
 @app.route("/api/ai/vulns/<vid>/packets/send/stream", methods=["POST"])
 def api_ai_packets_send_stream(vid):
-    lock = _get_vuln_sender_lock(vid)
+    iid, astate = _get_ai_state()
+    sk = _sender_key(iid, vid)
+    lock = _get_vuln_sender_lock(sk)
     with lock:
-        ss_existing = _vuln_sender_shared.get(vid)
+        ss_existing = _vuln_sender_shared.get(sk)
         if ss_existing:
             try:
                 if ss_existing.get("running", False):
@@ -3510,14 +3570,14 @@ def api_ai_packets_send_stream(vid):
         except (TypeError, ValueError):
             delay_ms = 50
 
-        packets = [analysis_state["trigger_packets"].get(p) for p in pids]
+        packets = [astate["trigger_packets"].get(p) for p in pids]
         packets = [p for p in packets if p]
         if not packets:
             return jsonify({"error": "No valid packets resolved from packet_ids"}), 400
 
         from main import _get_manager, _mp_ctx
 
-        _vuln_senders[vid] = dict(_DEFAULT_SENDER_STATE)
+        _vuln_senders[sk] = dict(_DEFAULT_SENDER_STATE)
         mgr = _get_manager()
         ss = mgr.dict(dict(_DEFAULT_SENDER_STATE))
         ss.update({
@@ -3528,8 +3588,8 @@ def api_ai_packets_send_stream(vid):
         })
         stop_evt = _mp_ctx.Event()
 
-        _vuln_sender_shared[vid] = ss
-        _vuln_sender_stops[vid] = stop_evt
+        _vuln_sender_shared[sk] = ss
+        _vuln_sender_stops[sk] = stop_evt
 
         packets_serializable = []
         for p in packets:
@@ -3542,15 +3602,15 @@ def api_ai_packets_send_stream(vid):
 
         proc = _mp_ctx.Process(
             target=_packet_sender_mp,
-            args=(vid, packets_serializable, target_ip, port_override,
+            args=(sk, packets_serializable, target_ip, port_override,
                   interface, mode, delay_ms, ss, stop_evt),
             daemon=True,
         )
-        _vuln_sender_procs[vid] = proc
+        _vuln_sender_procs[sk] = proc
         proc.start()
 
     log_event("INFO",
-              f"Packet sender started for vuln {vid} "
+              f"Packet sender started for vuln {vid} (instance {iid}) "
               f"({mode}, {len(packets)} packets -> {target_ip})")
     return jsonify({
         "status": "started", "vuln_id": vid, "mode": mode,
@@ -3560,23 +3620,32 @@ def api_ai_packets_send_stream(vid):
 
 @app.route("/api/ai/vulns/<vid>/packets/send/stop", methods=["POST"])
 def api_ai_packets_send_stop(vid):
-    stop_evt = _vuln_sender_stops.get(vid)
-    ss = _vuln_sender_shared.get(vid)
+    iid, _ = _get_ai_state()
+    sk = _sender_key(iid, vid)
+    stop_evt = _vuln_sender_stops.get(sk)
+    ss = _vuln_sender_shared.get(sk)
     if not stop_evt or (ss and not ss.get("running", False)):
         return jsonify({"error": f"No send in progress for vuln {vid}"}), 400
     stop_evt.set()
-    proc = _vuln_sender_procs.get(vid)
+    proc = _vuln_sender_procs.get(sk)
     if proc and proc.is_alive():
-        proc.join(timeout=3)
+        proc.join(timeout=1)
         if proc.is_alive():
             proc.terminate()
-    log_event("WARNING", f"Packet sender stop requested for vuln {vid}")
-    return jsonify({"status": "stopping"})
+            proc.join(timeout=1)
+    try:
+        ss.update({"running": False, "stop_requested": False})
+    except Exception:
+        pass
+    log_event("WARNING", f"Packet sender stopped for vuln {vid} (instance {iid})")
+    return jsonify({"status": "stopped"})
 
 
 @app.route("/api/ai/vulns/<vid>/packets/send/status", methods=["GET"])
 def api_ai_packets_send_status(vid):
-    ss = _vuln_sender_shared.get(vid)
+    iid, _ = _get_ai_state()
+    sk = _sender_key(iid, vid)
+    ss = _vuln_sender_shared.get(sk)
     if ss:
         try:
             state = dict(ss)
@@ -3584,7 +3653,7 @@ def api_ai_packets_send_status(vid):
             state = dict(_DEFAULT_SENDER_STATE)
     else:
         state = dict(_DEFAULT_SENDER_STATE)
-    proc = _vuln_sender_procs.get(vid)
+    proc = _vuln_sender_procs.get(sk)
     if proc and not proc.is_alive() and state.get("running"):
         state["running"] = False
     return jsonify(state)
@@ -3592,15 +3661,17 @@ def api_ai_packets_send_status(vid):
 
 @app.route("/api/ai/clear", methods=["POST"])
 def ai_clear():
-    for st in _vuln_senders.values():
-        if st.get("running"):
-            st["stop_requested"] = True
-    analysis_state["files"].clear()
-    analysis_state["results"] = None
-    analysis_state["status"] = "idle"
-    analysis_state["error"] = None
-    analysis_state["trigger_packets"].clear()
-    analysis_state["vuln_packets"].clear()
+    iid, astate = _get_ai_state()
+    prefix = f"{iid}:"
+    for sk, stop_evt in list(_vuln_sender_stops.items()):
+        if sk.startswith(prefix):
+            stop_evt.set()
+    astate["files"].clear()
+    astate["results"] = None
+    astate["status"] = "idle"
+    astate["error"] = None
+    astate["trigger_packets"].clear()
+    astate["vuln_packets"].clear()
     return jsonify({"status": "cleared"})
 
 
@@ -3613,36 +3684,37 @@ def ai_analyze_v2():
        Phase 3&4 → Explorers (concurrent per-task LLM analysis)
        Phase 5 → Synthesizer (merge dossiers → weights + dynamic dictionary)
     """
-    if not analysis_state["files"]:
+    iid, astate = _get_ai_state()
+    if not astate["files"]:
         return jsonify({"error": "No files uploaded"}), 400
     if not AZURE_OPENAI_API_KEY:
         return jsonify({"error": "AZURE_OPENAI_API_KEY not set in .env"}), 500
 
-    analysis_state["status"] = "analyzing"
-    analysis_state["results"] = None
-    analysis_state["error"] = None
+    astate["status"] = "analyzing"
+    astate["results"] = None
+    astate["error"] = None
 
     try:
-        all_files = dict(analysis_state["files"])
+        all_files = dict(astate["files"])
         total_raw = sum(len(v) for v in all_files.values())
         print(f"[AI-v2] ── Input: {len(all_files)} files, {total_raw/1024:.1f} KB")
 
         # ── PHASE 1: SEMANTIC GRAPH ───────────────────────────────
         print("[AI-v2] ══ PHASE 1: Semantic Graph (AST parse + embed + ChromaDB) ══")
-        analysis_state["status"] = "analyzing (phase 1/5: building semantic graph)"
+        astate["status"] = "analyzing (phase 1/5: building semantic graph)"
 
         # Reuse existing ChromaDB index if file count matches (avoids re-embedding)
         from engine.semantic_search import get_or_create_collection
         existing = get_or_create_collection()
         existing_count = existing.count()
-        if existing_count > 0 and abs(len(all_files) - analysis_state.get("_last_file_count", 0)) == 0:
+        if existing_count > 0 and abs(len(all_files) - astate.get("_last_file_count", 0)) == 0:
             print(f"[AI-v2]   Reusing existing ChromaDB index ({existing_count} chunks)")
             total_chunks = existing_count
             index_result = {"total_files": len(all_files), "total_chunks": total_chunks, "chunks": []}
         else:
             index_result = index_codebase(all_files, fresh=True)
             total_chunks = index_result["total_chunks"]
-            analysis_state["_last_file_count"] = len(all_files)
+            astate["_last_file_count"] = len(all_files)
             import time as _time
             print("[AI-v2]   Waiting 15s for rate-limit cooldown before LLM calls...")
             _time.sleep(15)
@@ -3650,13 +3722,13 @@ def ai_analyze_v2():
         print(f"[AI-v2]   Indexed {total_chunks} chunks from {index_result['total_files']} files")
 
         if total_chunks == 0:
-            analysis_state["status"] = "error"
-            analysis_state["error"] = "No code chunks could be extracted from the uploaded files."
-            return jsonify({"error": analysis_state["error"]}), 400
+            astate["status"] = "error"
+            astate["error"] = "No code chunks could be extracted from the uploaded files."
+            return jsonify({"error": astate["error"]}), 400
 
         # ── PHASE 2: ORCHESTRATOR ─────────────────────────────────
         print("[AI-v2] ══ PHASE 2: Orchestrator (generating investigation tasks) ══")
-        analysis_state["status"] = "analyzing (phase 2/5: orchestrating tasks)"
+        astate["status"] = "analyzing (phase 2/5: orchestrating tasks)"
 
         # Build metadata-only list for the Orchestrator (no raw code)
         all_chunk_meta = get_all_chunks()
@@ -3669,9 +3741,9 @@ def ai_analyze_v2():
         tasks, codebase_summary = generate_tasks(chunk_meta_slim)
 
         if not tasks:
-            analysis_state["status"] = "error"
-            analysis_state["error"] = "Orchestrator generated 0 tasks."
-            return jsonify({"error": analysis_state["error"]}), 500
+            astate["status"] = "error"
+            astate["error"] = "Orchestrator generated 0 tasks."
+            return jsonify({"error": astate["error"]}), 500
 
         # ── PHASE 3 & 4: EXPLORERS ───────────────────────────────
         print(f"[AI-v2] ══ PHASES 3&4: Running {len(tasks)} Explorer agents ══")
@@ -3680,11 +3752,11 @@ def ai_analyze_v2():
 
         def on_explorer_progress(completed, total, dossier):
             explorer_done[0] = completed
-            analysis_state["status"] = (
+            astate["status"] = (
                 f"analyzing (phase 3-4/5: exploring {completed}/{total} tasks)"
             )
 
-        analysis_state["status"] = f"analyzing (phase 3-4/5: exploring 0/{len(tasks)} tasks)"
+        astate["status"] = f"analyzing (phase 3-4/5: exploring 0/{len(tasks)} tasks)"
         dossiers = run_explorers(
             tasks,
             max_workers=5,
@@ -3694,7 +3766,7 @@ def ai_analyze_v2():
 
         # ── PHASE 5: SYNTHESIZER ──────────────────────────────────
         print("[AI-v2] ══ PHASE 5: Synthesizing results ══")
-        analysis_state["status"] = "analyzing (phase 5/5: synthesizing)"
+        astate["status"] = "analyzing (phase 5/5: synthesizing)"
 
         merged = merge_dossiers(dossiers)
         raw_vulns = merged["vulnerabilities"]
@@ -3749,15 +3821,15 @@ def ai_analyze_v2():
         )
         results["conversation_id"] = conv_id
 
-        analysis_state["results"] = results
-        analysis_state["status"] = "done"
+        astate["results"] = results
+        astate["status"] = "done"
         print(f"[AI-v2] ✓ Pipeline complete: {len(raw_vulns)} vulns, "
               f"{results['pipeline']['constants_extracted']} constants extracted")
         return jsonify({"status": "done", "results": results, "conversation_id": conv_id})
 
     except Exception as e:
-        analysis_state["status"] = "error"
-        analysis_state["error"] = str(e)
+        astate["status"] = "error"
+        astate["error"] = str(e)
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 

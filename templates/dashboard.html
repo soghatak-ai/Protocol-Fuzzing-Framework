@@ -135,6 +135,15 @@
         .status-running { background: rgba(74,222,128,0.08); color: var(--accent-green); }
         .status-running .dot { background: var(--accent-green); animation: pulse 1.5s infinite; }
 
+        .status-starting { background: rgba(250,204,21,0.08); color: #facc15; }
+        .status-starting .dot {
+            background: #facc15;
+            animation: pulse 0.6s infinite;
+        }
+
+        .status-error { background: rgba(248,113,113,0.08); color: var(--accent-red); }
+        .status-error .dot { background: var(--accent-red); }
+
         .status-crash_detected { background: rgba(248,113,113,0.08); color: var(--accent-red); }
         .status-crash_detected .dot { background: var(--accent-red); animation: pulse 0.8s infinite; }
 
@@ -1156,6 +1165,12 @@
         .ai-sev-badge.high { background: rgba(251,191,36,0.12); color: var(--accent-yellow); }
         .ai-sev-badge.medium { background: rgba(96,165,250,0.12); color: var(--accent-blue); }
         .ai-sev-badge.low { background: rgba(255,255,255,0.06); color: var(--text-muted); }
+        .ai-sev-badge.all { background: rgba(255,255,255,0.06); color: var(--text-primary); }
+        .ai-sev-filter .ai-sev-badge { cursor: pointer; transition: all 0.15s; border: 1px solid transparent; }
+        .ai-sev-filter .ai-sev-badge:hover { filter: brightness(1.3); }
+        .ai-sev-filter .ai-sev-badge.active { border-color: currentColor; filter: brightness(1.2); }
+        .tp-select-all { display: flex; align-items: center; gap: 6px; padding: 6px 0 4px; font-size: 11px; color: var(--text-muted); cursor: pointer; user-select: none; }
+        .tp-select-all input { cursor: pointer; }
 
         .ai-weight-active { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-radius: 6px; font-size: 12px; margin-top: 10px; }
         .ai-weight-active.ai-source { background: rgba(74,222,128,0.06); border: 1px solid rgba(74,222,128,0.2); color: var(--accent-green); }
@@ -1960,6 +1975,18 @@
         let currentMode = 'pipe';
         let currentPayloadMode = 'default';
         let tabInstanceId = sessionStorage.getItem('fuzzerInstanceId') || null;
+
+        // Per-tab AI Analysis instance ID (created once per tab, persists across reloads)
+        let aiInstanceId = sessionStorage.getItem('aiInstanceId');
+        if (!aiInstanceId) {
+            aiInstanceId = 'ai-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+            sessionStorage.setItem('aiInstanceId', aiInstanceId);
+        }
+        function aiUrl(path) {
+            const sep = path.includes('?') ? '&' : '?';
+            return path + sep + 'iid=' + encodeURIComponent(aiInstanceId);
+        }
+
         let aiLastResults = null;
 
         // ───── Trigger-Packet selection + sender (AI Analysis page) ─────
@@ -2027,7 +2054,29 @@
                 slot.innerHTML = '';
                 return;
             }
-            slot.innerHTML = packets.map(tpCardHtml).join('');
+            const allSelected = vulnSelectedPkts[vid] && vulnSelectedPkts[vid].size === packets.length;
+            const selectAllHtml = `<label class="tp-select-all">
+                <input type="checkbox" ${allSelected ? 'checked' : ''}
+                       onchange="toggleAllVulnPackets('${vid}', this.checked)">
+                Select all (${packets.length})
+            </label>`;
+            slot.innerHTML = selectAllHtml + packets.map(tpCardHtml).join('');
+        }
+
+        function toggleAllVulnPackets(vid, checked) {
+            const pids = (aiPacketsByVuln[vid] || []);
+            if (!vulnSelectedPkts[vid]) vulnSelectedPkts[vid] = new Set();
+            pids.forEach(pid => {
+                if (checked) vulnSelectedPkts[vid].add(pid);
+                else         vulnSelectedPkts[vid].delete(pid);
+                const card = document.getElementById(`tp-card-${pid}`);
+                if (card) {
+                    card.classList.toggle('selected', checked);
+                    const cb = card.querySelector('.tp-checkbox');
+                    if (cb) cb.checked = checked;
+                }
+            });
+            updateVulnSendBtn(vid);
         }
 
         function toggleVulnPacketSelection(pid, vid, checked) {
@@ -2044,7 +2093,7 @@
             btn.disabled = true;
             btn.textContent = 'Generating...';
             try {
-                const r = await fetch(`/api/ai/vulns/${encodeURIComponent(vid)}/generate_packets`, {
+                const r = await fetch(aiUrl(`/api/ai/vulns/${encodeURIComponent(vid)}/generate_packets`), {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({n_packets: 6}),
@@ -2072,7 +2121,7 @@
 
         async function deleteTriggerPacket(pid) {
             try {
-                await fetch(`/api/ai/packets/${encodeURIComponent(pid)}`, {method: 'DELETE'});
+                await fetch(aiUrl(`/api/ai/packets/${encodeURIComponent(pid)}`), {method: 'DELETE'});
             } catch (e) {}
             const pkt = aiAllPackets[pid];
             delete aiAllPackets[pid];
@@ -2125,7 +2174,7 @@
             appendVulnLog(vid, `Sending ${pids.length} packet(s) to ${target_ip} [${mode}]`, 'head');
 
             try {
-                const r = await fetch(`/api/ai/vulns/${encodeURIComponent(vid)}/packets/send/stream`, {
+                const r = await fetch(aiUrl(`/api/ai/vulns/${encodeURIComponent(vid)}/packets/send/stream`), {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({packet_ids: pids, target_ip, port_override: port, mode, delay_ms: 0}),
@@ -2150,7 +2199,7 @@
             if (vulnPollTimers[vid]) return;
             vulnPollTimers[vid] = setInterval(async () => {
                 try {
-                    const r = await fetch(`/api/ai/vulns/${encodeURIComponent(vid)}/packets/send/status`);
+                    const r = await fetch(aiUrl(`/api/ai/vulns/${encodeURIComponent(vid)}/packets/send/status`));
                     if (!r.ok) return;
                     const s = await r.json();
                     const pps = s.packets_per_sec || 0;
@@ -2181,12 +2230,18 @@
         }
 
         async function stopVulnSend(vid) {
-            try { await fetch(`/api/ai/vulns/${encodeURIComponent(vid)}/packets/send/stop`, {method: 'POST'}); } catch (e) {}
+            try {
+                await fetch(aiUrl(`/api/ai/vulns/${encodeURIComponent(vid)}/packets/send/stop`), {method: 'POST'});
+            } catch (e) {}
+            setTimeout(() => {
+                _stopVulnPoll(vid);
+                appendVulnLog(vid, 'Sender stopped.', 'head');
+            }, 1500);
         }
 
         async function refreshTriggerPacketsFromServer() {
             try {
-                const r = await fetch('/api/ai/packets');
+                const r = await fetch(aiUrl('/api/ai/packets'));
                 if (!r.ok) return;
                 const data = await r.json();
                 aiAllPackets = {};
@@ -2241,7 +2296,7 @@
 
         async function fetchWeights() {
             try {
-                const res = await fetch('/api/ai/weights');
+                const res = await fetch(aiUrl('/api/ai/weights'));
                 cachedWeights = await res.json();
             } catch(e) { console.error('Failed to fetch weights:', e); }
         }
@@ -2287,8 +2342,12 @@
             return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/`/g,'&#96;');
         }
 
+        let _startingGuard = false;
+
         function updateUI(data) {
             const badge = document.getElementById('status-badge');
+            if (_startingGuard && data.status === 'idle') return;
+            if (_startingGuard && data.status === 'running') _startingGuard = false;
             badge.className = 'status-badge status-' + data.status;
             document.getElementById('status-text').textContent = data.status.toUpperCase().replace('_', ' ');
 
@@ -2449,17 +2508,45 @@
             document.getElementById('custom-payload-fields').style.display = mode === 'custom' ? '' : 'none';
         }
 
-        async function startFuzzer() {
+        function _setStartingUI() {
+            _startingGuard = true;
+            const badge = document.getElementById('status-badge');
+            badge.className = 'status-badge status-starting';
+            document.getElementById('status-text').textContent = 'STARTING';
             document.getElementById('btn-start').disabled = true;
+            document.getElementById('btn-stop').disabled = true;
             document.getElementById('proto-select').disabled = true;
+        }
+
+        function _setErrorUI(msg) {
+            _startingGuard = false;
+            const badge = document.getElementById('status-badge');
+            badge.className = 'status-badge status-error';
+            document.getElementById('status-text').textContent = 'ERROR';
+            document.getElementById('btn-start').disabled = false;
+            document.getElementById('btn-stop').disabled = true;
+            document.getElementById('proto-select').disabled = false;
+            document.getElementById('stat-anomaly').textContent = msg;
+            document.getElementById('stat-anomaly').style.color = 'var(--accent-red)';
+        }
+
+        function _resetIdleUI() {
+            _startingGuard = false;
+            const badge = document.getElementById('status-badge');
+            badge.className = 'status-badge status-idle';
+            document.getElementById('status-text').textContent = 'IDLE';
+            document.getElementById('btn-start').disabled = false;
+            document.getElementById('btn-stop').disabled = true;
+            document.getElementById('proto-select').disabled = false;
+        }
+
+        async function startFuzzer() {
             const protocol = document.getElementById('proto-select').value;
             const body = { protocol, mode: currentMode, payload_mode: currentPayloadMode };
             if (currentPayloadMode === 'custom') {
                 const cp = document.getElementById('cfg-custom-payload').value.trim();
                 if (!cp) {
                     alert('Please enter a custom payload string.');
-                    document.getElementById('btn-start').disabled = false;
-                    document.getElementById('proto-select').disabled = false;
                     return;
                 }
                 body.custom_payload = cp;
@@ -2469,8 +2556,6 @@
                 const serverIp = document.getElementById('cfg-server-ip').value.trim();
                 if (!serverIp) {
                     alert('Server IP is required for Live Network mode.');
-                    document.getElementById('btn-start').disabled = false;
-                    document.getElementById('proto-select').disabled = false;
                     return;
                 }
                 body.live_config = {
@@ -2485,18 +2570,23 @@
                 };
             }
 
+            _setStartingUI();
+
             try {
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), 10000);
+
                 if (currentMode === 'live') {
                     const res = await fetch('/api/instances', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ protocol: body.protocol, live_config: body.live_config })
+                        body: JSON.stringify({ protocol: body.protocol, live_config: body.live_config }),
+                        signal: controller.signal
                     });
+                    clearTimeout(timeout);
                     const data = await res.json();
                     if (data.error) {
-                        alert(data.error);
-                        document.getElementById('btn-start').disabled = false;
-                        document.getElementById('proto-select').disabled = false;
+                        _setErrorUI(data.error);
                         return;
                     }
                     tabInstanceId = data.instance_id;
@@ -2506,16 +2596,23 @@
                     const res = await fetch('/api/start', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(body)
+                        body: JSON.stringify(body),
+                        signal: controller.signal
                     });
+                    clearTimeout(timeout);
                     const data = await res.json();
                     if (data.error) {
-                        alert(data.error);
-                        document.getElementById('btn-start').disabled = false;
-                        document.getElementById('proto-select').disabled = false;
+                        _setErrorUI(data.error);
+                        return;
                     }
                 }
-            } catch (e) { alert('Failed to start: ' + e); }
+            } catch (e) {
+                if (e.name === 'AbortError') {
+                    _setErrorUI('Start timed out — CPU/resource limit may have been reached');
+                } else {
+                    _setErrorUI('Failed to start: ' + e.message);
+                }
+            }
         }
 
         async function stopFuzzer() {
@@ -2656,7 +2753,7 @@
             const fd = new FormData();
             for (const f of files) fd.append('files', f);
             try {
-                const res = await fetch('/api/ai/upload', { method: 'POST', body: fd });
+                const res = await fetch(aiUrl('/api/ai/upload'), { method: 'POST', body: fd });
                 const data = await res.json();
                 if (data.error) { alert(data.error); return; }
                 aiRefreshFiles();
@@ -2672,7 +2769,7 @@
                 fd.append('files', f, path);
             }
             try {
-                const res = await fetch('/api/ai/upload', { method: 'POST', body: fd });
+                const res = await fetch(aiUrl('/api/ai/upload'), { method: 'POST', body: fd });
                 const data = await res.json();
                 if (data.error) { alert(data.error); return; }
                 aiSetStatus('idle', `Loaded ${files.length} files from folder`);
@@ -2683,7 +2780,7 @@
 
         async function aiRefreshFiles() {
             try {
-                const res = await fetch('/api/ai/files');
+                const res = await fetch(aiUrl('/api/ai/files'));
                 const data = await res.json();
                 const list = document.getElementById('ai-file-list');
                 const count = data.files.length;
@@ -2703,7 +2800,7 @@
         }
 
         async function aiRemoveFile(filename) {
-            await fetch('/api/ai/files/' + encodeURIComponent(filename), { method: 'DELETE' });
+            await fetch(aiUrl('/api/ai/files/' + encodeURIComponent(filename)), { method: 'DELETE' });
             aiRefreshFiles();
         }
 
@@ -2724,7 +2821,7 @@
             // Poll analysis status to update pipeline step display
             pipelinePoller = setInterval(async () => {
                 try {
-                    const r = await fetch('/api/ai/results');
+                    const r = await fetch(aiUrl('/api/ai/results'));
                     const d = await r.json();
                     const s = d.status || '';
                     const msgEl = document.getElementById('pipeline-status-msg');
@@ -2741,7 +2838,7 @@
             }, 2000);
 
             try {
-                const res = await fetch('/api/ai/analyze-v2', { method: 'POST' });
+                const res = await fetch(aiUrl('/api/ai/analyze-v2'), { method: 'POST' });
                 clearInterval(pipelinePoller);
                 const data = await res.json();
                 if (data.error) {
@@ -2814,21 +2911,20 @@
                     <span style="color:var(--accent-cyan)">(${pipe.reduction_pct}% token reduction)</span>
                 </p>` : '')}
                 <p>Found <strong>${vulns.length}</strong> vulnerabilities${isV2 ? `, <strong>${pipe.constants_extracted || 0}</strong> protocol constants extracted` : ''}</p>
-                <div class="ai-sev-badges">
-                    ${sevCounts.critical ? `<span class="ai-sev-badge critical">${sevCounts.critical} Critical</span>` : ''}
-                    ${sevCounts.high ? `<span class="ai-sev-badge high">${sevCounts.high} High</span>` : ''}
-                    ${sevCounts.medium ? `<span class="ai-sev-badge medium">${sevCounts.medium} Medium</span>` : ''}
-                    ${sevCounts.low ? `<span class="ai-sev-badge low">${sevCounts.low} Low</span>` : ''}
+                <div class="ai-sev-badges ai-sev-filter">
+                    <span class="ai-sev-badge all active" onclick="aiFilterVulns('all')">All (${vulns.length})</span>
+                    ${sevCounts.critical ? `<span class="ai-sev-badge critical" onclick="aiFilterVulns('critical')">${sevCounts.critical} Critical</span>` : ''}
+                    ${sevCounts.high ? `<span class="ai-sev-badge high" onclick="aiFilterVulns('high')">${sevCounts.high} High</span>` : ''}
+                    ${sevCounts.medium ? `<span class="ai-sev-badge medium" onclick="aiFilterVulns('medium')">${sevCounts.medium} Medium</span>` : ''}
+                    ${sevCounts.low ? `<span class="ai-sev-badge low" onclick="aiFilterVulns('low')">${sevCounts.low} Low</span>` : ''}
                     ${vulns.length === 0 ? '<span class="ai-sev-badge low">No vulnerabilities found</span>' : ''}
                 </div>
             </div>`;
 
-            // Verified vulnerability cards — show first 5, rest hidden
-            const VULN_PREVIEW = 5;
             const vulnCardHtml = (v) => {
                 const confColor = (v.confidence || 0) >= 90 ? 'var(--accent-green)' : (v.confidence || 0) >= 70 ? 'var(--accent-yellow)' : 'var(--accent-orange)';
                 const vid = (v.original_id != null ? v.original_id : (v.id != null ? v.id : '?'));
-                return `<div class="ai-vuln-card" data-vid="${vid}">
+                return `<div class="ai-vuln-card" data-vid="${vid}" data-severity="${(v.severity||'').toLowerCase()}">
                     <div class="ai-vuln-header" onclick="this.parentElement.classList.toggle('open')" style="cursor:pointer;">
                         <div class="ai-vuln-left">
                             <div class="ai-vuln-id ${v.severity}">${vid}</div>
@@ -2896,17 +2992,9 @@
                 </div>`;
             };
 
-            // Render first 5
-            vulns.slice(0, VULN_PREVIEW).forEach(v => { html += vulnCardHtml(v); });
-
-            // If more than 5, add a toggle button + hidden container
-            if (vulns.length > VULN_PREVIEW) {
-                const remaining = vulns.length - VULN_PREVIEW;
-                html += `<div class="ai-vulns-hidden" id="ai-vulns-extra">`;
-                vulns.slice(VULN_PREVIEW).forEach(v => { html += vulnCardHtml(v); });
-                html += `</div>`;
-                html += `<div class="ai-vulns-more" onclick="toggleAllVulns(this)">&#9654; Show more</div>`;
-            }
+            html += `<div id="ai-vuln-container">`;
+            vulns.forEach(v => { html += vulnCardHtml(v); });
+            html += `</div>`;
 
             // Rejected vulnerabilities (collapsed section)
             if (rejected.length > 0) {
@@ -3114,6 +3202,22 @@
             }
         }
 
+        function aiFilterVulns(severity) {
+            const badges = document.querySelectorAll('.ai-sev-filter .ai-sev-badge');
+            badges.forEach(b => b.classList.remove('active'));
+            const clicked = Array.from(badges).find(b => b.classList.contains(severity));
+            if (clicked) clicked.classList.add('active');
+
+            const cards = document.querySelectorAll('#ai-vuln-container .ai-vuln-card');
+            cards.forEach(card => {
+                if (severity === 'all') {
+                    card.style.display = '';
+                } else {
+                    card.style.display = card.dataset.severity === severity ? '' : 'none';
+                }
+            });
+        }
+
         // Toggle the weight computation log visibility
         function toggleWeightReasoning(btn) {
             const reasoning = btn.nextElementSibling;
@@ -3212,7 +3316,7 @@
                 if (aiCurrentConversationId) {
                     payload.conversation_id = aiCurrentConversationId;
                 }
-                const res = await fetch('/api/ai/apply_weights', {
+                const res = await fetch(aiUrl('/api/ai/apply_weights'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload),
@@ -3229,7 +3333,7 @@
 
         async function aiResetWeights() {
             try {
-                await fetch('/api/ai/reset_weights', { method: 'POST' });
+                await fetch(aiUrl('/api/ai/reset_weights'), { method: 'POST' });
                 const ws = document.getElementById('ai-weight-status');
                 ws.className = 'ai-weight-active default-source';
                 ws.textContent = 'Using default strategy weights';
@@ -3240,7 +3344,7 @@
 
         async function aiRefreshWeightStatus() {
             try {
-                const res = await fetch('/api/ai/weights');
+                const res = await fetch(aiUrl('/api/ai/weights'));
                 const data = await res.json();
                 const ws = document.getElementById('ai-weight-status');
                 if (data.source === 'ai') {
@@ -3298,7 +3402,7 @@
 
         async function aiLoadHistory() {
             try {
-                const res = await fetch('/api/ai/history');
+                const res = await fetch(aiUrl('/api/ai/history'));
                 const data = await res.json();
                 const list = document.getElementById('ai-history-list');
                 if (!data.db_available) {
@@ -3323,7 +3427,7 @@
 
         async function aiOpenConversation(id) {
             try {
-                const res = await fetch('/api/ai/history/' + id);
+                const res = await fetch(aiUrl('/api/ai/history/' + id));
                 const data = await res.json();
                 if (data.error) { alert(data.error); return; }
                 aiCurrentConversationId = id;
@@ -3340,7 +3444,7 @@
         async function aiDeleteConversation(id) {
             if (!confirm('Delete this analysis and its chat history?')) return;
             try {
-                await fetch('/api/ai/history/' + id, { method: 'DELETE' });
+                await fetch(aiUrl('/api/ai/history/' + id), { method: 'DELETE' });
                 if (id === aiCurrentConversationId) { aiNewAnalysis(); }
                 aiLoadHistory();
             } catch (e) {}
@@ -3433,7 +3537,7 @@
             const typingEl = aiAppendChatMessage('assistant', '', true);
 
             try {
-                const res = await fetch('/api/ai/chat', {
+                const res = await fetch(aiUrl('/api/ai/chat'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ conversation_id: aiCurrentConversationId, message: msg }),

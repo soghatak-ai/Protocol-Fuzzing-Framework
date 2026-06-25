@@ -1621,6 +1621,8 @@ def run_fuzzer_live(config: dict):
     _tacacs_payload, _tacacs_strategy, _tacacs_dst_port = None, None, None
     _ldap_payload, _ldap_strategy, _ldap_dst_port = None, None, None
     _telnet_payload, _telnet_strategy, _telnet_dst_port = None, None, None
+    _dns_cached_bytes, _dns_cached_tcp, _dns_cached_split, _dns_cached_strategy = None, None, None, None
+    _dns_is_udp = True
 
     try:
         while fuzzer_state["running"] and not fuzzer_state["anomaly_detected"]:
@@ -1827,36 +1829,39 @@ def run_fuzzer_live(config: dict):
                 live_transport.send_udp(_tftp_payload, port=_tftp_dst_port)
                 fuzzer_state["iteration"] += 1
             else:
-                dns_w = ai_weights.get("dns", {})
-                strategy = dns_bandit.select_with_weights(dns_w)
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    dns_w = ai_weights.get("dns", {})
+                    _dns_cached_strategy = dns_bandit.select_with_weights(dns_w)
+                    if _dns_cached_strategy == "back_orifice":
+                        _dns_cached_bytes = BackOrificeMutator.mutate()
+                        _dns_cached_tcp, _dns_cached_split = None, None
+                        _dns_is_udp = True
+                    elif _dns_cached_strategy == "dce_smb":
+                        _dns_cached_tcp = DCESmbMutator.mutate()
+                        _dns_cached_bytes, _dns_cached_split = None, None
+                        _dns_is_udp = False
+                    else:
+                        _dns_cached_bytes, _dns_cached_tcp, _dns_cached_split = _build_dns_mutation(_dns_cached_strategy, seed_message)
+                        _dns_is_udp = _dns_cached_bytes is not None
+
+                strategy = _dns_cached_strategy
                 fuzzer_state["current_strategy"] = strategy
                 fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
 
-                if strategy == "back_orifice":
-                    bo_payload = BackOrificeMutator.mutate()
-                    live_transport.send_udp(bo_payload, port=31337)
-                elif strategy == "dce_smb":
-                    smb_payload = DCESmbMutator.mutate()
-                    live_transport.send_persistent_tcp(smb_payload, port=445)
-                    time.sleep(0.001)
-                else:
-                    mutated_bytes, tcp_payload, split_at = _build_dns_mutation(strategy, seed_message)
-                    if mutated_bytes is not None:
-                        live_transport.send_udp(mutated_bytes)
-                    elif tcp_payload is not None:
-                        if split_at is not None:
-                            live_transport.send_persistent_tcp(tcp_payload, split_at=split_at)
-                        else:
-                            live_transport.send_persistent_tcp(tcp_payload)
-                        time.sleep(0.001)
+                if _dns_is_udp:
+                    live_transport.send_udp(_dns_cached_bytes, port=31337 if strategy == "back_orifice" else None)
+                elif _dns_cached_tcp is not None:
+                    if _dns_cached_split is not None:
+                        live_transport.send_persistent_tcp(_dns_cached_tcp, split_at=_dns_cached_split)
+                    else:
+                        live_transport.send_persistent_tcp(_dns_cached_tcp)
 
             fuzzer_state["last_packet_time"] = time.time()
 
-            # RL bandit: record no-crash outcome
             active_bandit = _bandit_for(protocol)
             active_bandit.update(strategy, 0.0)
 
-            stat_interval = 500 if protocol in ("ftp", "http", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6", "sip", "mgcp", "radius", "tacacs", "ldap", "cifs", "sunrpc", "telnet", "tftp") else 10000
+            stat_interval = 500 if protocol in ("dns", "ftp", "http", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6", "sip", "mgcp", "radius", "tacacs", "ldap", "cifs", "sunrpc", "telnet", "tftp") else 10000
             if fuzzer_state["iteration"] % stat_interval == 0:
                 elapsed = time.time() - fuzzer_state["start_time"] if fuzzer_state["start_time"] else 1
                 fuzzer_state["packets_per_sec"] = int(fuzzer_state["iteration"] / max(elapsed, 0.001))
@@ -1873,6 +1878,7 @@ def run_fuzzer_live(config: dict):
 
     finally:
         live_transport.close_persistent_tcp()
+        live_transport.close_udp()
         fuzzer_state["running"] = False
         fuzzer_state["status"] = "stopped" if not fuzzer_state["anomaly_detected"] else "crash_detected"
         if fuzzer_state.get("anomaly_detected"):
@@ -2219,6 +2225,8 @@ def run_instance_live(instance, _sync_fn=None, _stop_check=None):
     _tacacs_payload, _tacacs_strategy, _tacacs_dst_port = None, None, None
     _ldap_payload, _ldap_strategy, _ldap_dst_port = None, None, None
     _telnet_payload, _telnet_strategy, _telnet_dst_port = None, None, None
+    _dns_cached_bytes, _dns_cached_tcp, _dns_cached_split, _dns_cached_strategy = None, None, None, None
+    _dns_is_udp = True
 
     _mp_last_sync = time.time()
 
@@ -2423,34 +2431,38 @@ def run_instance_live(instance, _sync_fn=None, _stop_check=None):
                 live_transport.send_udp(_tftp_payload, port=_tftp_dst_port)
                 state["iteration"] += 1
             else:
-                dns_w = weights.get("dns", {})
-                strategy = bandit.select_with_weights(dns_w)
+                if iteration == 1 or (iteration - 1) % 50 == 0:
+                    dns_w = weights.get("dns", {})
+                    _dns_cached_strategy = bandit.select_with_weights(dns_w)
+                    if _dns_cached_strategy == "back_orifice":
+                        _dns_cached_bytes = BackOrificeMutator.mutate()
+                        _dns_cached_tcp, _dns_cached_split = None, None
+                        _dns_is_udp = True
+                    elif _dns_cached_strategy == "dce_smb":
+                        _dns_cached_tcp = DCESmbMutator.mutate()
+                        _dns_cached_bytes, _dns_cached_split = None, None
+                        _dns_is_udp = False
+                    else:
+                        _dns_cached_bytes, _dns_cached_tcp, _dns_cached_split = _build_dns_mutation(_dns_cached_strategy, seed_message)
+                        _dns_is_udp = _dns_cached_bytes is not None
+
+                strategy = _dns_cached_strategy
                 state["current_strategy"] = strategy
                 state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
 
-                if strategy == "back_orifice":
-                    bo_payload = BackOrificeMutator.mutate()
-                    live_transport.send_udp(bo_payload, port=31337)
-                elif strategy == "dce_smb":
-                    smb_payload = DCESmbMutator.mutate()
-                    live_transport.send_persistent_tcp(smb_payload, port=445)
-                    time.sleep(0.001)
-                else:
-                    mutated_bytes, tcp_payload, split_at = _build_dns_mutation(strategy, seed_message)
-                    if mutated_bytes is not None:
-                        live_transport.send_udp(mutated_bytes)
-                    elif tcp_payload is not None:
-                        if split_at is not None:
-                            live_transport.send_persistent_tcp(tcp_payload, split_at=split_at)
-                        else:
-                            live_transport.send_persistent_tcp(tcp_payload)
-                        time.sleep(0.001)
+                if _dns_is_udp:
+                    live_transport.send_udp(_dns_cached_bytes, port=31337 if strategy == "back_orifice" else None)
+                elif _dns_cached_tcp is not None:
+                    if _dns_cached_split is not None:
+                        live_transport.send_persistent_tcp(_dns_cached_tcp, split_at=_dns_cached_split)
+                    else:
+                        live_transport.send_persistent_tcp(_dns_cached_tcp)
 
             state["last_packet_time"] = time.time()
 
             bandit.update(strategy, 0.0)
 
-            stat_interval = 500 if protocol in ("ftp", "http", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6", "sip", "mgcp", "radius", "tacacs", "ldap", "cifs", "sunrpc", "telnet", "tftp") else 10000
+            stat_interval = 500 if protocol in ("dns", "ftp", "http", "smtp", "ssh", "smb2", "smb3", "http2", "dcerpc", "dhcp", "dhcpv6", "snmp", "icmp", "icmpv6", "sip", "mgcp", "radius", "tacacs", "ldap", "cifs", "sunrpc", "telnet", "tftp") else 10000
 
             _now = time.time()
             _iter_sync = state["iteration"] % stat_interval == 0
@@ -2477,6 +2489,7 @@ def run_instance_live(instance, _sync_fn=None, _stop_check=None):
 
     finally:
         live_transport.close_persistent_tcp()
+        live_transport.close_udp()
         state["running"] = False
         state["status"] = "stopped" if not state["anomaly_detected"] else "crash_detected"
         if state.get("anomaly_detected"):

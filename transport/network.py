@@ -315,6 +315,7 @@ class LiveNetworkTransport:
         self.server_port = server_port
         self.interface = interface
         self._persistent_tcp_sockets = {}
+        self._udp_socket = None
 
     def _bind_iface(self, sock: socket.socket):
         """Bind socket to a specific interface (Linux: SO_BINDTODEVICE)."""
@@ -327,15 +328,35 @@ class LiveNetworkTransport:
         except Exception:
             pass
 
+    def _get_udp_socket(self) -> socket.socket:
+        """Return a reusable UDP socket, creating one if needed."""
+        if self._udp_socket is not None:
+            return self._udp_socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setblocking(False)
+        self._bind_iface(sock)
+        self._udp_socket = sock
+        return sock
+
     def send_udp(self, dns_payload: bytes, port: int = None):
-        """Send a raw UDP payload.  Uses server_port unless overridden."""
+        """Send a raw UDP payload via a reusable socket."""
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                s.settimeout(1.0)
-                self._bind_iface(s)
-                s.sendto(dns_payload, (self.server_ip, port or self.server_port))
+            self._get_udp_socket().sendto(
+                dns_payload, (self.server_ip, port or self.server_port)
+            )
         except OSError:
-            pass
+            try:
+                if self._udp_socket is not None:
+                    self._udp_socket.close()
+            except OSError:
+                pass
+            self._udp_socket = None
+            try:
+                self._get_udp_socket().sendto(
+                    dns_payload, (self.server_ip, port or self.server_port)
+                )
+            except OSError:
+                pass
 
     def send_tcp(self, tcp_dns_payload: bytes, port: int = None):
         """
@@ -372,6 +393,16 @@ class LiveNetworkTransport:
         sock.settimeout(0.2)
         self._persistent_tcp_sockets[actual_port] = sock
         return sock
+
+    def close_udp(self):
+        """Close the reusable UDP socket."""
+        sock = self._udp_socket
+        self._udp_socket = None
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
 
     def close_persistent_tcp(self, port: int = None):
         """Close one persistent TCP socket, or all of them when port is omitted."""
