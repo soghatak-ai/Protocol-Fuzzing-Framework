@@ -4816,7 +4816,7 @@ def api_multiattack_start():
         intensity = 3
     if processes < 1 or processes > 50:
         processes = 6
-    if duration < 10 or duration > 600:
+    if duration < 10 or duration > 3600:
         duration = 60
 
     multiattack_state["config"] = {
