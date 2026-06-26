@@ -318,7 +318,7 @@ class LiveNetworkTransport:
         self._persistent_tcp_sockets = {}
         self._udp_socket = None
         self._pressure_pool = {}
-        self._PRESSURE_POOL_SIZE = 8
+        self._PRESSURE_POOL_SIZE = 60
 
     def _bind_iface(self, sock: socket.socket):
         """Bind socket to a specific interface (Linux: SO_BINDTODEVICE)."""
@@ -506,9 +506,15 @@ class LiveNetworkTransport:
 
     def _send_pressure(self, tcp_payload: bytes, port: int,
                        split_at: int = None) -> bool:
-        """Send across a rotating pool of sockets. Each socket gets only the
-        first segment; the second segment is sent on the *next* call so Snort
-        must hold partial reassembly state across calls."""
+        """Rotate across a large pool of sockets. On each call we:
+        1. Pick slot N (round-robin).
+        2. If slot N has a pending second segment from a *previous* call,
+           deliver it now -- completing that reassembly.
+        3. Open (or reuse) a socket on slot N, send only the FIRST segment.
+           Store the second segment as pending.
+        Because the pool is large (60 slots), the second segment isn't
+        delivered until ~60 calls later.  Snort must hold partial reassembly
+        state for all ~60 in-flight half-payloads simultaneously."""
         pool_sz = self._PRESSURE_POOL_SIZE
         if not hasattr(self, '_pressure_cursor'):
             self._pressure_cursor = 0
@@ -521,8 +527,9 @@ class LiveNetworkTransport:
         if pending is not None:
             p_port, p_data = pending
             try:
-                sock = self._pressure_pool_sock(p_port, idx)
-                sock.sendall(p_data)
+                sock = self._pressure_pool.get((p_port, idx))
+                if sock is not None:
+                    sock.sendall(p_data)
             except OSError:
                 self._close_pressure_sock(p_port, idx)
 
@@ -530,13 +537,7 @@ class LiveNetworkTransport:
             split_at = random.choice([1, 2, 3, max(1, len(tcp_payload) // 3)])
         split_at = max(1, min(split_at, len(tcp_payload) - 1))
 
-        try:
-            sock = self._pressure_pool_sock(port, idx)
-            sock.sendall(tcp_payload[:split_at])
-            self._pressure_pending[idx] = (port, tcp_payload[split_at:])
-            return True
-        except OSError:
-            self._close_pressure_sock(port, idx)
+        for _attempt in range(2):
             try:
                 sock = self._pressure_pool_sock(port, idx)
                 sock.sendall(tcp_payload[:split_at])
@@ -544,7 +545,7 @@ class LiveNetworkTransport:
                 return True
             except OSError:
                 self._close_pressure_sock(port, idx)
-                return False
+        return False
 
     def send_icmp(self, icmp_payload: bytes):
         """Send raw ICMP payload via raw socket (requires root/CAP_NET_RAW)."""
