@@ -388,10 +388,10 @@ class LiveNetworkTransport:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        sock.settimeout(0.15)
+        sock.settimeout(0.5)
         self._bind_iface(sock)
         sock.connect((self.server_ip, actual_port))
-        sock.settimeout(0.05)
+        sock.settimeout(0.5)
         self._persistent_tcp_sockets[actual_port] = sock
         return sock
 
