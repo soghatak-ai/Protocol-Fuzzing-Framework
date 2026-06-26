@@ -64,7 +64,7 @@ STATS_FILE = "/tmp/blinder_stats.json"
 
 # Protocol registry: name -> (transport, port, mutator_class_name)
 PROTOCOL_REGISTRY = {
-    "dns":     ("udp",  53,   None),
+    "dns":     ("tcp",  53,   None),
     "dhcp":    ("udp",  67,   "DhcpMutator"),
     "snmp":    ("udp",  161,  "SnmpMutator"),
     "sip":     ("udp",  5060, "SipMutator"),
@@ -180,6 +180,7 @@ current_phase = {"num": 0, "send_delay": 0.0}
 
 # -- Payload Generation -------------------------------------------------------
 def gen_dns_payload(dns_classes):
+    """Generate a TCP-framed DNS payload (2-byte length prefix + DNS message)."""
     domains = [
         "evil.test.local", "fuzz.example.com", "x" * 60 + ".test.local",
         "admin.internal.corp", "a." * 30 + "test.com",
@@ -187,7 +188,8 @@ def gen_dns_payload(dns_classes):
     hdr = dns_classes["DNSHeader"](transaction_id=random.randint(0, 65535), qdcount=1)
     q = dns_classes["DNSQuestion"](random.choice(domains),
                                    random.choice([1, 2, 5, 6, 15, 16, 28, 33, 255]))
-    return dns_classes["DNSMessage"](header=hdr, questions=[q]).to_bytes()
+    raw = dns_classes["DNSMessage"](header=hdr, questions=[q]).to_bytes()
+    return struct.pack("!H", len(raw)) + raw
 
 
 def gen_mutated_payload(mutator):
@@ -297,7 +299,12 @@ def tcp_persistent_worker(proto, target, port, mutator, dns_classes):
                 try:
                     payload = pool[idx % len(pool)]
                     idx += 1
-                    sock.sendall(payload)
+                    if proto == "dns" and len(payload) > 4:
+                        sp = random.choice([1, 2, 3, max(1, len(payload) // 2)])
+                        sock.sendall(payload[:sp])
+                        sock.sendall(payload[sp:])
+                    else:
+                        sock.sendall(payload)
                     local_pkts += 1
                     local_bytes += len(payload)
                     delay = current_phase.get("send_delay", 0)

@@ -1849,7 +1849,8 @@ def run_fuzzer_live(config: dict):
                 live_transport.send_udp(_tftp_payload, port=_tftp_dst_port)
                 fuzzer_state["iteration"] += 1
             else:
-                if iteration == 1 or (iteration - 1) % 50 == 0:
+                _dns_cache_interval = 200 if mem_pressure else 50
+                if iteration == 1 or (iteration - 1) % _dns_cache_interval == 0:
                     dns_w = ai_weights.get("dns", {})
                     if mem_pressure:
                         _dns_cached_strategy = random.choice(_MEM_PRESSURE_STRATEGIES["dns"])
@@ -1867,18 +1868,16 @@ def run_fuzzer_live(config: dict):
                         _dns_cached_bytes, _dns_cached_tcp, _dns_cached_split = _build_dns_mutation(_dns_cached_strategy, seed_message)
                         _dns_is_udp = _dns_cached_bytes is not None
 
+                    if mem_pressure and _dns_is_udp:
+                        _dns_cached_bytes, _dns_cached_tcp, _dns_cached_split = None, None, None
+                        _dns_cached_strategy = "tcp_dns_segment"
+                        _dns_cached_tcp = TCPDNSSegmentMutator.mutate()
+                        _dns_cached_split = random.choice([1, 2, 3, 13, max(1, len(_dns_cached_tcp) // 2)])
+                        _dns_is_udp = False
+
                 strategy = _dns_cached_strategy
                 fuzzer_state["current_strategy"] = strategy
                 fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
-
-                if mem_pressure and _dns_is_udp:
-                    _dns_cached_bytes, _dns_cached_tcp, _dns_cached_split = None, None, None
-                    _dns_cached_strategy = "tcp_dns_segment"
-                    _dns_cached_tcp = TCPDNSSegmentMutator.mutate()
-                    _dns_cached_split = random.choice([1, 2, 3, 13, max(1, len(_dns_cached_tcp) // 2)])
-                    _dns_is_udp = False
-                    strategy = _dns_cached_strategy
-                    fuzzer_state["current_strategy"] = strategy
 
                 if _dns_is_udp:
                     live_transport.send_udp(_dns_cached_bytes, port=31337 if strategy == "back_orifice" else None)
@@ -2465,7 +2464,8 @@ def run_instance_live(instance, _sync_fn=None, _stop_check=None):
                 live_transport.send_udp(_tftp_payload, port=_tftp_dst_port)
                 state["iteration"] += 1
             else:
-                if iteration == 1 or (iteration - 1) % 50 == 0:
+                _dns_cache_interval = 200 if mem_pressure else 50
+                if iteration == 1 or (iteration - 1) % _dns_cache_interval == 0:
                     dns_w = weights.get("dns", {})
                     if mem_pressure:
                         _dns_cached_strategy = random.choice(_MEM_PRESSURE_STRATEGIES["dns"])
@@ -2483,18 +2483,16 @@ def run_instance_live(instance, _sync_fn=None, _stop_check=None):
                         _dns_cached_bytes, _dns_cached_tcp, _dns_cached_split = _build_dns_mutation(_dns_cached_strategy, seed_message)
                         _dns_is_udp = _dns_cached_bytes is not None
 
+                    if mem_pressure and _dns_is_udp:
+                        _dns_cached_bytes, _dns_cached_tcp, _dns_cached_split = None, None, None
+                        _dns_cached_strategy = "tcp_dns_segment"
+                        _dns_cached_tcp = TCPDNSSegmentMutator.mutate()
+                        _dns_cached_split = random.choice([1, 2, 3, 13, max(1, len(_dns_cached_tcp) // 2)])
+                        _dns_is_udp = False
+
                 strategy = _dns_cached_strategy
                 state["current_strategy"] = strategy
                 state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
-
-                if mem_pressure and _dns_is_udp:
-                    _dns_cached_bytes, _dns_cached_tcp, _dns_cached_split = None, None, None
-                    _dns_cached_strategy = "tcp_dns_segment"
-                    _dns_cached_tcp = TCPDNSSegmentMutator.mutate()
-                    _dns_cached_split = random.choice([1, 2, 3, 13, max(1, len(_dns_cached_tcp) // 2)])
-                    _dns_is_udp = False
-                    strategy = _dns_cached_strategy
-                    state["current_strategy"] = strategy
 
                 if _dns_is_udp:
                     live_transport.send_udp(_dns_cached_bytes, port=31337 if strategy == "back_orifice" else None)

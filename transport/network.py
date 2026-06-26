@@ -386,13 +386,15 @@ class LiveNetworkTransport:
         if sock is not None:
             return sock
 
+        conn_timeout = 0.15 if self.mem_pressure else 0.5
+        recv_timeout = 0.05 if self.mem_pressure else 0.5
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        sock.settimeout(0.5)
+        sock.settimeout(conn_timeout)
         self._bind_iface(sock)
         sock.connect((self.server_ip, actual_port))
-        sock.settimeout(0.5)
+        sock.settimeout(recv_timeout)
         self._persistent_tcp_sockets[actual_port] = sock
         return sock
 

@@ -3839,7 +3839,7 @@ def ai_analyze_v2():
 # Multi-Protocol Attack (Snort Blinder UI)
 # ---------------------------------------------------------------------------
 _BLINDER_PROTOCOL_REGISTRY = {
-    "dns":     ("udp",  53),   "dhcp":    ("udp",  67),
+    "dns":     ("tcp",  53),   "dhcp":    ("udp",  67),
     "snmp":    ("udp",  161),  "sip":     ("udp",  5060),
     "mgcp":    ("udp",  2427), "radius":  ("udp",  1812),
     "sunrpc":  ("udp",  111),  "tftp":    ("udp",  69),
@@ -4816,7 +4816,7 @@ def api_multiattack_start():
         intensity = 3
     if processes < 1 or processes > 50:
         processes = 6
-    if duration < 10 or duration > 3600:
+    if duration < 10 or duration > 10000:
         duration = 60
 
     multiattack_state["config"] = {
