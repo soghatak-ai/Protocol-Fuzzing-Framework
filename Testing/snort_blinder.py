@@ -270,6 +270,13 @@ def udp_worker(proto, target, port, mutator, dns_classes):
 
 
 # -- TCP Persistent Worker ----------------------------------------------------
+# Pool size per worker thread: each thread manages this many concurrent sockets.
+# The first segment of payload N goes on socket N%POOL; the second segment
+# is delivered only when the cursor wraps back to that socket ~POOL calls later.
+# This forces Snort to hold partial reassembly state across POOL streams
+# simultaneously.
+_TCP_WORKER_POOL = 30
+
 def tcp_persistent_worker(proto, target, port, mutator, dns_classes):
     pool = build_payload_pool(proto, mutator, dns_classes)
     idx = random.randint(0, len(pool) - 1)
@@ -278,6 +285,32 @@ def tcp_persistent_worker(proto, target, port, mutator, dns_classes):
     local_bytes = 0
     local_errs = 0
 
+    sock_pool = [None] * _TCP_WORKER_POOL
+    pending = [None] * _TCP_WORKER_POOL
+    cursor = 0
+
+    def _open(slot):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            s.settimeout(TCP_CONNECT_TIMEOUT)
+            s.connect((target, port))
+            s.settimeout(TCP_SEND_TIMEOUT)
+            sock_pool[slot] = s
+            return s
+        except OSError:
+            sock_pool[slot] = None
+            return None
+
+    def _close(slot):
+        s = sock_pool[slot]
+        sock_pool[slot] = None
+        pending[slot] = None
+        if s:
+            try: s.close()
+            except Exception: pass
+
     def _flush():
         nonlocal local_pkts, local_bytes, local_errs
         if local_pkts or local_errs:
@@ -285,72 +318,60 @@ def tcp_persistent_worker(proto, target, port, mutator, dns_classes):
             local_pkts = local_bytes = local_errs = 0
 
     while not stop_event.is_set():
-        sock = None
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            sock.settimeout(TCP_CONNECT_TIMEOUT)
-            sock.connect((target, port))
-            sock.settimeout(TCP_SEND_TIMEOUT)
+        slot = cursor % _TCP_WORKER_POOL
+        cursor += 1
 
-            pending_second = None
-            for _ in range(TCP_PAYLOADS_PER_CONN):
-                if stop_event.is_set():
-                    break
+        if pending[slot] is not None:
+            s = sock_pool[slot]
+            if s is not None:
                 try:
-                    if pending_second is not None:
-                        sock.sendall(pending_second)
-                        pending_second = None
-
-                    payload = pool[idx % len(pool)]
-                    idx += 1
-                    sp = random.choice([1, 2, 3, max(1, len(payload) // 3)])
-                    sp = max(1, min(sp, len(payload) - 1)) if len(payload) > 1 else 0
-                    if sp > 0:
-                        sock.sendall(payload[:sp])
-                        pending_second = payload[sp:]
-                    else:
-                        sock.sendall(payload)
-                    local_pkts += 1
-                    local_bytes += len(payload)
-                    delay = current_phase.get("send_delay", 0)
-                    if delay > 0:
-                        time.sleep(delay)
-                    refresh += 1
-                    if local_pkts >= BATCH_SIZE:
-                        _flush()
-                    if refresh >= POOL_REFRESH_INTERVAL:
-                        refresh = 0
-                        pool = build_payload_pool(proto, mutator, dns_classes)
-                        idx = 0
-                except (BrokenPipeError, ConnectionResetError, OSError):
-                    local_errs += 1
-                    break
-            if pending_second is not None:
-                try:
-                    sock.sendall(pending_second)
+                    s.sendall(pending[slot])
                 except OSError:
-                    pass
-            try:
-                sock.shutdown(socket.SHUT_WR)
-            except Exception:
-                pass
-            sock.close()
-        except (ConnectionRefusedError, OSError):
+                    _close(slot)
+            pending[slot] = None
+
+        s = sock_pool[slot]
+        if s is None:
+            s = _open(slot)
+            if s is None:
+                local_errs += 1
+                time.sleep(0.01)
+                if local_errs >= BATCH_SIZE:
+                    _flush()
+                continue
+
+        payload = pool[idx % len(pool)]
+        idx += 1
+
+        sp = random.choice([1, 2, 3, max(1, len(payload) // 3)])
+        sp = max(1, min(sp, len(payload) - 1)) if len(payload) > 1 else 0
+
+        try:
+            if sp > 0:
+                s.sendall(payload[:sp])
+                pending[slot] = payload[sp:]
+            else:
+                s.sendall(payload)
+            local_pkts += 1
+            local_bytes += len(payload)
+        except OSError:
+            _close(slot)
             local_errs += 1
-            if sock:
-                try: sock.close()
-                except Exception: pass
-            time.sleep(0.05)
-        except Exception:
-            local_errs += 1
-            if sock:
-                try: sock.close()
-                except Exception: pass
-            time.sleep(0.01)
-        if local_pkts >= BATCH_SIZE or local_errs >= BATCH_SIZE:
+
+        delay = current_phase.get("send_delay", 0)
+        if delay > 0:
+            time.sleep(delay)
+
+        refresh += 1
+        if local_pkts >= BATCH_SIZE:
             _flush()
+        if refresh >= POOL_REFRESH_INTERVAL:
+            refresh = 0
+            pool = build_payload_pool(proto, mutator, dns_classes)
+            idx = 0
+
+    for slot in range(_TCP_WORKER_POOL):
+        _close(slot)
     _flush()
 
 
