@@ -317,6 +317,8 @@ class LiveNetworkTransport:
         self.mem_pressure = mem_pressure
         self._persistent_tcp_sockets = {}
         self._udp_socket = None
+        self._pressure_pool = {}
+        self._PRESSURE_POOL_SIZE = 8
 
     def _bind_iface(self, sock: socket.socket):
         """Bind socket to a specific interface (Linux: SO_BINDTODEVICE)."""
@@ -428,24 +430,71 @@ class LiveNetworkTransport:
             except OSError:
                 pass
 
+        for key in list(self._pressure_pool):
+            sock = self._pressure_pool.pop(key, None)
+            if sock is None:
+                continue
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+        if hasattr(self, '_pressure_pending'):
+            self._pressure_pending.clear()
+
+    def _pressure_pool_sock(self, port: int, idx: int) -> socket.socket:
+        """Get or create one socket in the memory-pressure connection pool."""
+        key = (port, idx)
+        sock = self._pressure_pool.get(key)
+        if sock is not None:
+            return sock
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        sock.settimeout(0.15)
+        self._bind_iface(sock)
+        sock.connect((self.server_ip, port))
+        sock.settimeout(0.05)
+        self._pressure_pool[key] = sock
+        return sock
+
+    def _close_pressure_sock(self, port: int, idx: int):
+        key = (port, idx)
+        sock = self._pressure_pool.pop(key, None)
+        if sock is None:
+            return
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
+
     def send_persistent_tcp(self, tcp_payload: bytes, port: int = None,
                             split_at: int = None) -> bool:
         """
         Send over a long-lived TCP connection. If the peer has closed the stream,
         reconnect once and retry the same payload so fuzzing can continue.
 
-        When mem_pressure is enabled and no explicit split is given, auto-split
-        every payload into 2-4 segments to force Snort TCP reassembly and hold
-        memory blocks longer.
+        When mem_pressure is enabled, uses a pool of concurrent sockets and
+        staggers segment delivery across them to hold Snort reassembly buffers.
         """
         actual_port = port or self.server_port
-        if self.mem_pressure and split_at is None and len(tcp_payload) > 4:
-            split_at = random.choice([1, 2, 3, max(1, len(tcp_payload) // 3)])
+
+        if self.mem_pressure and len(tcp_payload) > 4:
+            return self._send_pressure(tcp_payload, actual_port, split_at)
+
+        if split_at is not None and len(tcp_payload) > 1:
+            split_at = max(1, min(split_at, len(tcp_payload) - 1))
         for _attempt in range(3):
             try:
                 sock = self._persistent_tcp_socket(actual_port)
                 if split_at is not None and len(tcp_payload) > 1:
-                    split_at = max(1, min(split_at, len(tcp_payload) - 1))
                     sock.sendall(tcp_payload[:split_at])
                     sock.sendall(tcp_payload[split_at:])
                 else:
@@ -454,6 +503,48 @@ class LiveNetworkTransport:
             except OSError:
                 self.close_persistent_tcp(actual_port)
         return False
+
+    def _send_pressure(self, tcp_payload: bytes, port: int,
+                       split_at: int = None) -> bool:
+        """Send across a rotating pool of sockets. Each socket gets only the
+        first segment; the second segment is sent on the *next* call so Snort
+        must hold partial reassembly state across calls."""
+        pool_sz = self._PRESSURE_POOL_SIZE
+        if not hasattr(self, '_pressure_cursor'):
+            self._pressure_cursor = 0
+            self._pressure_pending = {}
+
+        idx = self._pressure_cursor % pool_sz
+        self._pressure_cursor += 1
+
+        pending = self._pressure_pending.pop(idx, None)
+        if pending is not None:
+            p_port, p_data = pending
+            try:
+                sock = self._pressure_pool_sock(p_port, idx)
+                sock.sendall(p_data)
+            except OSError:
+                self._close_pressure_sock(p_port, idx)
+
+        if split_at is None:
+            split_at = random.choice([1, 2, 3, max(1, len(tcp_payload) // 3)])
+        split_at = max(1, min(split_at, len(tcp_payload) - 1))
+
+        try:
+            sock = self._pressure_pool_sock(port, idx)
+            sock.sendall(tcp_payload[:split_at])
+            self._pressure_pending[idx] = (port, tcp_payload[split_at:])
+            return True
+        except OSError:
+            self._close_pressure_sock(port, idx)
+            try:
+                sock = self._pressure_pool_sock(port, idx)
+                sock.sendall(tcp_payload[:split_at])
+                self._pressure_pending[idx] = (port, tcp_payload[split_at:])
+                return True
+            except OSError:
+                self._close_pressure_sock(port, idx)
+                return False
 
     def send_icmp(self, icmp_payload: bytes):
         """Send raw ICMP payload via raw socket (requires root/CAP_NET_RAW)."""

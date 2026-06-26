@@ -39,9 +39,9 @@ MAX_PAYLOAD_SIZE = 4096
 PAYLOAD_POOL_SIZE = 50
 POOL_REFRESH_INTERVAL = 500
 
-TCP_CONNECT_TIMEOUT = 2.0
-TCP_SEND_TIMEOUT = 1.0
-TCP_PAYLOADS_PER_CONN = 100
+TCP_CONNECT_TIMEOUT = 0.5
+TCP_SEND_TIMEOUT = 0.3
+TCP_PAYLOADS_PER_CONN = 500
 UDP_SEND_TIMEOUT = 0.05
 
 CANARY_PAYLOAD = b"GET /EICAR-STANDARD-ANTIVIRUS-TEST-FILE! HTTP/1.1\r\nHost: target\r\n\r\n"
@@ -289,20 +289,27 @@ def tcp_persistent_worker(proto, target, port, mutator, dns_classes):
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             sock.settimeout(TCP_CONNECT_TIMEOUT)
             sock.connect((target, port))
             sock.settimeout(TCP_SEND_TIMEOUT)
 
+            pending_second = None
             for _ in range(TCP_PAYLOADS_PER_CONN):
                 if stop_event.is_set():
                     break
                 try:
+                    if pending_second is not None:
+                        sock.sendall(pending_second)
+                        pending_second = None
+
                     payload = pool[idx % len(pool)]
                     idx += 1
-                    if proto == "dns" and len(payload) > 4:
-                        sp = random.choice([1, 2, 3, max(1, len(payload) // 2)])
+                    sp = random.choice([1, 2, 3, max(1, len(payload) // 3)])
+                    sp = max(1, min(sp, len(payload) - 1)) if len(payload) > 1 else 0
+                    if sp > 0:
                         sock.sendall(payload[:sp])
-                        sock.sendall(payload[sp:])
+                        pending_second = payload[sp:]
                     else:
                         sock.sendall(payload)
                     local_pkts += 1
@@ -320,6 +327,11 @@ def tcp_persistent_worker(proto, target, port, mutator, dns_classes):
                 except (BrokenPipeError, ConnectionResetError, OSError):
                     local_errs += 1
                     break
+            if pending_second is not None:
+                try:
+                    sock.sendall(pending_second)
+                except OSError:
+                    pass
             try:
                 sock.shutdown(socket.SHUT_WR)
             except Exception:

@@ -4600,9 +4600,12 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes, ft
 
         while any(p.poll() is None for p in _multiattack_procs):
             if multiattack_state["stop_requested"]:
-                _multiattack_log("Stop requested — terminating flood processes")
+                _multiattack_log("Stop requested — killing flood processes")
                 for p in _multiattack_procs:
-                    p.terminate()
+                    try:
+                        p.kill()
+                    except Exception:
+                        pass
                 break
 
             snap = _aggregate()
@@ -4679,12 +4682,16 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes, ft
 
             time.sleep(1 if use_ftd_ssh else 2)
 
-        # Final stats
+        # Final stats -- give processes 2s to exit, then force-kill
         for p in _multiattack_procs:
             try:
-                p.wait(timeout=10)
+                p.wait(timeout=2)
             except Exception:
-                p.kill()
+                try:
+                    p.kill()
+                    p.wait(timeout=1)
+                except Exception:
+                    pass
 
         snap = _aggregate()
         canary_sent = _canary_sent
@@ -4693,10 +4700,11 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes, ft
 
         # --- Final verdict ---
         if use_ftd_ssh and ftd_monitor:
-            # Wait for perfmon to flush so the final interval's alerts land on
-            # disk before we read them (perfmon writes on a fixed interval).
-            _multiattack_log("Waiting for Snort perfmon to flush final alerts...")
-            ftd_monitor.wait_for_flush()
+            if not multiattack_state.get("stop_requested"):
+                _multiattack_log("Waiting for Snort perfmon to flush final alerts...")
+                ftd_monitor.wait_for_flush(timeout=15)
+            else:
+                _multiattack_log("Stop requested — skipping perfmon flush wait")
             final_stats = ftd_monitor.get_stats()
             if final_stats:
                 passed = final_stats.get("passed", 0)
