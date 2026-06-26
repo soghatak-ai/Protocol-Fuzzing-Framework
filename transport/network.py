@@ -387,10 +387,11 @@ class LiveNetworkTransport:
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        sock.settimeout(1.0)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        sock.settimeout(0.15)
         self._bind_iface(sock)
         sock.connect((self.server_ip, actual_port))
-        sock.settimeout(0.2)
+        sock.settimeout(0.05)
         self._persistent_tcp_sockets[actual_port] = sock
         return sock
 
@@ -431,13 +432,12 @@ class LiveNetworkTransport:
         reconnect once and retry the same payload so fuzzing can continue.
         """
         actual_port = port or self.server_port
-        for _attempt in range(2):
+        for _attempt in range(3):
             try:
                 sock = self._persistent_tcp_socket(actual_port)
                 if split_at is not None and len(tcp_payload) > 1:
                     split_at = max(1, min(split_at, len(tcp_payload) - 1))
                     sock.sendall(tcp_payload[:split_at])
-                    time.sleep(0.0001)
                     sock.sendall(tcp_payload[split_at:])
                 else:
                     sock.sendall(tcp_payload)
