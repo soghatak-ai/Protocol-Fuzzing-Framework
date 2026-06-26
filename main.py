@@ -194,6 +194,24 @@ _PROTOCOL_STRATEGIES = {
     "tftp": TFTP_STRATEGY_NAMES,
 }
 
+_MEM_PRESSURE_STRATEGIES = {
+    "dns": ["tcp_dns_segment", "txt_rdata_bomb", "tcp_two_message",
+            "dce_smb", "inspector_stress", "compression_loop"],
+    "ftp": None,
+    "http": None,
+    "smtp": None,
+    "ssh": None,
+    "smb2": None,
+    "smb3": None,
+    "http2": None,
+    "dcerpc": None,
+    "ldap": None,
+    "telnet": None,
+    "rtsp": None,
+    "tacacs": None,
+    "cifs": None,
+}
+
 _mp_manager = None
 _mp_manager_lock = threading.Lock()
 
@@ -1410,9 +1428,11 @@ def run_fuzzer_live(config: dict):
     ftd_pass    = config.get("ftd_pass", "")
     ftd_ssh_port = int(config.get("ftd_ssh_port", 22))
     snort_pid   = config.get("snort_pid")
+    mem_pressure = config.get("mem_pressure", False)
 
     protocol = fuzzer_state.get("protocol", "dns")
-    live_transport = LiveNetworkTransport(server_ip, server_port, interface)
+    live_transport = LiveNetworkTransport(server_ip, server_port, interface,
+                                         mem_pressure=mem_pressure)
 
     if protocol == "ftp":
         ftp_mutator_inst = FtpMutator(external_weights=ai_weights.get("ftp"), bandit=ftp_bandit)
@@ -1831,7 +1851,10 @@ def run_fuzzer_live(config: dict):
             else:
                 if iteration == 1 or (iteration - 1) % 50 == 0:
                     dns_w = ai_weights.get("dns", {})
-                    _dns_cached_strategy = dns_bandit.select_with_weights(dns_w)
+                    if mem_pressure:
+                        _dns_cached_strategy = random.choice(_MEM_PRESSURE_STRATEGIES["dns"])
+                    else:
+                        _dns_cached_strategy = dns_bandit.select_with_weights(dns_w)
                     if _dns_cached_strategy == "back_orifice":
                         _dns_cached_bytes = BackOrificeMutator.mutate()
                         _dns_cached_tcp, _dns_cached_split = None, None
@@ -1847,6 +1870,15 @@ def run_fuzzer_live(config: dict):
                 strategy = _dns_cached_strategy
                 fuzzer_state["current_strategy"] = strategy
                 fuzzer_state["strategy_stats"][strategy] = fuzzer_state["strategy_stats"].get(strategy, 0) + 1
+
+                if mem_pressure and _dns_is_udp:
+                    _dns_cached_bytes, _dns_cached_tcp, _dns_cached_split = None, None, None
+                    _dns_cached_strategy = "tcp_dns_segment"
+                    _dns_cached_tcp = TCPDNSSegmentMutator.mutate()
+                    _dns_cached_split = random.choice([1, 2, 3, 13, max(1, len(_dns_cached_tcp) // 2)])
+                    _dns_is_udp = False
+                    strategy = _dns_cached_strategy
+                    fuzzer_state["current_strategy"] = strategy
 
                 if _dns_is_udp:
                     live_transport.send_udp(_dns_cached_bytes, port=31337 if strategy == "back_orifice" else None)
@@ -2009,12 +2041,14 @@ def run_instance_live(instance, _sync_fn=None, _stop_check=None):
     ftd_pass = config.get("ftd_pass", "")
     ftd_ssh_port = int(config.get("ftd_ssh_port", 22))
     snort_pid = config.get("snort_pid")
+    mem_pressure = config.get("mem_pressure", False)
 
     state = instance.state
     protocol = instance.protocol
     bandit = instance.bandit
     weights = instance.weights
-    live_transport = LiveNetworkTransport(server_ip, server_port, interface)
+    live_transport = LiveNetworkTransport(server_ip, server_port, interface,
+                                         mem_pressure=mem_pressure)
     instance.transport = live_transport
 
     if protocol == "ftp":
@@ -2433,7 +2467,10 @@ def run_instance_live(instance, _sync_fn=None, _stop_check=None):
             else:
                 if iteration == 1 or (iteration - 1) % 50 == 0:
                     dns_w = weights.get("dns", {})
-                    _dns_cached_strategy = bandit.select_with_weights(dns_w)
+                    if mem_pressure:
+                        _dns_cached_strategy = random.choice(_MEM_PRESSURE_STRATEGIES["dns"])
+                    else:
+                        _dns_cached_strategy = bandit.select_with_weights(dns_w)
                     if _dns_cached_strategy == "back_orifice":
                         _dns_cached_bytes = BackOrificeMutator.mutate()
                         _dns_cached_tcp, _dns_cached_split = None, None
@@ -2449,6 +2486,15 @@ def run_instance_live(instance, _sync_fn=None, _stop_check=None):
                 strategy = _dns_cached_strategy
                 state["current_strategy"] = strategy
                 state["strategy_stats"][strategy] = state["strategy_stats"].get(strategy, 0) + 1
+
+                if mem_pressure and _dns_is_udp:
+                    _dns_cached_bytes, _dns_cached_tcp, _dns_cached_split = None, None, None
+                    _dns_cached_strategy = "tcp_dns_segment"
+                    _dns_cached_tcp = TCPDNSSegmentMutator.mutate()
+                    _dns_cached_split = random.choice([1, 2, 3, 13, max(1, len(_dns_cached_tcp) // 2)])
+                    _dns_is_udp = False
+                    strategy = _dns_cached_strategy
+                    state["current_strategy"] = strategy
 
                 if _dns_is_udp:
                     live_transport.send_udp(_dns_cached_bytes, port=31337 if strategy == "back_orifice" else None)

@@ -737,6 +737,46 @@
             background: var(--bg-card);
             color: var(--accent-blue);
         }
+        .mem-pressure-toggle {
+            position: relative;
+            display: inline-block;
+            width: 44px;
+            height: 24px;
+            flex-shrink: 0;
+        }
+        .mem-pressure-toggle input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .mem-pressure-slider {
+            position: absolute;
+            cursor: pointer;
+            inset: 0;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 24px;
+            transition: 0.2s;
+        }
+        .mem-pressure-slider::before {
+            content: "";
+            position: absolute;
+            height: 18px;
+            width: 18px;
+            left: 2px;
+            bottom: 2px;
+            background: var(--text-muted);
+            border-radius: 50%;
+            transition: 0.2s;
+        }
+        .mem-pressure-toggle input:checked + .mem-pressure-slider {
+            background: var(--accent-red);
+            border-color: var(--accent-red);
+        }
+        .mem-pressure-toggle input:checked + .mem-pressure-slider::before {
+            transform: translateX(20px);
+            background: #fff;
+        }
         .config-body { padding: 20px 24px; }
         .config-grid {
             display: grid;
@@ -1390,6 +1430,20 @@
                         <div class="config-field">
                             <label class="config-label" for="cfg-snort-pid">Snort PID on FTD</label>
                             <input class="config-input" id="cfg-snort-pid" type="number" placeholder="e.g. 12345">
+                        </div>
+                    </div>
+
+                    <div class="config-section-sep">Memory Pressure Mode</div>
+                    <div style="display:flex;align-items:center;gap:12px;padding:4px 0;">
+                        <label class="mem-pressure-toggle" for="cfg-mem-pressure">
+                            <input type="checkbox" id="cfg-mem-pressure">
+                            <span class="mem-pressure-slider"></span>
+                        </label>
+                        <div>
+                            <span style="font-weight:600;font-size:13px;color:var(--text-primary);">Force TCP Reassembly</span>
+                            <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+                                Forces all strategies to use TCP with segment splitting. Maximizes Snort memory block consumption for consistent CNT depletion.
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -2567,6 +2621,7 @@
                     ftd_pass:     document.getElementById('cfg-ftd-pass').value,
                     ftd_ssh_port: document.getElementById('cfg-ftd-ssh-port').value || '22',
                     snort_pid:    document.getElementById('cfg-snort-pid').value,
+                    mem_pressure: document.getElementById('cfg-mem-pressure').checked,
                 };
             }
 

@@ -310,10 +310,11 @@ class LiveNetworkTransport:
     """
 
     def __init__(self, server_ip: str, server_port: int = 53,
-                 interface: str = None):
+                 interface: str = None, mem_pressure: bool = False):
         self.server_ip = server_ip
         self.server_port = server_port
         self.interface = interface
+        self.mem_pressure = mem_pressure
         self._persistent_tcp_sockets = {}
         self._udp_socket = None
 
@@ -430,8 +431,14 @@ class LiveNetworkTransport:
         """
         Send over a long-lived TCP connection. If the peer has closed the stream,
         reconnect once and retry the same payload so fuzzing can continue.
+
+        When mem_pressure is enabled and no explicit split is given, auto-split
+        every payload into 2-4 segments to force Snort TCP reassembly and hold
+        memory blocks longer.
         """
         actual_port = port or self.server_port
+        if self.mem_pressure and split_at is None and len(tcp_payload) > 4:
+            split_at = random.choice([1, 2, 3, max(1, len(tcp_payload) // 3)])
         for _attempt in range(3):
             try:
                 sock = self._persistent_tcp_socket(actual_port)
