@@ -39,7 +39,7 @@ MAX_PAYLOAD_SIZE = 4096
 PAYLOAD_POOL_SIZE = 50
 POOL_REFRESH_INTERVAL = 500
 
-TCP_CONNECT_TIMEOUT = 0.5
+TCP_CONNECT_TIMEOUT = 0.1
 TCP_SEND_TIMEOUT = 0.3
 TCP_PAYLOADS_PER_CONN = 500
 UDP_SEND_TIMEOUT = 0.05
@@ -294,6 +294,7 @@ def tcp_persistent_worker(proto, target, port, mutator, dns_classes):
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
             s.settimeout(TCP_CONNECT_TIMEOUT)
             s.connect((target, port))
             s.settimeout(TCP_SEND_TIMEOUT)
@@ -317,6 +318,11 @@ def tcp_persistent_worker(proto, target, port, mutator, dns_classes):
             stats.record_batch(proto, local_pkts, local_bytes, local_errs)
             local_pkts = local_bytes = local_errs = 0
 
+    for _pre in range(_TCP_WORKER_POOL):
+        if stop_event.is_set():
+            break
+        _open(_pre)
+
     while not stop_event.is_set():
         slot = cursor % _TCP_WORKER_POOL
         cursor += 1
@@ -335,7 +341,6 @@ def tcp_persistent_worker(proto, target, port, mutator, dns_classes):
             s = _open(slot)
             if s is None:
                 local_errs += 1
-                time.sleep(0.01)
                 if local_errs >= BATCH_SIZE:
                     _flush()
                 continue

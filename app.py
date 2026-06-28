@@ -4600,12 +4600,23 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes, ft
 
         while any(p.poll() is None for p in _multiattack_procs):
             if multiattack_state["stop_requested"]:
-                _multiattack_log("Stop requested — killing flood processes")
+                _multiattack_log("Stop requested — terminating flood processes")
                 for p in _multiattack_procs:
                     try:
-                        p.kill()
+                        p.terminate()
                     except Exception:
                         pass
+                _term_deadline = time.time() + 2
+                while time.time() < _term_deadline:
+                    if all(p.poll() is not None for p in _multiattack_procs):
+                        break
+                    time.sleep(0.2)
+                for p in _multiattack_procs:
+                    if p.poll() is None:
+                        try:
+                            p.kill()
+                        except Exception:
+                            pass
                 break
 
             snap = _aggregate()
@@ -4682,11 +4693,20 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes, ft
 
             time.sleep(1 if use_ftd_ssh else 2)
 
-        # Final stats -- give processes 2s to exit, then force-kill
+        # Final stats -- SIGTERM first for clean socket teardown, then SIGKILL
         for p in _multiattack_procs:
-            try:
-                p.wait(timeout=2)
-            except Exception:
+            if p.poll() is None:
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+        _term_deadline = time.time() + 2
+        while time.time() < _term_deadline:
+            if all(p.poll() is not None for p in _multiattack_procs):
+                break
+            time.sleep(0.2)
+        for p in _multiattack_procs:
+            if p.poll() is None:
                 try:
                     p.kill()
                     p.wait(timeout=1)
@@ -4787,6 +4807,8 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes, ft
                 ftd_monitor.close()
             except Exception:
                 pass
+        _multiattack_log("Cooldown: waiting 3s for socket cleanup...")
+        time.sleep(3)
         multiattack_state["running"] = False
         _multiattack_procs = []
 
