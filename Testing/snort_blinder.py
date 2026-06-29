@@ -85,6 +85,9 @@ PROTOCOL_REGISTRY = {
     "cifs":    ("tcp",  445,  "CifsMutator"),
     "telnet":  ("tcp",  23,   "TelnetMutator"),
     "icmp":    ("icmp", 0,    "IcmpMutator"),
+    "http_clean":  ("tcp_vol", 80,  None),
+    "rtsp_clean":  ("tcp_vol", 554, None),
+    "ftp_clean":   ("tcp_vol", 21,  None),
 }
 
 
@@ -380,6 +383,222 @@ def tcp_persistent_worker(proto, target, port, mutator, dns_classes):
     _flush()
 
 
+# -- Clean payload generators (well-formed, pass LINA inspection) -------------
+
+def build_clean_http_pool(target):
+    """Generate pool of valid, pipelined HTTP requests that LINA passes through."""
+    methods = ["GET", "HEAD", "OPTIONS", "POST"]
+    paths = [
+        "/", "/index.html", "/api/v1/status", "/images/logo.png",
+        "/css/style.css", "/js/app.js", "/favicon.ico", "/robots.txt",
+        "/about", "/contact", "/login", "/health", "/sitemap.xml",
+        "/assets/fonts/main.woff2", "/api/v2/users", "/docs/readme",
+    ]
+    agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15",
+        "curl/8.4.0", "python-requests/2.31.0",
+    ]
+    pool = []
+    for _ in range(PAYLOAD_POOL_SIZE):
+        n_reqs = random.randint(10, 20)
+        buf = b""
+        for _ in range(n_reqs):
+            method = random.choice(methods)
+            path = random.choice(paths)
+            agent = random.choice(agents)
+            req = (
+                f"{method} {path} HTTP/1.1\r\n"
+                f"Host: {target}\r\n"
+                f"User-Agent: {agent}\r\n"
+                f"Accept: */*\r\n"
+                f"Connection: keep-alive\r\n"
+            )
+            if method == "POST":
+                body = os.urandom(random.randint(16, 128)).hex()
+                req += f"Content-Type: application/x-www-form-urlencoded\r\n"
+                req += f"Content-Length: {len(body)}\r\n\r\n{body}"
+            else:
+                req += "\r\n"
+            buf += req.encode()
+        pool.append(buf)
+    return pool
+
+
+def build_clean_rtsp_pool(target):
+    """Generate pool of valid, pipelined RTSP requests that LINA passes through."""
+    streams = [
+        f"rtsp://{target}/live/stream1",
+        f"rtsp://{target}/media/video",
+        f"rtsp://{target}/cam/main",
+        f"rtsp://{target}/vod/movie1.mp4",
+    ]
+    pool = []
+    for _ in range(PAYLOAD_POOL_SIZE):
+        n_reqs = random.randint(5, 12)
+        buf = b""
+        for i in range(n_reqs):
+            method = random.choice(["OPTIONS", "DESCRIBE", "SETUP", "PLAY",
+                                     "PAUSE", "TEARDOWN", "GET_PARAMETER"])
+            uri = random.choice(streams)
+            if method == "OPTIONS":
+                uri = "*"
+            cseq = i + random.randint(1, 1000)
+            req = (
+                f"{method} {uri} RTSP/1.0\r\n"
+                f"CSeq: {cseq}\r\n"
+                f"User-Agent: VLC/3.0.20 LibVLC/3.0.20\r\n"
+            )
+            if method == "SETUP":
+                req += f"Transport: RTP/AVP;unicast;client_port=8000-8001\r\n"
+            elif method == "PLAY":
+                req += f"Session: {random.randint(100000, 999999)}\r\n"
+                req += f"Range: npt=0.000-\r\n"
+            elif method == "DESCRIBE":
+                req += f"Accept: application/sdp\r\n"
+            req += "\r\n"
+            buf += req.encode()
+        pool.append(buf)
+    return pool
+
+
+def build_clean_ftp_pool(target):
+    """Generate pool of valid FTP command sequences that LINA passes through."""
+    dirs = ["/pub", "/data", "/incoming", "/files", "/archive", "/backup"]
+    filenames = ["readme.txt", "data.csv", "report.pdf", "log.txt", "config.ini"]
+    pool = []
+    for _ in range(PAYLOAD_POOL_SIZE):
+        cmds = "USER anonymous\r\nPASS anonymous@test.com\r\n"
+        for _ in range(random.randint(15, 30)):
+            cmd = random.choice([
+                f"CWD {random.choice(dirs)}\r\n",
+                "PWD\r\n",
+                "SYST\r\n",
+                "TYPE A\r\n",
+                "TYPE I\r\n",
+                "PASV\r\n",
+                f"LIST {random.choice(dirs)}\r\n",
+                f"STAT {random.choice(filenames)}\r\n",
+                f"SIZE {random.choice(filenames)}\r\n",
+                f"MDTM {random.choice(filenames)}\r\n",
+                "FEAT\r\n",
+                "NOOP\r\n",
+                "HELP\r\n",
+                f"RETR {random.choice(filenames)}\r\n",
+            ])
+            cmds += cmd
+        cmds += "QUIT\r\n"
+        pool.append(cmds.encode())
+    return pool
+
+
+# -- TCP Volume Worker (well-formed, no split, max throughput) ----------------
+_TCP_VOL_POOL = 30
+
+def tcp_volume_worker(proto, target, port, _mutator, _dns_classes):
+    """High-throughput TCP worker that sends complete, well-formed payloads.
+    No split-segment logic — every sendall() delivers full protocol messages
+    so LINA classifies and forwards to Snort without dropping."""
+    if "http" in proto:
+        pool = build_clean_http_pool(target)
+    elif "rtsp" in proto:
+        pool = build_clean_rtsp_pool(target)
+    elif "ftp" in proto:
+        pool = build_clean_ftp_pool(target)
+    else:
+        pool = build_clean_http_pool(target)
+
+    idx = random.randint(0, len(pool) - 1)
+    refresh = 0
+    local_pkts = 0
+    local_bytes = 0
+    local_errs = 0
+
+    sock_pool = [None] * _TCP_VOL_POOL
+    cursor = 0
+
+    def _open(slot):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                         struct.pack('ii', 1, 0))
+            s.settimeout(TCP_CONNECT_TIMEOUT)
+            s.connect((target, port))
+            s.settimeout(TCP_SEND_TIMEOUT)
+            sock_pool[slot] = s
+            return s
+        except OSError:
+            sock_pool[slot] = None
+            return None
+
+    def _close(slot):
+        s = sock_pool[slot]
+        sock_pool[slot] = None
+        if s:
+            try:
+                s.close()
+            except Exception:
+                pass
+
+    def _flush():
+        nonlocal local_pkts, local_bytes, local_errs
+        if local_pkts or local_errs:
+            stats.record_batch(proto, local_pkts, local_bytes, local_errs)
+            local_pkts = local_bytes = local_errs = 0
+
+    for _pre in range(_TCP_VOL_POOL):
+        if stop_event.is_set():
+            break
+        _open(_pre)
+
+    while not stop_event.is_set():
+        slot = cursor % _TCP_VOL_POOL
+        cursor += 1
+
+        s = sock_pool[slot]
+        if s is None:
+            s = _open(slot)
+            if s is None:
+                local_errs += 1
+                if local_errs >= BATCH_SIZE:
+                    _flush()
+                continue
+
+        payload = pool[idx % len(pool)]
+        idx += 1
+
+        try:
+            s.sendall(payload)
+            local_pkts += 1
+            local_bytes += len(payload)
+        except OSError:
+            _close(slot)
+            local_errs += 1
+
+        delay = current_phase.get("send_delay", 0)
+        if delay > 0:
+            time.sleep(delay)
+
+        if local_pkts >= BATCH_SIZE:
+            _flush()
+        refresh += 1
+        if refresh >= POOL_REFRESH_INTERVAL:
+            refresh = 0
+            if "http" in proto:
+                pool = build_clean_http_pool(target)
+            elif "rtsp" in proto:
+                pool = build_clean_rtsp_pool(target)
+            elif "ftp" in proto:
+                pool = build_clean_ftp_pool(target)
+            idx = 0
+
+    for slot in range(_TCP_VOL_POOL):
+        _close(slot)
+    _flush()
+
+
 # -- ICMP Worker --------------------------------------------------------------
 def icmp_worker(target):
     try:
@@ -561,6 +780,7 @@ def run_flood(target, duration, phase_duration, intensity=1,
     # Separate protocols by transport
     udp_protos = [(n, p) for n, (t, p, _) in active_reg.items() if t == "udp"]
     tcp_protos = [(n, p) for n, (t, p, _) in active_reg.items() if t == "tcp"]
+    tcp_vol_protos = [(n, p) for n, (t, p, _) in active_reg.items() if t == "tcp_vol"]
 
     UDP_THREADS = preset["udp"]
     TCP_CONNS = preset["tcp"]
@@ -582,6 +802,13 @@ def run_flood(target, duration, phase_duration, intensity=1,
                                  daemon=True, name=f"tcp-{name}-{i}")
             workers.append(w)
 
+    for name, port in tcp_vol_protos:
+        for i in range(TCP_CONNS):
+            w = threading.Thread(target=tcp_volume_worker,
+                                 args=(name, target, port, None, None),
+                                 daemon=True, name=f"vol-{name}-{i}")
+            workers.append(w)
+
     if "icmp" in active_reg:
         icmp_thread = threading.Thread(target=icmp_worker, args=(target,), daemon=True, name="icmp")
         workers.append(icmp_thread)
@@ -590,8 +817,10 @@ def run_flood(target, duration, phase_duration, intensity=1,
     writer_thread = threading.Thread(target=lambda: _stats_writer_loop(sf), daemon=True, name="stats-writer")
 
     total_w = len(workers)
+    vol_count = len(tcp_vol_protos)
     print(f"  [*] Launching {total_w} workers "
-          f"(UDP:{UDP_THREADS}x{len(udp_protos)}, TCP:{TCP_CONNS}x{len(tcp_protos)}, ICMP:1)",
+          f"(UDP:{UDP_THREADS}x{len(udp_protos)}, TCP:{TCP_CONNS}x{len(tcp_protos)}, "
+          f"VOL:{TCP_CONNS}x{vol_count}, ICMP:1)",
           flush=True)
 
     writer_thread.start()
@@ -969,10 +1198,16 @@ def main():
                              "detection string into (so IPS alerts scale with volume)")
     parser.add_argument("--inject-string", type=str, default=None,
                         help="Detection string to embed (default: EICAR content)")
+    parser.add_argument("--clean-flood", action="store_true",
+                        help="Use only well-formed clean protocols (http_clean, "
+                             "rtsp_clean, ftp_clean) for LINA-bypass flooding")
     args = parser.parse_args()
 
     if args.flood:
-        pf = set(args.protocols.split(",")) if args.protocols else None
+        if args.clean_flood:
+            pf = {"http_clean", "rtsp_clean", "ftp_clean"}
+        else:
+            pf = set(args.protocols.split(",")) if args.protocols else None
         run_flood(args.target, args.duration, args.phase_duration,
                   args.intensity, proto_filter=pf, stats_file_override=args.stats_file,
                   inject_rate=args.inject_rate, inject_string=args.inject_string)

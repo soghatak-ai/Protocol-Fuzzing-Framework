@@ -3850,6 +3850,9 @@ _BLINDER_PROTOCOL_REGISTRY = {
     "tacacs":  ("tcp",  49),   "ldap":    ("tcp",  389),
     "cifs":    ("tcp",  445),  "telnet":  ("tcp",  23),
     "icmp":    ("icmp", 0),
+    "http_clean":  ("tcp_vol", 80),
+    "rtsp_clean":  ("tcp_vol", 554),
+    "ftp_clean":   ("tcp_vol", 21),
 }
 
 _BLINDER_INTENSITY = {
@@ -4532,7 +4535,7 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes, ft
                 t = _BLINDER_PROTOCOL_REGISTRY[p][0]
                 if t == "udp":
                     total_workers += preset["udp"]
-                elif t == "tcp":
+                elif t in ("tcp", "tcp_vol"):
                     total_workers += preset["tcp"]
                 else:
                     total_workers += 1
