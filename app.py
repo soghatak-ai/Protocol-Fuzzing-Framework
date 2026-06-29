@@ -3850,9 +3850,11 @@ _BLINDER_PROTOCOL_REGISTRY = {
     "tacacs":  ("tcp",  49),   "ldap":    ("tcp",  389),
     "cifs":    ("tcp",  445),  "telnet":  ("tcp",  23),
     "icmp":    ("icmp", 0),
-    "http_clean":  ("tcp_vol", 80),
-    "rtsp_clean":  ("tcp_vol", 554),
-    "ftp_clean":   ("tcp_vol", 21),
+    "http_clean":   ("tcp_vol", 80),
+    "http_clean2":  ("tcp_vol", 80),
+    "http_clean3":  ("tcp_vol", 80),
+    "rtsp_clean":   ("tcp_vol", 554),
+    "ftp_clean":    ("tcp_vol", 21),
 }
 
 _BLINDER_INTENSITY = {

