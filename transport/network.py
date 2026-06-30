@@ -549,10 +549,13 @@ class LiveNetworkTransport:
             self._pressure_seg_queues[idx] = segs
             q = segs
 
+        if not q:
+            return True
+
+        seg = q.popleft()
         for _attempt in range(2):
             try:
                 sock = self._pressure_pool_sock(port, idx)
-                seg = q.popleft()
                 sock.sendall(seg)
 
                 if not q:
@@ -564,7 +567,6 @@ class LiveNetworkTransport:
                 return True
             except OSError:
                 self._close_pressure_sock(port, idx)
-                q.clear()
         return False
 
     def send_icmp(self, icmp_payload: bytes):
