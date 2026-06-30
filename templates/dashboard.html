@@ -1815,6 +1815,7 @@
                         <button class="ma-select-btn" onclick="maSelectUDP()">UDP</button>
                         <button class="ma-select-btn" onclick="maSelectTCP()">TCP</button>
                         <button class="ma-select-btn" onclick="maSelectClean()" style="color:#a855f7;border-color:#a855f7">Clean</button>
+                        <button class="ma-select-btn" onclick="maSelectMax()" style="color:#ef4444;border-color:#ef4444;font-weight:700">MAX</button>
                     </div>
                     <div class="ma-proto-grid" id="ma-proto-grid">
                         <div style="color:var(--text-muted);font-size:12px;">Loading...</div>
@@ -3863,6 +3864,7 @@
         function maSelectUDP() { maProtocols.forEach(p => { const cb = document.getElementById('ma-p-'+p.name); if(cb) cb.checked = (p.transport === 'udp'); }); }
         function maSelectTCP() { maProtocols.forEach(p => { const cb = document.getElementById('ma-p-'+p.name); if(cb) cb.checked = (p.transport === 'tcp'); }); }
         function maSelectClean() { maProtocols.forEach(p => { const cb = document.getElementById('ma-p-'+p.name); if(cb) cb.checked = (p.transport === 'tcp_vol'); }); }
+        function maSelectMax() { maProtocols.forEach(p => { const cb = document.getElementById('ma-p-'+p.name); if(cb) cb.checked = true; }); }
 
         async function maStart() {
             const targetIp = document.getElementById('ma-target-ip').value.trim();

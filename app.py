@@ -4549,10 +4549,6 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes, ft
         # Resolve script directory
         script_dir = os.path.dirname(os.path.abspath(__file__))
 
-        # Fraction of flood payloads that carry the detection string (EICAR
-        # content) so IPS alerts scale with packet volume.  Set 0 to disable.
-        inject_rate = 0.1
-
         # Launch flood sub-processes directly on this machine
         stats_files = []
         _multiattack_procs = []
@@ -4564,8 +4560,7 @@ def _multiattack_worker(target_ip, protocols, duration, intensity, processes, ft
                 f"cd {script_dir} && python3 Testing/snort_blinder.py "
                 f"--flood --target {target_ip} --duration {duration} "
                 f"--phase-duration 15 --intensity {intensity} "
-                f"--protocols {proto_list} --stats-file {sf} "
-                f"--inject-rate {inject_rate}"
+                f"--protocols {proto_list} --stats-file {sf}"
             )
             proc = _subprocess.Popen(
                 ["bash", "-c", flood_cmd],
