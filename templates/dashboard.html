@@ -1398,7 +1398,7 @@
                     <div class="config-grid">
                         <div class="config-field">
                             <label class="config-label" for="cfg-server-ip">Server IP *</label>
-                            <input class="config-input" id="cfg-server-ip" type="text" placeholder="192.168.1.100">
+                            <input class="config-input" id="cfg-server-ip" type="text" placeholder="192.168.1.100" value="192.168.42.100">
                         </div>
                         <div class="config-field">
                             <label class="config-label" for="cfg-server-port">Server Port</label>
@@ -1406,7 +1406,7 @@
                         </div>
                         <div class="config-field">
                             <label class="config-label" for="cfg-interface">Network Interface</label>
-                            <input class="config-input" id="cfg-interface" type="text" placeholder="eth0 / en0 (optional)">
+                            <input class="config-input" id="cfg-interface" type="text" placeholder="eth0 / en0 (optional)" value="en1">
                         </div>
                     </div>
 
@@ -1414,7 +1414,7 @@
                     <div class="config-grid">
                         <div class="config-field">
                             <label class="config-label" for="cfg-ftd-ip">FTD Host IP</label>
-                            <input class="config-input" id="cfg-ftd-ip" type="text" placeholder="10.0.0.1">
+                            <input class="config-input" id="cfg-ftd-ip" type="text" placeholder="10.0.0.1" value="10.83.61.4">
                         </div>
                         <div class="config-field">
                             <label class="config-label" for="cfg-ftd-user">SSH User</label>
@@ -1426,11 +1426,11 @@
                         </div>
                         <div class="config-field">
                             <label class="config-label" for="cfg-ftd-ssh-port">SSH Port</label>
-                            <input class="config-input" id="cfg-ftd-ssh-port" type="number" placeholder="22" value="22">
+                            <input class="config-input" id="cfg-ftd-ssh-port" type="number" placeholder="22" value="45422">
                         </div>
                         <div class="config-field">
                             <label class="config-label" for="cfg-snort-pid">Snort PID on FTD</label>
-                            <input class="config-input" id="cfg-snort-pid" type="number" placeholder="e.g. 12345">
+                            <input class="config-input" id="cfg-snort-pid" type="number" placeholder="e.g. 12345" value="16192">
                         </div>
                     </div>
 
@@ -1825,11 +1825,11 @@
                     <div class="ma-section-title">Parameters</div>
                     <div class="ma-param-row">
                         <label>Target IP</label>
-                        <input type="text" id="ma-target-ip" placeholder="e.g. 172.20.0.254" value="">
+                        <input type="text" id="ma-target-ip" placeholder="e.g. 172.20.0.254" value="192.168.42.100">
                     </div>
                     <div class="ma-param-row">
                         <label>Duration</label>
-                        <input type="number" id="ma-duration" value="60" min="10" max="600" step="10">
+                        <input type="number" id="ma-duration" value="100" min="10" max="600" step="10">
                         <span style="font-size:11px;color:var(--text-muted);">sec</span>
                     </div>
                     <div class="ma-param-row">
@@ -1837,23 +1837,23 @@
                         <select id="ma-intensity">
                             <option value="1">1 - Normal</option>
                             <option value="2">2 - Elevated</option>
-                            <option value="3" selected>3 - High</option>
+                            <option value="3">3 - High</option>
                             <option value="4">4 - Extreme</option>
-                            <option value="5">5 - Maximum</option>
+                            <option value="5" selected>5 - Maximum</option>
                         </select>
                     </div>
                     <div class="ma-param-row">
                         <label>Processes</label>
-                        <input type="number" id="ma-processes" value="6" min="1" max="50">
+                        <input type="number" id="ma-processes" value="12" min="1" max="50">
                     </div>
                     <div class="ma-section-title" style="margin-top:14px;">FTD Monitoring (SSH)</div>
                     <div class="ma-param-row">
                         <label>FTD IP</label>
-                        <input type="text" id="ma-ftd-ip" placeholder="e.g. 10.83.61.4">
+                        <input type="text" id="ma-ftd-ip" placeholder="e.g. 10.83.61.4" value="10.83.61.4">
                     </div>
                     <div class="ma-param-row">
                         <label>SSH Port</label>
-                        <input type="number" id="ma-ftd-port" value="22" min="1" max="65535">
+                        <input type="number" id="ma-ftd-port" value="45422" min="1" max="65535">
                     </div>
                     <div class="ma-param-row">
                         <label>Username</label>
