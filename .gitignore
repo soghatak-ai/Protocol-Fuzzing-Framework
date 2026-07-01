@@ -6,7 +6,9 @@ __pycache__/
 venv/
 target.pipe
 *.pptx
+!Protocol_Fuzzing_Framework_Updated.pptx
 generate_ppt.py
+update_ppt.py
 .env
 vuln_target/
 Testing/*
