@@ -32,12 +32,16 @@ DNS_DEFAULT_WEIGHTS = {
 FTP_STRATEGIES_LIST = [
     "cmd_overflow", "port_bomb", "pipelined_auth", "cwd_depth",
     "epsv_eprt_mix", "stray_commands", "boundary_port", "oversized_site",
+    "encoding_attack", "rest_overflow", "data_channel_confusion",
+    "feat_negotiate", "rest_data_reuse",
 ]
 
 FTP_DEFAULT_WEIGHTS = {
-    "cmd_overflow": 20, "port_bomb": 20, "pipelined_auth": 15,
-    "cwd_depth": 15, "epsv_eprt_mix": 10, "stray_commands": 10,
-    "boundary_port": 5, "oversized_site": 5,
+    "cmd_overflow": 18, "port_bomb": 18, "pipelined_auth": 12,
+    "cwd_depth": 12, "epsv_eprt_mix": 8, "stray_commands": 8,
+    "boundary_port": 4, "oversized_site": 4, "encoding_attack": 6,
+    "rest_overflow": 4, "data_channel_confusion": 4, "feat_negotiate": 2,
+    "rest_data_reuse": 10,
 }
 
 STRATEGY_DESCRIPTIONS = """
@@ -66,6 +70,11 @@ FTP STRATEGIES (used when fuzzing FTP inspectors):
 - stray_commands: Sends unexpected/invalid FTP commands mid-session
 - boundary_port: PORT commands with boundary values (0, 255, 65535)
 - oversized_site: Oversized SITE command arguments
+- encoding_attack: Null bytes, UTF-8 BOM, overlong UTF-8, backslash confusion in FTP stream
+- rest_overflow: REST command with boundary integer values (LLONG_MAX, negative, sequential overflow)
+- data_channel_confusion: Rapid PASV/PORT mode switching, simultaneous transfers, aborted transfers
+- feat_negotiate: AUTH TLS cleartext evasion, FEAT floods, OPTS overflow, rapid mode switching
+- rest_data_reuse: CSCwu90022 — REST offset reuse after ABOR, multi-channel race, offset accumulation without transfer
 """
 
 SYSTEM_PROMPT = """You are an expert security researcher specializing in memory corruption vulnerabilities in C/C++ network software.

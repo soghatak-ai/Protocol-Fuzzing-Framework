@@ -9,7 +9,9 @@ import platform
 from datetime import datetime
 import psutil
 from protocol.dns import DNSMessage, DNSHeader, DNSQuestion
-from protocol.ftp import FtpMutator, FTP_STRATEGY_LABELS
+from protocol.ftp import (FtpMutator, FTP_STRATEGY_LABELS,
+                          FTP_STRATEGIES as FTP_STRATEGY_NAMES,
+                          FTP_WEIGHTS as FTP_DEFAULT_WEIGHTS)
 from protocol.http import (HttpMutator, HTTP_STRATEGY_LABELS,
                            HTTP_STRATEGIES as HTTP_STRATEGY_NAMES,
                            HTTP_WEIGHTS as HTTP_DEFAULT_WEIGHTS,
@@ -98,14 +100,7 @@ DNS_STRATEGY_NAMES = [
 DNS_DEFAULT_WEIGHTS = [0.10, 0.14, 0.07, 0.06, 0.08, 0.04, 0.06, 0.05,
                        0.08, 0.07, 0.06, 0.00, 0.07, 0.06, 0.06]
 
-FTP_STRATEGY_NAMES = [
-    "cmd_overflow", "port_bomb", "pipelined_auth", "cwd_depth",
-    "epsv_eprt_mix", "stray_commands", "boundary_port", "oversized_site",
-    "encoding_attack", "rest_overflow", "data_channel_confusion", "feat_negotiate",
-]
-
-FTP_DEFAULT_WEIGHTS = [18, 18, 12, 12, 8, 8, 4, 4, 6, 4, 4, 2]
-
+# FTP_STRATEGY_NAMES / FTP_DEFAULT_WEIGHTS are imported from protocol.ftp
 # HTTP_STRATEGY_NAMES / HTTP_DEFAULT_WEIGHTS are imported from protocol.http
 # (single source of truth; includes both request- and response-side strategies).
 

